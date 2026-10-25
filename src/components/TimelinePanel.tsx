@@ -19,6 +19,7 @@ import {
   ZoomIn,
   ZoomOut,
   X,
+  Sparkles,
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { TimelineClip, TimelineTrack } from '../types/editor';
@@ -93,6 +94,7 @@ export const TimelinePanel: React.FC = () => {
     rippleCloseGaps,
     snapAllSubtitlesToClips,
     getTotalDuration,
+    setIsAutoAssemblyModalOpen,
   } = useEditorStore();
 
   const [marqueeBox, setMarqueeBox] = useState<{
@@ -793,6 +795,15 @@ export const TimelinePanel: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => setIsAutoAssemblyModalOpen(true)}
+              title="대본과 어울리는 영상 장면을 찾아 음성 길이에 맞춰 자동으로 V1/A1/C1 트랙을 조립합니다"
+              className="px-2.5 py-0.5 rounded bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-600 hover:to-indigo-600 text-white border border-purple-500/50 text-[10px] font-semibold flex items-center gap-1 transition shadow-xs"
+            >
+              <Sparkles className="w-3 h-3 text-purple-200" />
+              <span>AI B롤 컷편집</span>
+            </button>
+
             <button
               onClick={rippleCloseGaps}
               title="타임라인의 모든 트랙이 동시에 비어있는 빈 공간(간격)을 일괄 닫고 이어붙입니다 (오디오/비디오 싱크 완벽 보존)"

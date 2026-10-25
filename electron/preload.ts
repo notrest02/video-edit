@@ -49,4 +49,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('dialog:locateMedia', targetFileName),
   scanFolderForMatches: (folderPath: string, fileNames: string[]) =>
     ipcRenderer.invoke('media:scanFolderForMatches', folderPath, fileNames),
+  extractKeyframesForAi: (params: {
+    filePath: string;
+    intervalSec?: number;
+    maxFrames?: number;
+  }) => ipcRenderer.invoke('ai:extractKeyframesForAi', params),
+  testAiApiKey: (params: {
+    engine: 'gemini' | 'openai' | 'claude';
+    apiKey: string;
+    model?: string;
+  }) => ipcRenderer.invoke('ai:testApiKey', params),
 });

@@ -128,6 +128,33 @@ export interface SnapResultSummary {
   fps: number;
 }
 
+export interface AssemblyMatchedShot {
+  assetId?: string;
+  sourcePath: string;
+  sourceStart: number;
+  duration: number;
+  label?: string;
+  isFallback?: boolean;
+  isPlaceholder?: boolean;
+}
+
+export interface AssemblyMatchedSentence {
+  sentenceIndex: number;
+  text: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  shots: AssemblyMatchedShot[];
+}
+
+export interface AssemblySettings {
+  narrationTrackId: string;
+  sourceVideoTrackIds: string[];
+  shortageStrategy: 'montage-crosscut' | 'slow-motion' | 'hold';
+  missingStrategy: 'hero-shot' | 'empty-placeholder';
+  aiEngine: 'gemini' | 'openai' | 'claude' | 'local';
+}
+
 export interface SystemFontItem {
   label: string;
   value: string;
@@ -157,7 +184,7 @@ export interface ProjectFileData {
   autoSplitOnCaptionGenerate?: boolean;
   isQuickSplitMergeMode?: boolean;
   autoSyncSubtitleStyle?: boolean;
-  aiEngine?: 'local' | 'openai';
+  aiEngine?: 'gemini' | 'openai' | 'claude' | 'local';
   localWhisperModel?: string;
 }
 
@@ -229,6 +256,16 @@ declare global {
         folderPath: string,
         fileNames: string[]
       ) => Promise<Record<string, string>>;
+      extractKeyframesForAi?: (params: {
+        filePath: string;
+        intervalSec?: number;
+        maxFrames?: number;
+      }) => Promise<Array<{ time: number; base64: string }>>;
+      testAiApiKey?: (params: {
+        engine: 'gemini' | 'openai' | 'claude';
+        apiKey: string;
+        model?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
     };
   }
 }

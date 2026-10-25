@@ -1022,3 +1022,140 @@ ipcMain.handle('media:scanFolderForMatches', async (_event, folderPath: string, 
   }
   return matches;
 });
+
+// 10. AI Keyframe Extraction for Scene Understanding
+ipcMain.handle(
+  'ai:extractKeyframesForAi',
+  async (_event, params: { filePath: string; intervalSec?: number; maxFrames?: number }) => {
+    const { filePath, intervalSec = 2, maxFrames = 15 } = params;
+    if (!fs.existsSync(filePath)) return [];
+
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'agy-frames-'));
+    try {
+      let duration = 10;
+      try {
+        const info = await probeMediaFile(filePath);
+        duration = info.duration || 10;
+      } catch {
+        duration = 10;
+      }
+
+      const step = Math.max(1, Math.min(intervalSec, duration / maxFrames));
+      const timestamps: number[] = [];
+      for (let t = 0.5; t < duration && timestamps.length < maxFrames; t += step) {
+        timestamps.push(Number(t.toFixed(2)));
+      }
+      if (timestamps.length === 0) timestamps.push(0.5);
+
+      const frames: Array<{ time: number; base64: string }> = [];
+
+      await new Promise<void>((resolve) => {
+        ffmpeg(filePath)
+          .outputOptions([
+            `-vf fps=1/${step},scale=320:-1`,
+            '-q:v 4',
+            `-vframes ${maxFrames}`,
+          ])
+          .output(path.join(tempDir, 'frame_%03d.jpg'))
+          .on('end', () => resolve())
+          .on('error', (err) => {
+            console.warn('FFmpeg frame extraction warning:', err);
+            resolve();
+          })
+          .run();
+      });
+
+      const files = await fs.promises.readdir(tempDir);
+      files.sort();
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (!file.endsWith('.jpg')) continue;
+        const fullPath = path.join(tempDir, file);
+        const data = await fs.promises.readFile(fullPath);
+        const base64 = `data:image/jpeg;base64,${data.toString('base64')}`;
+        const time = timestamps[i] !== undefined ? timestamps[i] : Number((i * step).toFixed(2));
+        frames.push({ time, base64 });
+      }
+
+      return frames;
+    } finally {
+      fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+);
+
+// 11. AI API Key Connection Test (Gemini, OpenAI, Claude)
+ipcMain.handle(
+  'ai:testApiKey',
+  async (_event, params: { engine: 'gemini' | 'openai' | 'claude'; apiKey: string; model?: string }) => {
+    const { engine, apiKey, model } = params;
+    if (!apiKey || apiKey.trim().length === 0) {
+      return { success: false, error: 'API 키가 입력되지 않았습니다.' };
+    }
+
+    try {
+      if (engine === 'gemini') {
+        const targetModel = model || 'gemini-2.0-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey.trim()}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'ping' }] }],
+            generationConfig: { maxOutputTokens: 5 },
+          }),
+        });
+
+        if (res.ok) {
+          return { success: true };
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          const msg = (errData as any)?.error?.message || `HTTP ${res.status}`;
+          return { success: false, error: `Gemini API 오류: ${msg}` };
+        }
+      } else if (engine === 'openai') {
+        const url = 'https://api.openai.com/v1/models';
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${apiKey.trim()}` },
+        });
+
+        if (res.ok) {
+          return { success: true };
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          const msg = (errData as any)?.error?.message || `HTTP ${res.status}`;
+          return { success: false, error: `OpenAI API 오류: ${msg}` };
+        }
+      } else if (engine === 'claude') {
+        const url = 'https://api.anthropic.com/v1/messages';
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey.trim(),
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: model || 'claude-3-5-sonnet-20241022',
+            max_tokens: 5,
+            messages: [{ role: 'user', content: 'ping' }],
+          }),
+        });
+
+        if (res.ok) {
+          return { success: true };
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          const msg = (errData as any)?.error?.message || `HTTP ${res.status}`;
+          return { success: false, error: `Claude API 오류: ${msg}` };
+        }
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: `네트워크 연결 실패: ${err.message}` };
+    }
+  }
+);

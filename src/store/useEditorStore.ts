@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import {
   AlignedSubtitleItem,
+  AssemblyMatchedSentence,
+  AssemblySettings,
   EditorTool,
   MediaAsset,
   ProjectFileData,
@@ -56,9 +58,15 @@ interface EditorState {
   statusMessage: string | null;
 
   // AI Settings
-  aiEngine: 'local' | 'openai';
-  localWhisperModel: string;
+  aiEngine: 'gemini' | 'openai' | 'claude' | 'local';
+  geminiApiKey: string;
+  geminiModel: string;
   openAiApiKey: string;
+  openAiModel: string;
+  claudeApiKey: string;
+  claudeModel: string;
+  isAutoAssemblyModalOpen: boolean;
+  localWhisperModel: string;
   scriptText: string;
   captionLineMode: CaptionLineMode;
   captionMaxCharsPerLine: number;
@@ -97,9 +105,20 @@ interface EditorState {
   setActiveTool: (tool: EditorTool) => void;
   setSnapThresholdFrames: (frames: number) => void;
   setStatusMessage: (msg: string | null) => void;
-  setAiEngine: (engine: 'local' | 'openai') => void;
-  setLocalWhisperModel: (model: string) => void;
+  setAiEngine: (engine: 'gemini' | 'openai' | 'claude' | 'local') => void;
+  setGeminiApiKey: (key: string) => void;
+  setGeminiModel: (model: string) => void;
   setOpenAiApiKey: (key: string) => void;
+  setOpenAiModel: (model: string) => void;
+  setClaudeApiKey: (key: string) => void;
+  setClaudeModel: (model: string) => void;
+  setIsAutoAssemblyModalOpen: (open: boolean) => void;
+  applyAutoAssemblyToTimeline: (
+    matchedSentences: AssemblyMatchedSentence[],
+    narrationAudioClip: TimelineClip,
+    targetMode?: 'current-sequence' | 'new-sequence'
+  ) => void;
+  setLocalWhisperModel: (model: string) => void;
   setScriptText: (text: string) => void;
   setCaptionLineMode: (mode: CaptionLineMode) => void;
   setCaptionMaxCharsPerLine: (maxChars: number) => void;
@@ -379,9 +398,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
     statusMessage:
       '좌측 하단에서 [+ 새 시퀀스]를 만들거나, 미디어를 바로 타임라인으로 드래그하면 영상 규격에 맞는 시퀀스가 자동 생성됩니다.',
 
-    aiEngine: 'local',
-    localWhisperModel: 'Xenova/whisper-tiny',
+    aiEngine: (localStorage.getItem('agy_ai_engine') as any) || 'gemini',
+    geminiApiKey: localStorage.getItem('agy_gemini_key') || '',
+    geminiModel: localStorage.getItem('agy_gemini_model') || 'gemini-2.0-flash',
     openAiApiKey: localStorage.getItem('agy_openai_key') || '',
+    openAiModel: localStorage.getItem('agy_openai_model') || 'gpt-4o',
+    claudeApiKey: localStorage.getItem('agy_claude_key') || '',
+    claudeModel: localStorage.getItem('agy_claude_model') || 'claude-3-5-sonnet-20241022',
+    isAutoAssemblyModalOpen: false,
+    localWhisperModel: 'Xenova/whisper-tiny',
     scriptText: DEFAULT_SAMPLE_SCRIPT,
     captionLineMode: 'single-line',
     captionMaxCharsPerLine: 13,
@@ -795,12 +820,36 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setSnapThresholdFrames: (snapThresholdFrames) =>
       set({ snapThresholdFrames: Math.max(1, Math.min(30, snapThresholdFrames)) }),
     setStatusMessage: (statusMessage) => set({ statusMessage }),
-    setAiEngine: (aiEngine) => set({ aiEngine }),
-    setLocalWhisperModel: (localWhisperModel) => set({ localWhisperModel }),
+    setAiEngine: (aiEngine) => {
+      localStorage.setItem('agy_ai_engine', aiEngine);
+      set({ aiEngine });
+    },
+    setGeminiApiKey: (geminiApiKey) => {
+      localStorage.setItem('agy_gemini_key', geminiApiKey);
+      set({ geminiApiKey });
+    },
+    setGeminiModel: (geminiModel) => {
+      localStorage.setItem('agy_gemini_model', geminiModel);
+      set({ geminiModel });
+    },
     setOpenAiApiKey: (openAiApiKey) => {
       localStorage.setItem('agy_openai_key', openAiApiKey);
       set({ openAiApiKey });
     },
+    setOpenAiModel: (openAiModel) => {
+      localStorage.setItem('agy_openai_model', openAiModel);
+      set({ openAiModel });
+    },
+    setClaudeApiKey: (claudeApiKey) => {
+      localStorage.setItem('agy_claude_key', claudeApiKey);
+      set({ claudeApiKey });
+    },
+    setClaudeModel: (claudeModel) => {
+      localStorage.setItem('agy_claude_model', claudeModel);
+      set({ claudeModel });
+    },
+    setIsAutoAssemblyModalOpen: (isAutoAssemblyModalOpen) => set({ isAutoAssemblyModalOpen }),
+    setLocalWhisperModel: (localWhisperModel) => set({ localWhisperModel }),
     setScriptText: (scriptText) => set({ scriptText }),
     setCaptionLineMode: (captionLineMode) => set({ captionLineMode }),
     setCaptionMaxCharsPerLine: (captionMaxCharsPerLine) =>
@@ -2648,6 +2697,135 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (ok) count++;
       }
       return count;
+    },
+
+    applyAutoAssemblyToTimeline: (
+      matchedSentences,
+      narrationAudioClip,
+      targetMode = 'current-sequence'
+    ) => {
+      const { tracks, clips, sequence, sequences } = get();
+
+      // V1, A1, C1 트랙 검색
+      const v1 =
+        tracks.find((t) => t.code === 'V1' && t.type === 'video') ||
+        tracks.find((t) => t.type === 'video');
+      const a1 =
+        tracks.find((t) => t.code === 'A1' && t.type === 'audio') ||
+        tracks.find((t) => t.type === 'audio');
+      const c1 =
+        tracks.find((t) => t.code === 'C1' && t.type === 'text') ||
+        tracks.find((t) => t.type === 'text');
+
+      const v1TrackId = v1?.id || 'track-v1';
+      const a1TrackId = a1?.id || 'track-a1';
+      const c1TrackId = c1?.id || 'track-c1';
+
+      const newVideoClips: TimelineClip[] = [];
+      const newSubtitleClips: TimelineClip[] = [];
+
+      for (const sent of matchedSentences) {
+        let shotCursorTime = sent.startTime;
+
+        // C1 자막 클립 생성 (대본 문장과 100% 일치)
+        newSubtitleClips.push({
+          id: `sub_asm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          trackId: c1TrackId,
+          type: 'text',
+          name: sent.text,
+          text: sent.text,
+          startTime: Number(sent.startTime.toFixed(4)),
+          duration: Number(sent.duration.toFixed(4)),
+          sourceStart: 0,
+          volume: 1,
+          muted: false,
+          fontFamily: 'Pretendard, "Noto Sans KR", sans-serif',
+          fontSize: 48,
+          fontWeight: 'bold',
+          fontColor: '#ffffff',
+          strokeEnabled: true,
+          strokeColor: '#000000',
+          strokeWidth: 4,
+          positionX: 50,
+          positionY: 84,
+          snappedToClip: true,
+        });
+
+        // V1 영상 샷 클립들 배치
+        for (const shot of sent.shots) {
+          if (shot.isPlaceholder) {
+            // 플레이스홀더: 빈 공간으로 유지 (타임라인에 갭으로 비워둠)
+            shotCursorTime += shot.duration;
+            continue;
+          }
+
+          newVideoClips.push({
+            id: `vid_asm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            trackId: v1TrackId,
+            type: 'video',
+            name: shot.label || shot.sourcePath.split(/[/\\]/).pop() || 'B롤 컷',
+            startTime: Number(shotCursorTime.toFixed(4)),
+            duration: Number(shot.duration.toFixed(4)),
+            sourceStart: Number(shot.sourceStart.toFixed(4)),
+            sourcePath: shot.sourcePath,
+            assetId: shot.assetId,
+            volume: 0,
+            muted: true, // 나레이션이 주 음성이므로 B롤은 음소거
+          });
+
+          shotCursorTime += shot.duration;
+        }
+      }
+
+      // A1 트랙에 나레이션 음성 클립 배치
+      const narrationOnA1: TimelineClip = {
+        ...narrationAudioClip,
+        id: `aud_narration_${Date.now()}`,
+        trackId: a1TrackId,
+        volume: 1,
+        muted: false,
+      };
+
+      if (targetMode === 'new-sequence') {
+        const newSeqId = `seq_ai_${Date.now()}`;
+        const newSeqItem: SequenceItem = {
+          id: newSeqId,
+          name: `AI 자동 컷편집본 (${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })})`,
+          width: sequence.width || 1920,
+          height: sequence.height || 1080,
+          fps: sequence.fps || 30,
+          fitMode: sequence.fitMode || 'contain',
+          isCustom: true,
+          tracks: JSON.parse(JSON.stringify(tracks)),
+          clips: [narrationOnA1, ...newVideoClips, ...newSubtitleClips],
+          currentTime: 0,
+        };
+
+        set((state) => ({
+          sequences: [...state.sequences, newSeqItem],
+          openSequenceIds: [...state.openSequenceIds, newSeqId],
+          activeSequenceId: newSeqId,
+          tracks: newSeqItem.tracks,
+          clips: newSeqItem.clips,
+          currentTime: 0,
+          isDirty: true,
+          statusMessage: `AI 자동 컷편집이 새 시퀀스로 완성되었습니다! (영상 컷 ${newVideoClips.length}개, 자막 ${newSubtitleClips.length}개)`,
+        }));
+      } else {
+        // 현재 시퀀스에 적용: V1 및 C1 기존 클립 대체, A1에 나레이션 배치
+        const remainingClips = clips.filter(
+          (c) => c.trackId !== v1TrackId && c.trackId !== c1TrackId && c.trackId !== a1TrackId
+        );
+        const finalClips = [...remainingClips, narrationOnA1, ...newVideoClips, ...newSubtitleClips];
+
+        set({
+          clips: finalClips,
+          sequences: syncActiveSequenceData(tracks, finalClips),
+          currentTime: 0,
+          isDirty: true,
+          statusMessage: `AI 자동 컷편집이 현재 타임라인에 적용되었습니다! (영상 컷 ${newVideoClips.length}개, 자막 ${newSubtitleClips.length}개)`,
+        });
+      }
     },
   };
 });

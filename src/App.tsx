@@ -7,6 +7,7 @@ import { ProjectMediaBin } from './components/ProjectMediaBin';
 import { TimelinePanel } from './components/TimelinePanel';
 import { SequenceSettingsModal } from './components/SequenceSettingsModal';
 import { RelinkMediaModal } from './components/RelinkMediaModal';
+import { AutoBrollAssemblyModal } from './components/AutoBrollAssemblyModal';
 import { useEditorStore } from './store/useEditorStore';
 
 export const App: React.FC = () => {
@@ -157,6 +158,9 @@ export const App: React.FC = () => {
 
       {/* 누락 미디어 재연결 모달 (Premiere Pro Link Media) */}
       <RelinkMediaModal />
+
+      {/* AI 대본 기반 B롤 자동 컷편집 & 타임라인 어셈블리 모달 */}
+      <AutoBrollAssemblyModal />
     </div>
   );
 };

@@ -11,6 +11,7 @@ import {
   Save,
   FolderOpen,
   FilePlus,
+  Sparkles,
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
@@ -42,6 +43,7 @@ export const TopHeader: React.FC = () => {
     snapAllSubtitlesToClips,
     getTotalDuration,
     setStatusMessage,
+    setIsAutoAssemblyModalOpen,
   } = useEditorStore();
 
   useEffect(() => {
@@ -267,6 +269,14 @@ export const TopHeader: React.FC = () => {
 
       {/* 우측: 빠른 클립-자막 맞춤 & 워크스페이스/내보내기 */}
       <div className="flex items-center gap-2.5">
+        <button
+          onClick={() => setIsAutoAssemblyModalOpen(true)}
+          className="px-2.5 py-1 rounded bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition"
+        >
+          <Sparkles className="w-3 h-3 text-purple-200" />
+          AI B롤 컷편집
+        </button>
+
         <button
           onClick={() => snapAllSubtitlesToClips()}
           className="px-2.5 py-1 rounded bg-[#262626] hover:bg-[#333333] border border-[#3e3e3e] text-[#f5a623] text-[11px] font-semibold flex items-center gap-1 transition"
