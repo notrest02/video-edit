@@ -21,18 +21,31 @@
   ],
   "win": {
     "icon": "build/icon.ico",
+    "requestedExecutionLevel": "asInvoker",
+    "signtoolOptions": {
+      "certificateFile": "build/cert.pfx",
+      "certificatePassword": "antigravity123"
+    },
     "target": [
       {
         "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      },
+      {
+        "target": "zip",
         "arch": ["x64"]
       }
     ],
     "executableName": "AntigravityVideoEditor"
   },
   "nsis": {
-    "oneClick": false,
+    "oneClick": true,
     "perMachine": false,
-    "allowToChangeInstallationDirectory": true,
+    "allowElevation": false,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
     "shortcutName": "Antigravity Video Editor",
@@ -40,5 +53,9 @@
     "installerIcon": "build/icon.ico",
     "uninstallerIcon": "build/icon.ico",
     "installerHeaderIcon": "build/icon.ico"
+  },
+  "portable": {
+    "artifactName": "Antigravity Video Editor Portable ${version}.${ext}",
+    "requestExecutionLevel": "user"
   }
 }
