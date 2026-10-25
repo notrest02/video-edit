@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="ko" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Studio - 단축키 치트시트 가이드</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+    * { font-family: 'Pretendard', sans-serif; }
+    kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      height: 28px;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #ffffff;
+      background: linear-gradient(180deg, #2c2f38 0%, #1e2026 100%);
+      border: 1px solid #4a5060;
+      border-bottom: 2px solid #14161a;
+      border-radius: 6px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+  </style>
+</head>
+<body class="bg-[#0f1117] text-[#e0e2ec] min-h-screen p-6 md:p-10">
+  <div class="max-w-5xl mx-auto space-y-8">
+    
+    <!-- 상단 헤더 -->
+    <header class="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-[#252836] gap-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="px-2.5 py-1 rounded-md bg-indigo-600/20 text-indigo-400 text-xs font-semibold border border-indigo-500/30">QUICK REFERENCE</span>
+          <span class="text-xs text-[#82889e]">v1.0.0</span>
+        </div>
+        <h1 class="text-2xl md:text-3xl font-extrabold text-white mt-1.5 tracking-tight flex items-center gap-2.5">
+          🎬 안티그래비티 편집기 단축키 치트시트
+        </h1>
+        <p class="text-sm text-[#9298af] mt-1">
+          마우스 손을 떼지 않고 초고속으로 편집할 수 있는 필수 단축키 모음입니다. (한글 입력 상태에서도 100% 동작)
+        </p>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <button onclick="window.print()" class="px-4 py-2 rounded-lg bg-[#1f222e] hover:bg-[#2c3142] border border-[#373c4f] text-xs font-semibold text-white transition flex items-center gap-1.5 shadow-sm">
+          🖨️ 인쇄 / PDF 저장
+        </button>
+      </div>
+    </header>
+
+    <!-- 그리드 섹션 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+      <!-- 1. 컷편집 & 타임라인 툴 -->
+      <div class="bg-[#161822] border border-[#262a3b] rounded-xl p-5 shadow-lg space-y-4">
+        <div class="flex items-center gap-2 pb-3 border-b border-[#242838]">
+          <span class="text-lg">✂️</span>
+          <h2 class="text-base font-bold text-white">컷편집 &amp; 타임라인 툴</h2>
+        </div>
+
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">인디케이터 클립 자르기 (분할)</div>
+              <div class="text-xs text-[#8a91a8]">재생 헤드 위치의 클립을 즉시 컷팅</div>
+            </div>
+            <kbd>S</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">면도칼 툴 (Razor)</div>
+              <div class="text-xs text-[#8a91a8]">클릭한 위치를 바로 자르는 칼 툴로 전환</div>
+            </div>
+            <kbd>C</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">선택 툴 (Selection)</div>
+              <div class="text-xs text-[#8a91a8]">기본 이동 / 트리밍 마우스 모드로 복귀</div>
+            </div>
+            <kbd>V</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">선택 클립 삭제</div>
+              <div class="text-xs text-[#8a91a8]">단일 또는 다중 선택된 클립 일괄 삭제</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Delete</kbd>
+              <span class="text-xs text-[#626880]">또는</span>
+              <kbd>Backspace</kbd>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. 재생 및 정밀 프레임 이동 -->
+      <div class="bg-[#161822] border border-[#262a3b] rounded-xl p-5 shadow-lg space-y-4">
+        <div class="flex items-center gap-2 pb-3 border-b border-[#242838]">
+          <span class="text-lg">⏯️</span>
+          <h2 class="text-base font-bold text-white">재생 &amp; 프레임 정밀 이동</h2>
+        </div>
+
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">재생 / 일시정지 (Play / Pause)</div>
+              <div class="text-xs text-[#8a91a8]">미리보기 화면 재생 또는 일시정지</div>
+            </div>
+            <kbd class="px-4">Space</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">1프레임 뒤로 이동</div>
+              <div class="text-xs text-[#8a91a8]">정확히 1프레임(1/30초) 단위 이전 탐색</div>
+            </div>
+            <kbd>←</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">1프레임 앞으로 이동</div>
+              <div class="text-xs text-[#8a91a8]">정확히 1프레임(1/30초) 단위 다음 탐색</div>
+            </div>
+            <kbd>→</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">타임라인 간격 일괄 닫기</div>
+              <div class="text-xs text-[#8a91a8]">모든 트랙의 공통 빈틈을 싱크 보존하며 닫기</div>
+            </div>
+            <span class="text-xs font-semibold text-sky-400 bg-sky-950/40 border border-sky-800 px-2 py-1 rounded">
+              상단 [간격 일괄 닫기] 버튼
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. 초고속 자막 쪼개기 & 합치기 (Vrew 모드) -->
+      <div class="bg-[#161822] border border-[#262a3b] rounded-xl p-5 shadow-lg space-y-4">
+        <div class="flex items-center gap-2 pb-3 border-b border-[#242838]">
+          <span class="text-lg">💬</span>
+          <h2 class="text-base font-bold text-white">자막 텍스트 빠른 편집 (Vrew 스타일)</h2>
+        </div>
+
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">커서 위치에서 자막 쪼개기</div>
+              <div class="text-xs text-[#8a91a8]">커서 기준으로 문장을 즉시 두 개로 분할</div>
+            </div>
+            <kbd>Enter</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">앞 자막과 즉시 합치기</div>
+              <div class="text-xs text-[#8a91a8]">현재 자막을 바로 앞 자막 클립과 하나로 병합</div>
+            </div>
+            <kbd>Backspace</kbd>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">뒤 자막과 즉시 합치기</div>
+              <div class="text-xs text-[#8a91a8]">현재 자막을 바로 뒤 자막 클립과 하나로 병합</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Shift</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>Backspace</kbd>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. 프로젝트 파일 & 작업 히스토리 -->
+      <div class="bg-[#161822] border border-[#262a3b] rounded-xl p-5 shadow-lg space-y-4">
+        <div class="flex items-center gap-2 pb-3 border-b border-[#242838]">
+          <span class="text-lg">💾</span>
+          <h2 class="text-base font-bold text-white">프로젝트 파일 &amp; 히스토리</h2>
+        </div>
+
+        <div class="space-y-3">
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">프로젝트 저장</div>
+              <div class="text-xs text-[#8a91a8]">.agproj 파일로 현재 상태 저장</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Ctrl</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>S</kbd>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">다른 이름으로 저장</div>
+              <div class="text-xs text-[#8a91a8]">새 파일 이름 및 경로 지정 저장</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Ctrl</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>Shift</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>S</kbd>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">프로젝트 열기</div>
+              <div class="text-xs text-[#8a91a8]">이전 작업 프로젝트 불러오기</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Ctrl</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>O</kbd>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">실행 취소 (Undo)</div>
+              <div class="text-xs text-[#8a91a8]">이전 작업 단계로 되돌리기</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Ctrl</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>Z</kbd>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between p-2.5 rounded-lg bg-[#1b1e2c] border border-[#282d42]">
+            <div>
+              <div class="font-semibold text-sm text-white">다시 실행 (Redo)</div>
+              <div class="text-xs text-[#8a91a8]">취소했던 작업을 다시 실행</div>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd>Ctrl</kbd>
+              <span class="text-xs text-[#626880]">+</span>
+              <kbd>Y</kbd>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 5. 마우스 및 다중 클립 조작 팁 (전폭 카드) -->
+    <div class="bg-[#161822] border border-[#262a3b] rounded-xl p-5 shadow-lg space-y-4">
+      <div class="flex items-center gap-2 pb-3 border-b border-[#242838]">
+        <span class="text-lg">🖱️</span>
+        <h2 class="text-base font-bold text-white">마우스 &amp; 다중 클립 조작 팁</h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+        <div class="p-3.5 rounded-lg bg-[#1b1e2c] border border-[#282d42] space-y-1">
+          <div class="flex items-center gap-1.5 font-bold text-sm text-white">
+            <span>🟦 영역 드래그 (마퀴 박스)</span>
+          </div>
+          <p class="text-xs text-[#9298af] leading-relaxed">
+            타임라인의 빈 배경을 마우스로 드래그하면 사각형 박스가 생기며 닿은 모든 클립이 한 번에 선택됩니다.
+          </p>
+        </div>
+
+        <div class="p-3.5 rounded-lg bg-[#1b1e2c] border border-[#282d42] space-y-1">
+          <div class="flex items-center gap-1.5 font-bold text-sm text-white">
+            <span>➕ <kbd>Shift</kbd> + 클릭</span>
+          </div>
+          <p class="text-xs text-[#9298af] leading-relaxed">
+            원하는 클립들을 하나씩 클릭하여 선택 그룹에 추가하거나 이미 선택된 클립을 개별 해제합니다.
+          </p>
+        </div>
+
+        <div class="p-3.5 rounded-lg bg-[#1b1e2c] border border-[#282d42] space-y-1">
+          <div class="flex items-center gap-1.5 font-bold text-sm text-white">
+            <span>↔️ 다중 클립 동시 이동</span>
+          </div>
+          <p class="text-xs text-[#9298af] leading-relaxed">
+            여러 클립이 선택된 상태에서 아무 클립이나 잡고 드래그하면 모든 클립이 싱크를 완벽히 유지하며 함께 이동합니다.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <footer class="text-center text-xs text-[#626880] pt-4">
+      Antigravity Studio Desktop Video Editor • 단축키 가이드
+    </footer>
+
+  </div>
+</body>
+</html>
