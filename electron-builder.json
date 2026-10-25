@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
+  "appId": "com.antigravity.videoeditor",
+  "productName": "Antigravity Video Editor",
+  "copyright": "Copyright © 2026 Antigravity",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "node_modules/ffmpeg-static/**/*",
+    "node_modules/ffprobe-static/**/*",
+    "node_modules/fluent-ffmpeg/**/*",
+    "package.json"
+  ],
+  "asar": true,
+  "asarUnpack": [
+    "**/node_modules/ffmpeg-static/**",
+    "**/node_modules/ffprobe-static/**"
+  ],
+  "win": {
+    "icon": "build/icon.ico",
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "executableName": "AntigravityVideoEditor"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Antigravity Video Editor",
+    "uninstallDisplayName": "Antigravity Video Editor",
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
+    "installerHeaderIcon": "build/icon.ico"
+  }
+}
