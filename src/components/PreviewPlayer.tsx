@@ -14,6 +14,7 @@ import {
 import { useEditorStore } from '../store/useEditorStore';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { splitSentenceIntoNaturalChunks } from '../utils/scriptAligner';
+import { TimelineClip } from '../types/editor';
 
 export const PreviewPlayer: React.FC = () => {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
@@ -23,6 +24,8 @@ export const PreviewPlayer: React.FC = () => {
   const lastCursorPosRef = useRef<Record<string, number>>({});
   const lastVideoClipIdRef = useRef<string | null>(null);
   const lastAudioClipIdRef = useRef<string | null>(null);
+  const lastVideoSeekWallRef = useRef<number>(0);
+  const lastAudioSeekWallRef = useRef<number>(0);
   const [canvasWidth, setCanvasWidth] = useState<number>(360);
 
   const {
@@ -98,6 +101,17 @@ export const PreviewPlayer: React.FC = () => {
     (c) => currentTime >= c.startTime && currentTime < c.startTime + c.duration
   );
 
+  // 동일 트랙에서 자막이 겹치는 경우 선택된 자막 또는 트랙별 최우선 1개만 노출하여 화면 이중 텍스트 겹침 원천 방지
+  const displayedActiveSubtitles = React.useMemo(() => {
+    const trackMap = new Map<string, TimelineClip>();
+    for (const sub of activeSubtitles) {
+      if (!trackMap.has(sub.trackId) || sub.id === selectedClipId) {
+        trackMap.set(sub.trackId, sub);
+      }
+    }
+    return Array.from(trackMap.values());
+  }, [activeSubtitles, selectedClipId]);
+
   const primaryActiveSub =
     activeSubtitles.find((s) => s.id === selectedClipId) || activeSubtitles[0] || null;
   const activeSubIndex = primaryActiveSub
@@ -144,7 +158,7 @@ export const PreviewPlayer: React.FC = () => {
     return () => observer.disconnect();
   }, [sequence.width, sequence.height]);
 
-  // 재생 루프
+  // 재생 루프 (하드웨어 오디오/비디오 요소를 마스터 클럭으로 동기화하여 소리 끊김 및 누적 시크 오류 원천 차단)
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -155,7 +169,25 @@ export const PreviewPlayer: React.FC = () => {
       const dt = (now - prevWall) / 1000;
       prevWall = now;
 
-      const nextTime = useEditorStore.getState().currentTime + dt;
+      const audioEl = audioRef.current;
+      const videoEl = videoRef.current;
+      let nextTime: number;
+
+      // 1순위: 활성 오디오가 재생 중이면 오디오 하드웨어 클럭을 마스터 클럭으로 삼음!
+      if (audioEl && !audioEl.paused && !audioEl.ended && activeAudioClip) {
+        nextTime =
+          activeAudioClip.startTime + (audioEl.currentTime - activeAudioClip.sourceStart);
+      }
+      // 2순위: 비디오가 소리를 내며 재생 중이면 비디오 클럭 동기화
+      else if (videoEl && !videoEl.paused && !videoEl.ended && activeVideoClip && !videoEl.muted) {
+        nextTime =
+          activeVideoClip.startTime + (videoEl.currentTime - activeVideoClip.sourceStart);
+      }
+      // 3순위: 일반 소프트웨어 타이머
+      else {
+        nextTime = useEditorStore.getState().currentTime + dt;
+      }
+
       const maxDur = useEditorStore.getState().getTotalDuration();
 
       if (nextTime >= maxDur) {
@@ -164,53 +196,74 @@ export const PreviewPlayer: React.FC = () => {
         return;
       }
 
-      setCurrentTime(nextTime);
+      setCurrentTime(Number(nextTime.toFixed(4)));
       animId = requestAnimationFrame(tick);
     };
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, setCurrentTime, setIsPlaying]);
+  }, [isPlaying, setCurrentTime, setIsPlaying, activeAudioClip, activeVideoClip]);
 
   // 비디오 동기화
+  // 비디오 요소(V1/V2/V3) 동기화
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
     if (!activeVideoClip || !activeVideoClip.sourcePath) {
-      videoEl.pause();
+      if (!videoEl.paused) videoEl.pause();
       lastVideoClipIdRef.current = null;
       return;
     }
 
     const mediaUrl = `media://local?path=${encodeURIComponent(activeVideoClip.sourcePath)}`;
-    if (videoEl.dataset.srcPath !== activeVideoClip.sourcePath) {
+    const isNewSrc = videoEl.dataset.srcPath !== activeVideoClip.sourcePath;
+    if (isNewSrc) {
       videoEl.dataset.srcPath = activeVideoClip.sourcePath;
       videoEl.src = mediaUrl;
+      lastVideoClipIdRef.current = null;
     }
 
     const targetMediaTime =
       activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime);
 
-    // 음성이 A 트랙으로 분리된 경우 video 자체 소리는 끔
-    videoEl.volume = activeVideoClip.muted
+    // 음성이 A 트랙으로 분리되어 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
+    const hasActiveAudio = Boolean(activeAudioClip);
+    const hasAnyAudioOnTimeline = clips.some((c) => c.type === 'audio');
+    const shouldMuteVideo =
+      hasActiveAudio || (hasAnyAudioOnTimeline && Boolean(activeVideoClip.muted));
+    videoEl.muted = shouldMuteVideo;
+    videoEl.volume = shouldMuteVideo
       ? 0
-      : Math.min(1, Math.max(0, activeVideoClip.volume));
+      : Math.min(1, Math.max(0, activeVideoClip.volume ?? 1));
 
-    if (
-      lastVideoClipIdRef.current !== activeVideoClip.id ||
-      Math.abs(videoEl.currentTime - targetMediaTime) > (isPlaying ? 0.22 : 0.02)
-    ) {
+    const isClipChanged = lastVideoClipIdRef.current !== activeVideoClip.id;
+    const timeDiff = Math.abs(videoEl.currentTime - targetMediaTime);
+    const now = performance.now();
+    const canSeek = !videoEl.seeking && (now - lastVideoSeekWallRef.current > 350);
+
+    if (isClipChanged) {
       videoEl.currentTime = Math.max(0, targetMediaTime);
       lastVideoClipIdRef.current = activeVideoClip.id;
+      lastVideoSeekWallRef.current = now;
+    } else if (!isPlaying && timeDiff > 0.02) {
+      videoEl.currentTime = Math.max(0, targetMediaTime);
+      lastVideoSeekWallRef.current = now;
+    } else if (isPlaying && timeDiff > 0.6 && canSeek) {
+      videoEl.currentTime = Math.max(0, targetMediaTime);
+      lastVideoSeekWallRef.current = now;
     }
 
-    if (isPlaying && videoEl.paused) {
-      videoEl.play().catch(() => {});
-    } else if (!isPlaying && !videoEl.paused) {
-      videoEl.pause();
+    if (isPlaying) {
+      if (videoEl.paused) {
+        videoEl.play().catch(() => {});
+      }
+    } else {
+      if (!videoEl.paused) {
+        videoEl.pause();
+      }
     }
-  }, [activeVideoClip, currentTime, isPlaying]);
+  }, [activeVideoClip, currentTime, isPlaying, activeAudioClip, clips]);
 
   // 분리된 오디오(A1/A2/A3) 동기화
   useEffect(() => {
@@ -218,36 +271,54 @@ export const PreviewPlayer: React.FC = () => {
     if (!audioEl) return;
 
     if (!activeAudioClip || !activeAudioClip.sourcePath) {
-      audioEl.pause();
+      if (!audioEl.paused) audioEl.pause();
       lastAudioClipIdRef.current = null;
       return;
     }
 
     const mediaUrl = `media://local?path=${encodeURIComponent(activeAudioClip.sourcePath)}`;
-    if (audioEl.dataset.srcPath !== activeAudioClip.sourcePath) {
+    const isNewSrc = audioEl.dataset.srcPath !== activeAudioClip.sourcePath;
+    if (isNewSrc) {
       audioEl.dataset.srcPath = activeAudioClip.sourcePath;
       audioEl.src = mediaUrl;
+      lastAudioClipIdRef.current = null;
     }
 
     const targetAudioTime =
       activeAudioClip.sourceStart + (currentTime - activeAudioClip.startTime);
 
-    audioEl.volume = activeAudioClip.muted
-      ? 0
-      : Math.min(1, Math.max(0, activeAudioClip.volume));
+    const safeVol =
+      typeof activeAudioClip.volume === 'number' && !isNaN(activeAudioClip.volume)
+        ? activeAudioClip.volume
+        : 1.0;
+    audioEl.muted = Boolean(activeAudioClip.muted);
+    audioEl.volume = activeAudioClip.muted ? 0 : Math.min(1, Math.max(0, safeVol));
 
-    if (
-      lastAudioClipIdRef.current !== activeAudioClip.id ||
-      Math.abs(audioEl.currentTime - targetAudioTime) > (isPlaying ? 0.25 : 0.03)
-    ) {
+    const isClipChanged = lastAudioClipIdRef.current !== activeAudioClip.id;
+    const timeDiff = Math.abs(audioEl.currentTime - targetAudioTime);
+    const now = performance.now();
+    const canSeek = !audioEl.seeking && (now - lastAudioSeekWallRef.current > 350);
+
+    if (isClipChanged) {
       audioEl.currentTime = Math.max(0, targetAudioTime);
       lastAudioClipIdRef.current = activeAudioClip.id;
+      lastAudioSeekWallRef.current = now;
+    } else if (!isPlaying && timeDiff > 0.02) {
+      audioEl.currentTime = Math.max(0, targetAudioTime);
+      lastAudioSeekWallRef.current = now;
+    } else if (isPlaying && timeDiff > 0.8 && canSeek) {
+      audioEl.currentTime = Math.max(0, targetAudioTime);
+      lastAudioSeekWallRef.current = now;
     }
 
-    if (isPlaying && audioEl.paused) {
-      audioEl.play().catch(() => {});
-    } else if (!isPlaying && !audioEl.paused) {
-      audioEl.pause();
+    if (isPlaying) {
+      if (audioEl.paused) {
+        audioEl.play().catch(() => {});
+      }
+    } else {
+      if (!audioEl.paused) {
+        audioEl.pause();
+      }
     }
   }, [activeAudioClip, currentTime, isPlaying]);
 
@@ -370,6 +441,7 @@ export const PreviewPlayer: React.FC = () => {
         >
           <video
             ref={videoRef}
+            preload="auto"
             style={{
               transform: `scale(${(activeVideoClip?.scale ?? 100) / 100})`,
             }}
@@ -378,10 +450,10 @@ export const PreviewPlayer: React.FC = () => {
             } ${activeVideoClip ? 'block' : 'hidden'}`}
             playsInline
           />
-          <audio ref={audioRef} />
+          <audio ref={audioRef} preload="auto" />
 
           {/* 실시간 자막 오버레이: 실제 렌더링되는 화면 위에서 직접 클릭해 글자 수정 또는 Enter(나누기)/Backspace(합치기) 수행! */}
-          {activeSubtitles.map((sub) => {
+          {displayedActiveSubtitles.map((sub) => {
             const bgEnabled =
               sub.backgroundEnabled ??
               (sub.backgroundColor !== 'transparent' && (sub.backgroundOpacity ?? 0.65) > 0);

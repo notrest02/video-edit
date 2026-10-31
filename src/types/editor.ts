@@ -65,6 +65,7 @@ export interface TimelineClip {
   text?: string;
   originalSttText?: string; // 대본 교체 전 AI STT 원문 (비교 확인용)
   sentenceGroupId?: string; // 한줄/두줄 재구성 시 원본 문장 그룹 식별용 ID
+  voiceEndTime?: number;    // 무음 연장 전 실제 음성 발화가 끝나는 타임라인 절대 시간 (초)
 
   // 기본 폰트 및 텍스트 모양
   fontFamily?: string;
@@ -106,6 +107,7 @@ export interface WordTimestamp {
   text: string;
   start: number; // 타임라인 절대 시간 (초)
   end: number;   // 타임라인 절대 시간 (초)
+  voiceEnd?: number; // 무음 연장 전 실제 음성 발화가 끝나는 타임라인 절대 시간 (초)
 }
 
 export interface AlignedSubtitleItem {
@@ -157,7 +159,9 @@ export interface ProjectFileData {
   autoSplitOnCaptionGenerate?: boolean;
   isQuickSplitMergeMode?: boolean;
   autoSyncSubtitleStyle?: boolean;
-  aiEngine?: 'local' | 'openai';
+  aiEngine?: 'local' | 'openai' | 'gemini';
+  geminiApiKey?: string;
+  geminiModel?: string;
   localWhisperModel?: string;
 }
 
@@ -216,6 +220,17 @@ declare global {
         text: string;
         words?: Array<{ word: string; start: number; end: number }>;
         segments?: Array<{ text: string; start: number; end: number }>;
+      }>;
+      analyzeWithGemini: (params: {
+        filePath: string;
+        sourceStart: number;
+        duration: number;
+        apiKey: string;
+        model?: string;
+        scriptText?: string;
+        captionMaxChars?: number;
+      }) => Promise<{
+        captions: Array<{ text: string; start: number; end: number; speaker?: string }>;
       }>;
       createSampleVideo: () => Promise<Omit<MediaAsset, 'id'>>;
       exportVideo: (payload: unknown) => Promise<{ canceled: boolean; outputPath?: string }>;

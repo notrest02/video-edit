@@ -1,4 +1,5 @@
 import { AlignedSubtitleItem, TimelineClip, WordTimestamp } from '../types/editor';
+import { normalizeAudioPath, rendererWaveformCache } from '../components/AudioWaveformCanvas';
 
 const CHOSUNG = [
   'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
@@ -539,6 +540,18 @@ export function compareAndCorrectCaptionsWithScript(
       }
     }
 
+    // 유사도가 낮거나 탐색 실패 시 1단어로 축소되지 않고 targetCharCount에 맞춘 안전 토큰 할당
+    if (bestScore < 0.15) {
+      let accum = 0;
+      let safeEnd = tokenCursor + 1;
+      for (let tIdx = tokenCursor; tIdx < Math.max(tokenCursor + 1, maxSearchToken); tIdx++) {
+        accum += scriptTokens[tIdx].replace(/[\s.,?!~]/g, '').length;
+        safeEnd = tIdx + 1;
+        if (accum >= targetCharCount) break;
+      }
+      bestEndToken = safeEnd;
+    }
+
     const matchedScriptText = scriptTokens.slice(tokenCursor, bestEndToken).join(' ');
     const finalSim = computePhoneticSimilarity(before, matchedScriptText);
 
@@ -923,150 +936,311 @@ export function reformatSubtitleClipsByLineMode(
     return { updatedClips: allClips, beforeCount: 0, afterCount: 0 };
   }
 
-  interface TimedWordToken {
-    word: string;
-    start: number;
-    end: number;
-  }
+  // 1단계: 이미 한 번 이상 분할되었던 하위 자막 클립(동일 sentenceGroupId 공유)들을
+  // 먼저 원래의 부모 문장 단위(시작점, 종료점, 실제 발화 종료점 voiceEndTime, 전체 문장 텍스트)로 복원합니다.
+  // 이를 통해 [한 줄로 나뉘게] ↔ [화면 두 줄 이내로] 버튼이나 글자 수 슬라이더를
+  // 여러 번 반복 클릭/조절하더라도 타이밍 누적 오차나 파편화가 절대 발생하지 않습니다!
+  const parentSentenceClips: TimelineClip[] = [];
+  let gIdx = 0;
+  while (gIdx < textClips.length) {
+    const first = textClips[gIdx];
+    const grpId = first.sentenceGroupId;
+    if (!grpId) {
+      parentSentenceClips.push({
+        ...first,
+        sentenceGroupId: `sent_grp_${first.id}`,
+      });
+      gIdx++;
+      continue;
+    }
 
-  interface ContiguousSpeechBlock {
-    templateClip: TimelineClip;
-    groupId: string;
-    tokens: TimedWordToken[];
-  }
-
-  // 1단계: 각 자막 클립 내부 어절들의 타임스탬프를 계산하면서,
-  // 클립 간 간격이 0.8초 이하로 이어지는 연속 발화 구간은 하나의 어절 스트림(ContiguousSpeechBlock)으로 묶습니다.
-  // (이렇게 해야 이전 클립 끝에 남은 `이`, `절대 안`, `만족하고` 등이 다음 클립 첫 단어와 자연스럽게 결합됩니다!)
-  const blocks: ContiguousSpeechBlock[] = [];
-
-  for (const clip of textClips) {
-    const words = (clip.text || '')
-      .replace(/\r?\n/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .split(' ')
-      .filter(Boolean);
-
-    if (words.length === 0) continue;
-
-    const weights = words.map((w) => Math.max(1, w.replace(/\s+/g, '').length));
-    const totalWeight = weights.reduce((a, b) => a + b, 0);
-    const clipStart = clip.startTime;
-    const clipEnd = clip.startTime + clip.duration;
-    let cursor = clipStart;
-
-    const clipTokens: TimedWordToken[] = words.map((word, idx) => {
-      const isLast = idx === words.length - 1;
-      const wStart = idx === 0 ? clipStart : cursor;
-      const wEnd = isLast
-        ? clipEnd
-        : Math.min(clipEnd, wStart + (clip.duration * weights[idx]) / Math.max(1, totalWeight));
-      cursor = wEnd;
-      return { word, start: wStart, end: wEnd };
-    });
-
-    const prevBlock = blocks[blocks.length - 1];
-    const prevEnd = prevBlock?.tokens[prevBlock.tokens.length - 1]?.end ?? -999;
-    const gap = clipStart - prevEnd;
-
-    if (
-      prevBlock &&
-      prevBlock.templateClip.trackId === clip.trackId &&
-      gap <= 0.85
+    const groupMembers: TimelineClip[] = [first];
+    let nextIdx = gIdx + 1;
+    while (
+      nextIdx < textClips.length &&
+      textClips[nextIdx].trackId === first.trackId &&
+      textClips[nextIdx].sentenceGroupId === grpId &&
+      textClips[nextIdx].startTime <=
+        groupMembers[groupMembers.length - 1].startTime +
+          groupMembers[groupMembers.length - 1].duration +
+          0.25
     ) {
-      prevBlock.tokens.push(...clipTokens);
+      groupMembers.push(textClips[nextIdx]);
+      nextIdx++;
+    }
+
+    if (groupMembers.length === 1) {
+      parentSentenceClips.push(first);
     } else {
-      blocks.push({
-        templateClip: clip,
-        groupId: clip.sentenceGroupId || `cap_grp_${clip.id}`,
-        tokens: clipTokens,
+      const lastMember = groupMembers[groupMembers.length - 1];
+      const mergedStart = first.startTime;
+      const mergedEnd = Number((lastMember.startTime + lastMember.duration).toFixed(4));
+      const mergedDur = Number(Math.max(0.2, mergedEnd - mergedStart).toFixed(4));
+      const mergedVoiceEnd =
+        lastMember.voiceEndTime && lastMember.voiceEndTime > mergedStart + 0.15
+          ? Math.min(mergedEnd, lastMember.voiceEndTime)
+          : mergedEnd;
+      const mergedText = groupMembers
+        .map((m) => (m.text || '').replace(/\r?\n/g, ' ').trim())
+        .filter(Boolean)
+        .join(' ');
+
+      parentSentenceClips.push({
+        ...first,
+        id: first.id.replace(/_sub_\d+.*$/, ''),
+        name: mergedText.slice(0, 18),
+        text: mergedText,
+        startTime: Number(mergedStart.toFixed(4)),
+        duration: mergedDur,
+        voiceEndTime: Number(mergedVoiceEnd.toFixed(4)),
+        sentenceGroupId: grpId,
       });
     }
+
+    gIdx = nextIdx;
   }
 
   const reformattedTextClips: TimelineClip[] = [];
 
-  // 2단계: 각 연속 발화 블록의 전체 문장을 한국어 호흡·균형 분할기로 나눈 뒤,
-  // 각 줄에 속한 어절들의 원래 [첫 어절 시작 시간 ~ 끝 어절 종료 시간]을 그대로 매핑합니다.
-  for (const block of blocks) {
-    const fullText = block.tokens.map((t) => t.word).join(' ');
-    const oneLineChunks = splitSentenceIntoNaturalChunks(fullText, maxCharsPerLine);
+  // 발화 음절 가중치 계산 헬퍼 (한글 1.0, 숫자 1.2, 영문 0.7, 절 끝 쉼표/문장부호 호흡 0.55)
+  const computeSpokenWeight = (pieceText: string, isLastPiece: boolean): number => {
+    const clean = pieceText.replace(/\s+/g, '');
+    if (!clean) return 1;
+    let weight = 0;
+    for (const ch of clean) {
+      if (/[가-힣]/.test(ch)) weight += 1.0;
+      else if (/[0-9]/.test(ch)) weight += 1.2;
+      else if (/[a-zA-Z]/.test(ch)) weight += 0.7;
+      else if (/[.,?!~]/.test(ch)) weight += 0.25;
+      else weight += 0.5;
+    }
+    if (!isLastPiece && /[.,?!~]$/.test(clean)) {
+      weight += 0.45;
+    }
+    return Math.max(1, weight);
+  };
 
-    if (oneLineChunks.length === 0) continue;
+  for (let cIdx = 0; cIdx < parentSentenceClips.length; cIdx++) {
+    const clip = parentSentenceClips[cIdx];
+    const rawText = (clip.text || '').trim();
+    if (!rawText) continue;
 
-    // 모드 A ('single-line'): 모든 조각을 각각 1줄짜리 개별 자막 클립으로 분할
-    // 모드 B ('double-line'): 조각들을 2줄씩('\n'으로 결합) 묶되, 문장 종결 부호(. ? !) 뒤에서는 새 클립으로 분리
-    const finalClipTexts: string[] = [];
+    const groupId = clip.sentenceGroupId || `sent_grp_${clip.id}`;
+
+    // 해당 부모 문장 클립을 자연스러운 한국어 호흡·의미 단위로 분할
+    const naturalChunks = splitSentenceIntoNaturalChunks(
+      rawText.replace(/\r?\n/g, ' '),
+      maxCharsPerLine
+    );
+
+    const finalPieces: string[] = [];
     if (mode === 'single-line') {
-      finalClipTexts.push(...oneLineChunks);
+      finalPieces.push(...naturalChunks);
     } else {
       let i = 0;
-      while (i < oneLineChunks.length) {
-        const firstLine = oneLineChunks[i];
-        // 첫 줄 자체가 마침표/물음표/느낌표로 끝나는 완전한 문장이면 다음 문장과 섞지 않고 단독 표시하거나,
-        // 아직 문장이 이어지면 두 번째 줄과 결합
-        if (i + 1 < oneLineChunks.length && !/[.?!]$/.test(firstLine.trim())) {
-          finalClipTexts.push(`${firstLine}\n${oneLineChunks[i + 1]}`);
-          i += 2;
-        } else if (i + 1 < oneLineChunks.length) {
-          finalClipTexts.push(`${firstLine}\n${oneLineChunks[i + 1]}`);
+      while (i < naturalChunks.length) {
+        if (i + 1 < naturalChunks.length) {
+          finalPieces.push(`${naturalChunks[i]}\n${naturalChunks[i + 1]}`);
           i += 2;
         } else {
-          finalClipTexts.push(firstLine);
+          finalPieces.push(naturalChunks[i]);
           i += 1;
         }
       }
     }
 
-    let tokenCursor = 0;
-    const totalTokens = block.tokens.length;
+    if (finalPieces.length <= 1) {
+      const singleText = finalPieces[0] || rawText.replace(/\r?\n/g, ' ');
+      reformattedTextClips.push({
+        ...clip,
+        sentenceGroupId: groupId,
+        text: singleText,
+        name: singleText.replace(/\r?\n/g, ' ').slice(0, 18),
+      });
+      continue;
+    }
 
-    finalClipTexts.forEach((pieceText, idx) => {
-      const pieceWords = pieceText
-        .replace(/\r?\n/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .split(' ')
-        .filter(Boolean);
+    // 이 부모 문장 클립의 고유 시간 범위 [clipStart, clipEnd] 내에서
+    // 문장 끝 무음 홀드 구간(voiceEndTime ~ clipEnd)을 제외한 순수 발화 구간 [clipStart, effectiveVoiceEnd] 안에서만
+    // 앞 조각들의 분할 시점을 계산하고, 실제 오디오 파형(rendererWaveformCache)의 호흡 골짜기 직후 초록색 절벽(Rising Cliff)에 스냅합니다!
+    const clipStart = clip.startTime;
+    const clipDur = clip.duration;
+    const clipEnd = Number((clipStart + clipDur).toFixed(4));
 
-      const wordCount = Math.max(1, pieceWords.length);
-      const startTokenIdx = Math.min(tokenCursor, totalTokens - 1);
-      const isLastPiece = idx === finalClipTexts.length - 1;
-      const endTokenIdx = isLastPiece
-        ? totalTokens - 1
-        : Math.min(totalTokens - 1, startTokenIdx + wordCount - 1);
+    const pieceWeights = finalPieces.map((p, idx) =>
+      computeSpokenWeight(p, idx === finalPieces.length - 1)
+    );
+    const totalWeight = pieceWeights.reduce((a, b) => a + b, 0);
 
-      tokenCursor = endTokenIdx + 1;
+    // 연결된 오디오 클립의 시각 파형 조회
+    const refAudioClip = nonTextClips.find(
+      (c) =>
+        (c.type === 'audio' || c.type === 'video') &&
+        c.sourcePath &&
+        c.startTime <= clipStart + 0.5 &&
+        c.startTime + c.duration >= clipEnd - 0.5
+    );
+    const wfData = refAudioClip?.sourcePath
+      ? rendererWaveformCache.get(normalizeAudioPath(refAudioClip.sourcePath)) ||
+        rendererWaveformCache.get(refAudioClip.sourcePath)
+      : undefined;
 
-      const rawStart = block.tokens[startTokenIdx].start;
-      const rawEnd = block.tokens[endTokenIdx].end;
+    // 1순위: Whisper/파형 스냅 단계에서 기록된 정확한 실제 발화 종료 시점(voiceEndTime) 사용
+    // 2순위: 시각 파형 캐시(wfData)에서 clipEnd 직전의 무음 골짜기 시작점을 역추적하여 산출
+    let effectiveVoiceEnd =
+      clip.voiceEndTime &&
+      clip.voiceEndTime > clipStart + 0.3 &&
+      clip.voiceEndTime <= clipEnd
+        ? clip.voiceEndTime
+        : clipEnd;
 
-      const pieceStart = idx === 0 ? rawStart : roundFrameTime(rawStart, fps);
-      const pieceEnd = isLastPiece
-        ? rawEnd
-        : Math.max(pieceStart + frameSec * 2, roundFrameTime(rawEnd, fps));
-      const pieceDuration = Math.max(frameSec * 2, pieceEnd - pieceStart);
+    if (wfData && wfData.peaks.length > 0 && refAudioClip) {
+      const sps = wfData.samplesPerSec || 200;
+      const relEndSec = clipEnd - refAudioClip.startTime + refAudioClip.sourceStart;
+      const relStartSec = clipStart - refAudioClip.startTime + refAudioClip.sourceStart;
+      const endB = Math.min(wfData.peaks.length - 1, Math.floor(relEndSec * sps));
+      const startB = Math.max(0, Math.floor(relStartSec * sps));
+
+      // 만약 clipEnd 부근이 다음 문장 절벽에 맞닿아 있다면 먼저 직전 무음 골짜기로 들어간 뒤 마지막 유성음 끝점을 찾음
+      let searchB = endB;
+      const minWalkB = Math.max(startB + Math.floor(0.3 * sps), endB - Math.floor(0.45 * sps));
+      while (searchB > minWalkB && (wfData.peaks[searchB] || 0) >= 0.032) {
+        searchB--;
+      }
+      for (let b = searchB; b > startB + Math.floor(0.25 * sps); b--) {
+        if ((wfData.peaks[b] || 0) >= 0.035) {
+          const detectedVoiceEnd =
+            refAudioClip.startTime - refAudioClip.sourceStart + (b + 1) / sps;
+          if (detectedVoiceEnd > clipStart + 0.35 && detectedVoiceEnd <= clipEnd) {
+            // 저장된 voiceEndTime이 없거나 파형 역추적 값이 더 타이트할 때 반영
+            if (effectiveVoiceEnd >= clipEnd - 0.02 || Math.abs(detectedVoiceEnd - effectiveVoiceEnd) < 0.35) {
+              effectiveVoiceEnd = Math.min(effectiveVoiceEnd, detectedVoiceEnd);
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    const effectiveVoiceSpan = Math.max(0.3, effectiveVoiceEnd - clipStart);
+
+    let curStart = clipStart;
+    let accumWeight = 0;
+
+    finalPieces.forEach((piece, idx) => {
+      const isLast = idx === finalPieces.length - 1;
+      accumWeight += pieceWeights[idx];
+      let nextSplitTime = clipEnd;
+
+      if (!isLast) {
+        const remainingPieces = finalPieces.length - 1 - idx;
+        const minRemainSec = remainingPieces * 0.22;
+        const rawTargetTime = clipStart + (effectiveVoiceSpan * accumWeight) / totalWeight;
+        nextSplitTime = Math.max(
+          curStart + 0.22,
+          Math.min(effectiveVoiceEnd - minRemainSec, rawTargetTime)
+        );
+
+        // 파형 캐시가 있으면 rawTargetTime 주변(±0.35s)에서
+        // 직전 호흡/자음 골짜기(valleyAvg) 직후 초록색 파형이 솟구치는 절벽(Rising Cliff)에 5ms 정밀도로 스냅!
+        if (wfData && wfData.peaks.length > 0 && refAudioClip) {
+          const sps = wfData.samplesPerSec || 200;
+          const relTarget = nextSplitTime - refAudioClip.startTime + refAudioClip.sourceStart;
+          const minRel = Math.max(
+            curStart + 0.22 - refAudioClip.startTime + refAudioClip.sourceStart,
+            relTarget - 0.35
+          );
+          const maxRel = Math.min(
+            effectiveVoiceEnd - minRemainSec - refAudioClip.startTime + refAudioClip.sourceStart,
+            relTarget + 0.35
+          );
+          const minB = Math.max(4, Math.floor(minRel * sps));
+          const maxB = Math.min(wfData.peaks.length - 5, Math.floor(maxRel * sps));
+          const targetB = Math.floor(relTarget * sps);
+
+          if (maxB > minB + 4) {
+            let bestOnsetB = -1;
+            let bestScore = Infinity;
+
+            for (let b = minB; b <= maxB; b++) {
+              const pCur = wfData.peaks[b] || 0;
+              const pPrev = wfData.peaks[b - 1] || 0;
+              if (pCur < 0.032 || pCur < pPrev) continue;
+
+              const valleyAvg =
+                ((wfData.peaks[b - 4] || 0) +
+                  (wfData.peaks[b - 3] || 0) +
+                  (wfData.peaks[b - 2] || 0) +
+                  (wfData.peaks[b - 1] || 0)) /
+                4;
+              const voiceAvg =
+                ((wfData.peaks[b] || 0) +
+                  (wfData.peaks[b + 1] || 0) +
+                  (wfData.peaks[b + 2] || 0) +
+                  (wfData.peaks[b + 3] || 0)) /
+                4;
+
+              if (voiceAvg < 0.035 || voiceAvg < valleyAvg * 1.25) continue;
+
+              const distSec = Math.abs(b - targetB) / sps;
+              const score =
+                valleyAvg * 1.6 +
+                distSec * 0.16 -
+                Math.min(0.08, (voiceAvg - valleyAvg) * 0.15);
+
+              if (score < bestScore) {
+                bestScore = score;
+                bestOnsetB = b;
+              }
+            }
+
+            if (bestOnsetB !== -1) {
+              const snappedAbs =
+                refAudioClip.startTime - refAudioClip.sourceStart + bestOnsetB / sps;
+              if (
+                snappedAbs >= curStart + 0.2 &&
+                snappedAbs <= effectiveVoiceEnd - minRemainSec + 0.05
+              ) {
+                nextSplitTime = snappedAbs;
+              }
+            }
+          }
+        }
+      }
+
+      const roundedSplitTime = isLast ? clipEnd : Number(nextSplitTime.toFixed(4));
+      const roundedStart = Number(curStart.toFixed(4));
+      const pieceDur = Number(Math.max(frameSec * 3, roundedSplitTime - roundedStart).toFixed(4));
 
       reformattedTextClips.push({
-        ...block.templateClip,
+        ...clip,
         id:
           idx === 0
-            ? block.templateClip.id
-            : `${block.templateClip.id}_ln_${idx}_${Math.random().toString(36).slice(2, 5)}`,
-        sentenceGroupId: block.groupId,
-        name: pieceText.replace(/\r?\n/g, ' ').slice(0, 18),
-        text: pieceText,
-        startTime: Number(pieceStart.toFixed(5)),
-        duration: Number(pieceDuration.toFixed(5)),
+            ? clip.id
+            : `${clip.id}_sub_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+        sentenceGroupId: groupId,
+        name: piece.replace(/\r?\n/g, ' ').slice(0, 18),
+        text: piece,
+        startTime: roundedStart,
+        duration: pieceDur,
+        voiceEndTime: isLast
+          ? Number(Math.max(roundedStart + 0.15, effectiveVoiceEnd).toFixed(4))
+          : roundedSplitTime,
       });
+
+      curStart = roundedSplitTime;
     });
   }
 
+  const sanitized = sanitizeSubtitleClipsNonOverlapping(
+    [...nonTextClips, ...reformattedTextClips],
+    fps
+  );
+
   return {
-    updatedClips: [...nonTextClips, ...reformattedTextClips],
+    updatedClips: sanitized,
     beforeCount: textClips.length,
-    afterCount: reformattedTextClips.length,
+    afterCount: sanitized.filter((c) => c.type === 'text').length,
   };
 }
 
@@ -1121,14 +1295,22 @@ export function alignScriptLinesToExistingCaptions(
     const totalWeight = weights.reduce((a, b) => a + b, 0);
     const clipStart = clip.startTime;
     const clipEnd = clip.startTime + clip.duration;
+    // 문장 끝 묵음 연장(Gap-bridge) 구간을 제외한 실제 음성 발화 구간(voiceEndTime) 내에서 단어 시간 배분
+    const activeVoiceEnd =
+      clip.voiceEndTime &&
+      clip.voiceEndTime > clipStart + 0.15 &&
+      clip.voiceEndTime <= clipEnd
+        ? clip.voiceEndTime
+        : clipEnd;
+    const activeSpan = Math.max(0.15, activeVoiceEnd - clipStart);
     let cursor = clipStart;
 
     words.forEach((word, idx) => {
       const isLast = idx === words.length - 1;
       const wStart = idx === 0 ? clipStart : cursor;
       const wEnd = isLast
-        ? clipEnd
-        : Math.min(clipEnd, wStart + (clip.duration * weights[idx]) / Math.max(1, totalWeight));
+        ? activeVoiceEnd
+        : Math.min(activeVoiceEnd, wStart + (activeSpan * weights[idx]) / Math.max(1, totalWeight));
       cursor = wEnd;
       sttTokens.push({ word, start: wStart, end: wEnd });
     });
@@ -1159,8 +1341,9 @@ export function alignScriptLinesToExistingCaptions(
 
     if (tokenCursor >= sttTokens.length) {
       const lastClip = newTextClips[newTextClips.length - 1];
-      const fallbackStart = lastClip ? lastClip.startTime + lastClip.duration : template.startTime;
-      const fallbackDur = Math.max(0.6, frameSec * 15);
+      const fallbackStart = lastClip ? lastClip.startTime + lastClip.duration + frameSec : template.startTime;
+      const lineCharLen = Math.max(1, scriptLine.replace(/[\s.,?!~]/g, '').length);
+      const fallbackDur = Number(Math.max(0.8, Math.min(5.0, lineCharLen * 0.18)).toFixed(5));
       const clipId = `sub_sc_${Date.now()}_${i}`;
       newTextClips.push({
         ...template,
@@ -1168,7 +1351,7 @@ export function alignScriptLinesToExistingCaptions(
         name: scriptLine.slice(0, 18),
         text: scriptLine,
         startTime: Number(fallbackStart.toFixed(5)),
-        duration: Number(fallbackDur.toFixed(5)),
+        duration: fallbackDur,
       });
       diffs.push({
         clipId,
@@ -1184,12 +1367,45 @@ export function alignScriptLinesToExistingCaptions(
     }
 
     if (isLastLine) {
+      const lineCharLen = Math.max(1, scriptLine.replace(/[\s.,?!~]/g, '').length);
+      const estLineDur = Math.max(0.85, Math.min(8.0, lineCharLen * 0.18));
+
       const sliceTokens = sttTokens.slice(tokenCursor);
-      const beforeStt = sliceTokens.map((t) => t.word).join(' ');
-      const startT = sliceTokens[0].start;
-      const endT = Math.max(startT + frameSec * 2, sliceTokens[sliceTokens.length - 1].end);
+      const prevClip = newTextClips[newTextClips.length - 1];
+      let startT = roundFrameTime(sliceTokens[0].start, fps);
+      if (prevClip && startT < prevClip.startTime + frameSec * 3) {
+        startT = Number((prevClip.startTime + prevClip.duration + frameSec).toFixed(5));
+      }
+
+      // 만약 남은 STT 토큰들이 이 줄의 실제 발화 시간보다 지나치게 길다면(대본 뒤에 다른 음성이 남아있거나 1줄만 입력된 경우),
+      // 발화 글자 수에 비례하는 적정 토큰까지만 매칭하여 50초짜리 단일 거대 클립으로 팽창하지 않도록 안전하게 제한합니다.
+      let bestEndT = roundFrameTime(sliceTokens[sliceTokens.length - 1].end, fps);
+      let matchedSlice = sliceTokens;
+
+      if (bestEndT - startT > estLineDur * 2.2 && sliceTokens.length > 2) {
+        let accumChars = 0;
+        let cutIdx = sliceTokens.length - 1;
+        for (let tIdx = 0; tIdx < sliceTokens.length; tIdx++) {
+          accumChars += sliceTokens[tIdx].word.replace(/[\s.,?!~]/g, '').length;
+          if (accumChars >= lineCharLen) {
+            cutIdx = tIdx;
+            break;
+          }
+        }
+        matchedSlice = sliceTokens.slice(0, cutIdx + 1);
+        bestEndT = roundFrameTime(matchedSlice[matchedSlice.length - 1].end, fps);
+      }
+
+      const beforeStt = matchedSlice.map((t) => t.word).join(' ');
+      const endT = Math.max(startT + frameSec * 3, Math.min(startT + estLineDur * 2.2, bestEndT));
       const clipId = `sub_sc_${Date.now()}_${i}`;
       const sim = computePhoneticSimilarity(beforeStt, scriptLine);
+
+      if (prevClip && prevClip.startTime + prevClip.duration > startT) {
+        prevClip.duration = Number(
+          Math.max(frameSec * 3, startT - prevClip.startTime - frameSec).toFixed(5)
+        );
+      }
 
       newTextClips.push({
         ...template,
@@ -1214,8 +1430,9 @@ export function alignScriptLinesToExistingCaptions(
       break;
     }
 
-    // 현재 대본 줄의 글자 비율에 해당하는 STT 어절 범위를 탐색하며 한글 자모 발음 유사도 최적점 선택
-    const lineCharLen = Math.max(1, scriptLine.replace(/\s+/g, '').length);
+    // 현재 대본 줄의 글자 수 및 권장 발화 시간 (한국어 기준 글자당 약 0.17초, 최소 0.85초)
+    const lineCharLen = Math.max(1, scriptLine.replace(/[\s.,?!~]/g, '').length);
+    const minLineDuration = Math.max(0.85, Math.min(6.5, lineCharLen * 0.17));
     const targetSttCharLen = Math.max(
       1,
       Math.round((lineCharLen / totalScriptChars) * totalSttChars)
@@ -1223,10 +1440,10 @@ export function alignScriptLinesToExistingCaptions(
 
     const maxEndToken = Math.max(
       tokenCursor + 1,
-      Math.min(sttTokens.length - Math.min(remainingLinesAfter, sttTokens.length - tokenCursor - 1), tokenCursor + 20)
+      Math.min(sttTokens.length - Math.min(remainingLinesAfter, sttTokens.length - tokenCursor - 1), tokenCursor + 25)
     );
 
-    let bestEndToken = tokenCursor + 1;
+    let bestEndToken = -1;
     let bestScore = -999;
 
     for (let candEnd = tokenCursor + 1; candEnd <= maxEndToken; candEnd++) {
@@ -1234,7 +1451,7 @@ export function alignScriptLinesToExistingCaptions(
         .slice(tokenCursor, candEnd)
         .map((t) => t.word)
         .join(' ');
-      const candChars = Math.max(1, candPhrase.replace(/\s+/g, '').length);
+      const candChars = Math.max(1, candPhrase.replace(/[\s.,?!~]/g, '').length);
 
       const sim = computePhoneticSimilarity(candPhrase, scriptLine);
       const lenDiffRatio = Math.abs(candChars - targetSttCharLen) / Math.max(3, targetSttCharLen);
@@ -1260,13 +1477,60 @@ export function alignScriptLinesToExistingCaptions(
       }
     }
 
+    // 만약 발음 유사도가 낮거나(Whisper 오인식/음색 변화) 탐색이 실패한 경우:
+    // 무조건 1단어로 붕괴하지 않고, 대본 글자 길이에 비례하는 적정 토큰 수를 안전하게 할당
+    if (bestEndToken <= tokenCursor || bestScore < 0.15) {
+      let accum = 0;
+      let safeEnd = tokenCursor + 1;
+      for (let tIdx = tokenCursor; tIdx < maxEndToken; tIdx++) {
+        accum += sttTokens[tIdx].word.replace(/[\s.,?!~]/g, '').length;
+        safeEnd = tIdx + 1;
+        if (accum >= targetSttCharLen) break;
+      }
+      bestEndToken = safeEnd;
+    }
+
     const matchedSlice = sttTokens.slice(tokenCursor, bestEndToken);
     const beforeStt = matchedSlice.map((t) => t.word).join(' ');
-    const startT = i === 0 ? matchedSlice[0].start : roundFrameTime(matchedSlice[0].start, fps);
-    const endT = Math.max(
-      startT + frameSec * 2,
-      roundFrameTime(matchedSlice[matchedSlice.length - 1].end, fps)
-    );
+
+    const prevClip = newTextClips[newTextClips.length - 1];
+
+    // [음성 기준 절대 앵커링] 현재 대본 줄의 시작 시간은 반드시 해당 발화의 실제 오디오 시작 시점으로 고정!
+    let startT = roundFrameTime(matchedSlice[0].start, fps);
+    if (prevClip && startT < prevClip.startTime + frameSec * 3) {
+      startT = Number((prevClip.startTime + prevClip.duration + frameSec).toFixed(5));
+    }
+
+    // 직전 클립이 현재 발화 시작점과 겹쳐 있다면, 직전 클립을 트림하여 현재 클립이 제시간에 시작하도록 보장!
+    // (절대 현재 클립의 시작 시간을 미래로 미루지 않음 -> 누적 밀림 현상 100% 차단)
+    if (prevClip && prevClip.startTime + prevClip.duration > startT) {
+      prevClip.duration = Number(
+        Math.max(frameSec * 3, startT - prevClip.startTime - frameSec).toFixed(5)
+      );
+    }
+
+    const rawEnd = roundFrameTime(matchedSlice[matchedSlice.length - 1].end, fps);
+    const nextStartToken = bestEndToken < sttTokens.length ? sttTokens[bestEndToken] : null;
+
+    let endT = rawEnd;
+    if (nextStartToken) {
+      // 다음 발화가 바로 이어지는 경우 다음 발화 시작 직전까지만 유지 (다음 줄 발화 침범 절대 금지)
+      const nextStartT = roundFrameTime(nextStartToken.start, fps);
+      if (endT >= nextStartT) {
+        endT = Math.max(startT + frameSec * 3, nextStartT - frameSec);
+      } else {
+        // 발화 간 여백이 있는 경우 (최대 2.2초 이내 공백은 다음 대사 직전까지 채워서 자막이 사라지지 않게 유지)
+        const gap = nextStartT - endT;
+        if (gap <= 2.2) {
+          endT = Math.max(endT, nextStartT - frameSec);
+        } else {
+          endT = Math.min(nextStartT - frameSec, endT + 0.8);
+        }
+      }
+    } else {
+      endT = Math.max(startT + frameSec * 3, rawEnd);
+    }
+
     const clipId = `sub_sc_${Date.now()}_${i}`;
     const sim = computePhoneticSimilarity(beforeStt, scriptLine);
 
@@ -1294,8 +1558,122 @@ export function alignScriptLinesToExistingCaptions(
     tokenCursor = bestEndToken;
   }
 
+  const sanitized = sanitizeSubtitleClipsNonOverlapping(
+    [...nonTextClips, ...newTextClips],
+    fps
+  );
+
   return {
-    updatedClips: [...nonTextClips, ...newTextClips],
+    updatedClips: sanitized,
     diffs,
   };
+}
+
+/**
+ * 타임라인의 자막 트랙(C1 등)에서 클립 간 시간 중첩(Overlap)을 완전히 제거하고,
+ * 연속된 중복 텍스트(환각) 및 1~2글자짜리 초소형 파편 클립을 안전하게 정돈합니다.
+ */
+export function sanitizeSubtitleClipsNonOverlapping(
+  clips: TimelineClip[],
+  fps = 30
+): TimelineClip[] {
+  const frameSec = 1 / Math.max(1, fps);
+  const nonTextClips = clips.filter((c) => c.type !== 'text');
+  const textClips = clips.filter((c) => c.type === 'text');
+
+  if (textClips.length <= 1) {
+    return clips;
+  }
+
+  // 트랙별로 자막 분리 처리
+  const trackMap = new Map<string, TimelineClip[]>();
+  for (const c of textClips) {
+    const list = trackMap.get(c.trackId) || [];
+    list.push({ ...c });
+    trackMap.set(c.trackId, list);
+  }
+
+  const sanitizedTextClips: TimelineClip[] = [];
+
+  for (const [_trackId, trackList] of trackMap.entries()) {
+    // 1차: 시작 시간 기준 오름차순 정렬
+    trackList.sort((a, b) => a.startTime - b.startTime);
+
+    const mergedList: TimelineClip[] = [];
+
+    for (let i = 0; i < trackList.length; i++) {
+      const cur = { ...trackList[i] };
+      const curText = (cur.text || '').trim();
+
+      if (mergedList.length === 0) {
+        mergedList.push(cur);
+        continue;
+      }
+
+      const prev = mergedList[mergedList.length - 1];
+      const prevText = (prev.text || '').trim();
+      const prevEnd = prev.startTime + prev.duration;
+
+      // 1. 연속된 완전 중복 텍스트(예: "긴 사업을" 뒤에 바로 또 "긴 사업을"이 붙은 경우)
+      if (curText === prevText && cur.startTime <= prevEnd + 0.5) {
+        prev.duration = Math.max(prev.duration, cur.startTime + cur.duration - prev.startTime);
+        prev.voiceEndTime = cur.voiceEndTime ?? prev.voiceEndTime;
+        continue;
+      }
+
+      // 2. 1~2글자짜리 초소형 파편 클립 (예: "시", "월")이 직전 클립 바로 뒤(0.3초 이내)에 있는 경우 흡수
+      // 단, 한줄/두줄 분할 시스템에서 의도적으로 나눈 동일 문장 그룹(sentenceGroupId)의 조각은 흡수하지 않음
+      const isSameIntentionalSplitGroup =
+        Boolean(cur.sentenceGroupId) && cur.sentenceGroupId === prev.sentenceGroupId;
+      if (
+        !isSameIntentionalSplitGroup &&
+        curText.length <= 2 &&
+        cur.duration < 0.45 &&
+        cur.startTime <= prevEnd + 0.3
+      ) {
+        prev.text = `${prevText} ${curText}`.trim();
+        prev.name = prev.text.slice(0, 18);
+        prev.duration = Math.max(prev.duration, cur.startTime + cur.duration - prev.startTime);
+        prev.voiceEndTime = cur.voiceEndTime ?? (cur.startTime + cur.duration);
+        continue;
+      }
+
+      // 3. 동일 트랙 시간 중첩(Overlap) 절대 방지!
+      if (prevEnd > cur.startTime + 0.001) {
+        if (!isSameIntentionalSplitGroup && cur.startTime < prev.startTime + 0.35) {
+          // 시작 시간이 거의 겹치는 파편 클립은 3프레임짜리 파편으로 찌그러뜨리지 않고 직전 클립에 자연스럽게 흡수 병합
+          prev.text = `${prevText} ${curText}`.trim();
+          prev.name = prev.text.slice(0, 18);
+          prev.duration = Math.max(prev.duration, cur.startTime + cur.duration - prev.startTime);
+          prev.voiceEndTime = cur.voiceEndTime ?? (cur.startTime + cur.duration);
+          continue;
+        } else {
+          // 이전 클립의 길이를 현재 클립 시작점(파형 절벽)에 0.000초 오차 없이 정확히 맞닿도록 트림!
+          prev.duration = Number(Math.max(frameSec * 4, cur.startTime - prev.startTime).toFixed(4));
+          if (prev.voiceEndTime && prev.voiceEndTime > cur.startTime) {
+            prev.voiceEndTime = cur.startTime;
+          }
+        }
+      }
+
+      mergedList.push(cur);
+    }
+
+    // 4. 발화 간 공백 채우기 (Gap-bridging):
+    // 대사가 끝나고 다음 대사가 오기 전 빈 공간에 자막이 사라지지 않고 쭉 이어지다가,
+    // 다음 대사가 시작되는 파형 절벽(next.startTime) 정위치에서 0.000초 오차 없이 칼같이 나뉘도록 직전 클립의 길이를 연장!
+    for (let i = 0; i < mergedList.length - 1; i++) {
+      const cur = mergedList[i];
+      const next = mergedList[i + 1];
+      const curEnd = cur.startTime + cur.duration;
+      const gap = next.startTime - curEnd;
+      if (gap > 0 && gap <= 2.2) {
+        cur.duration = Number(Math.max(cur.duration, next.startTime - cur.startTime).toFixed(4));
+      }
+    }
+
+    sanitizedTextClips.push(...mergedList);
+  }
+
+  return [...nonTextClips, ...sanitizedTextClips];
 }

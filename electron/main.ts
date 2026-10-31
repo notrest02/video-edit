@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, session } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, protocol, session, net } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { pathToFileURL } from 'url';
+import { Readable } from 'stream';
 import { spawn } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
@@ -135,32 +137,46 @@ app.whenReady().then(() => {
       if (!filePath) {
         filePath = decodeURIComponent(url.pathname.replace(/^\//, ''));
       }
+      if (!fs.existsSync(filePath)) {
+        return new Response('File not found', { status: 404 });
+      }
+
       const stat = await fs.promises.stat(filePath);
       const fileSize = stat.size;
       const mimeType = getMimeType(filePath);
       const rangeHeader = request.headers.get('range');
 
       if (rangeHeader) {
-        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-        if (match) {
-          const start = parseInt(match[1], 10);
-          const end = match[2] ? parseInt(match[2], 10) : Math.min(start + 4 * 1024 * 1024, fileSize - 1);
-          const chunkSize = end - start + 1;
-          const fileStream = fs.createReadStream(filePath, { start, end });
-          return new Response(fileStream as unknown as ReadableStream, {
-            status: 206,
+        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        if (start >= fileSize) {
+          return new Response(null, {
+            status: 416,
             headers: {
-              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-              'Accept-Ranges': 'bytes',
-              'Content-Length': String(chunkSize),
-              'Content-Type': mimeType,
+              'Content-Range': `bytes */${fileSize}`,
             },
           });
         }
+
+        const safeEnd = Math.min(end, fileSize - 1);
+        const chunkSize = safeEnd - start + 1;
+        const fileStream = fs.createReadStream(filePath, { start, end: safeEnd });
+
+        return new Response(Readable.toWeb(fileStream) as unknown as ReadableStream, {
+          status: 206,
+          headers: {
+            'Content-Range': `bytes ${start}-${safeEnd}/${fileSize}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(chunkSize),
+            'Content-Type': mimeType,
+          },
+        });
       }
 
       const fileStream = fs.createReadStream(filePath);
-      return new Response(fileStream as unknown as ReadableStream, {
+      return new Response(Readable.toWeb(fileStream) as unknown as ReadableStream, {
         status: 200,
         headers: {
           'Accept-Ranges': 'bytes',
@@ -656,6 +672,198 @@ ipcMain.handle(
 
       const data = await response.json();
       return data;
+    } finally {
+      fs.promises.unlink(tempAudioPath).catch(() => {});
+    }
+  }
+);
+
+// 6-1. Google Gemini Multimodal Audio Analysis (Intelligent Subtitles, Sentence Chunking, Script Correction)
+ipcMain.handle(
+  'ai:analyzeWithGemini',
+  async (
+    _event,
+    params: {
+      filePath: string;
+      sourceStart: number;
+      duration: number;
+      apiKey: string;
+      model?: string;
+      scriptText?: string;
+      captionMaxChars?: number;
+    }
+  ) => {
+    const {
+      filePath,
+      sourceStart,
+      duration,
+      apiKey,
+      model = 'gemini-1.5-flash',
+      scriptText,
+      captionMaxChars = 18,
+    } = params;
+
+    const tempAudioPath = path.join(os.tmpdir(), `agy_gemini_${Date.now()}.mp3`);
+
+    try {
+      // 1. Extract lightweight 16kHz mono mp3 for fast upload to Gemini
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(resolvedFfmpegPath, [
+          '-y',
+          '-ss', String(sourceStart),
+          '-t', String(duration),
+          '-i', filePath,
+          '-vn',
+          '-ac', '1',
+          '-ar', '16000',
+          '-b:a', '64k',
+          tempAudioPath,
+        ]);
+        proc.on('close', (code) =>
+          code === 0 ? resolve() : reject(new Error(`Gemini audio extract failed: ${code}`))
+        );
+        proc.on('error', reject);
+      });
+
+      const audioBuffer = await fs.promises.readFile(tempAudioPath);
+      const audioBase64 = audioBuffer.toString('base64');
+
+      // 2. Build system instruction and prompt for Korean video editing
+      let prompt = `당신은 최고 수준의 한국어 전문 영상 편집 감독이자 음향 분석 전문가입니다.
+동봉된 오디오 파일을 정밀하게 청취하고 화자의 발화 단위(자연스러운 호흡 및 문맥 기준)로 자막을 생성하여 반드시 지정된 JSON 구조로만 응답하세요.
+
+[요구사항]
+1. captions: 화자의 자연스러운 호흡 단위로 자막을 생성하세요.
+   - 각 자막의 한 줄 길이는 공백 포함 약 ${captionMaxChars}자 내외가 되도록 사람이 읽기 편하게 끊으세요.
+   - start와 end는 오디오 내의 실제 발화 시작/종료 초(sec, 소수점 둘째자리)입니다.
+   - 절대로 문장을 어색하게 중간에서 자르지 말고 호흡에 맞춰 나누세요.
+`;
+
+      if (scriptText && scriptText.trim()) {
+        prompt += `\n[사용자 원본 대본 참조]
+아래는 사용자가 제공한 실제 대본입니다. 음성에서 발음이 뭉개지거나 방언, 오발음이 있더라도 자막의 텍스트와 어휘는 아래 대본의 표준 어휘를 최우선으로 반영하세요:
+"""
+${scriptText.trim().slice(0, 4000)}
+"""`;
+      }
+
+      prompt += `\n[응답 JSON 스키마]
+반드시 다음 스키마를 만족하는 유효한 JSON 형식으로만 응답해야 합니다:
+{
+  "captions": [
+    { "text": "자막 텍스트", "start": 0.0, "end": 2.5, "speaker": "화자" }
+  ]
+}`;
+
+      // 3. Resolve active model dynamically (v1beta & v1) based on API key permissions
+      let activeModel = model;
+      let availableModelList: string[] = [];
+
+      try {
+        const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        if (listRes.ok) {
+          const listData = await listRes.json();
+          availableModelList = (listData.models || [])
+            .filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+            .map((m: any) => String(m.name || '').replace(/^models\//, ''));
+
+          if (availableModelList.length > 0) {
+            if (availableModelList.includes(model)) {
+              activeModel = model;
+            } else {
+              // Priority list for multimodal audio
+              const preferred = [
+                'gemini-2.5-flash',
+                'gemini-2.0-flash',
+                'gemini-2.0-flash-001',
+                'gemini-1.5-flash-latest',
+                'gemini-1.5-flash-002',
+                'gemini-1.5-flash-001',
+                'gemini-1.5-flash',
+                'gemini-1.5-flash-8b',
+                'gemini-2.0-pro-exp',
+                'gemini-1.5-pro-latest',
+                'gemini-1.5-pro-002',
+                'gemini-1.5-pro-001',
+                'gemini-1.5-pro',
+              ];
+              const match = preferred.find((p) => availableModelList.includes(p)) ||
+                            availableModelList.find((vm) => vm.toLowerCase().includes('flash')) ||
+                            availableModelList.find((vm) => vm.toLowerCase().includes('gemini')) ||
+                            availableModelList[0];
+              activeModel = match;
+            }
+          }
+        }
+      } catch (listErr) {
+        console.warn('[Gemini listModels fallback]', listErr);
+      }
+
+      console.log(`[Gemini Auto-Select] Requested: '${model}' -> Using: '${activeModel}'`);
+
+      // Try v1beta first, fallback to v1 if 404
+      const tryFetch = async (apiVersion: 'v1beta' | 'v1') => {
+        const endpoint = `https://generativelanguage.googleapis.com/${apiVersion}/models/${activeModel}:generateContent?key=${apiKey}`;
+        return fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'audio/mp3',
+                      data: audioBase64,
+                    },
+                  },
+                  {
+                    text: prompt,
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.15,
+              responseMimeType: 'application/json',
+            },
+          }),
+        });
+      };
+
+      let response = await tryFetch('v1beta');
+      if (response.status === 404) {
+        response = await tryFetch('v1');
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        const availableNote = availableModelList.length > 0
+          ? ` (현재 API 키에서 사용 가능한 모델: ${availableModelList.slice(0, 8).join(', ')})`
+          : '';
+        throw new Error(`Gemini API 오류 (${response.status}): ${errText}${availableNote}`);
+      }
+
+      const resData = await response.json();
+      const rawJsonText =
+        resData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+
+      let parsedResult;
+      try {
+        parsedResult = JSON.parse(rawJsonText);
+      } catch (e) {
+        const jsonMatch = rawJsonText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          parsedResult = JSON.parse(jsonMatch[1]);
+        } else {
+          throw new Error('Gemini 응답 JSON 파싱 실패');
+        }
+      }
+
+      return parsedResult;
     } finally {
       fs.promises.unlink(tempAudioPath).catch(() => {});
     }

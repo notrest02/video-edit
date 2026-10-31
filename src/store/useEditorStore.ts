@@ -17,6 +17,7 @@ import {
   CaptionLineMode,
   alignScriptLinesToExistingCaptions,
   reformatSubtitleClipsByLineMode,
+  sanitizeSubtitleClipsNonOverlapping,
 } from '../utils/scriptAligner';
 
 interface HistorySnapshot {
@@ -56,9 +57,11 @@ interface EditorState {
   statusMessage: string | null;
 
   // AI Settings
-  aiEngine: 'local' | 'openai';
+  aiEngine: 'local' | 'openai' | 'gemini';
   localWhisperModel: string;
   openAiApiKey: string;
+  geminiApiKey: string;
+  geminiModel: string;
   scriptText: string;
   captionLineMode: CaptionLineMode;
   captionMaxCharsPerLine: number;
@@ -97,7 +100,9 @@ interface EditorState {
   setActiveTool: (tool: EditorTool) => void;
   setSnapThresholdFrames: (frames: number) => void;
   setStatusMessage: (msg: string | null) => void;
-  setAiEngine: (engine: 'local' | 'openai') => void;
+  setAiEngine: (engine: 'local' | 'openai' | 'gemini') => void;
+  setGeminiApiKey: (key: string) => void;
+  setGeminiModel: (model: string) => void;
   setLocalWhisperModel: (model: string) => void;
   setOpenAiApiKey: (key: string) => void;
   setScriptText: (text: string) => void;
@@ -173,7 +178,9 @@ interface EditorState {
     rippleCompact: boolean
   ) => void;
   applyAlignedSubtitles: (items: AlignedSubtitleItem[], autoSnapToCuts: boolean) => void;
-  addRawAiCaptions: (segments: Array<{ text: string; start: number; end: number }>) => void;
+  addRawAiCaptions: (
+    segments: Array<{ text: string; start: number; end: number; voiceEnd?: number }>
+  ) => void;
   applyScriptCorrectionsToCaptions: (
     diffs: Array<{ clipId: string; beforeText: string; afterText: string }>
   ) => void;
@@ -206,10 +213,7 @@ export function createDefaultTracks(): TimelineTrack[] {
   ];
 }
 
-const DEFAULT_SAMPLE_SCRIPT = `안녕하세요 안티그래비티 AI 비디오 편집기입니다
-대본을 입력하면 오타 없이 대본 글자 그대로 자막이 생성됩니다
-무음 구간 자동 컷 편집을 한 뒤에도
-클립 맞추기 버튼 하나로 1프레임 오차까지 칼같이 정렬됩니다`;
+const DEFAULT_SAMPLE_SCRIPT = '';
 
 /**
  * 새로 올라오거나 이동/트림된 클립(activeClipIds)과 같은 트랙에서 시간이 겹치는 기존 클립을
@@ -380,12 +384,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
       '좌측 하단에서 [+ 새 시퀀스]를 만들거나, 미디어를 바로 타임라인으로 드래그하면 영상 규격에 맞는 시퀀스가 자동 생성됩니다.',
 
     aiEngine: 'local',
-    localWhisperModel: 'Xenova/whisper-tiny',
+    localWhisperModel: 'Xenova/whisper-base',
     openAiApiKey: localStorage.getItem('agy_openai_key') || '',
+    geminiApiKey: localStorage.getItem('agy_gemini_key') || '',
+    geminiModel: 'gemini-3.8-flash',
     scriptText: DEFAULT_SAMPLE_SCRIPT,
     captionLineMode: 'single-line',
-    captionMaxCharsPerLine: 13,
-    autoSplitOnCaptionGenerate: true,
+    captionMaxCharsPerLine: 18,
+    autoSplitOnCaptionGenerate: false,
     isQuickSplitMergeMode: true,
     autoSyncSubtitleStyle: false,
 
@@ -801,6 +807,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
       localStorage.setItem('agy_openai_key', openAiApiKey);
       set({ openAiApiKey });
     },
+    setGeminiApiKey: (geminiApiKey) => {
+      localStorage.setItem('agy_gemini_key', geminiApiKey);
+      set({ geminiApiKey });
+    },
+    setGeminiModel: (geminiModel) => set({ geminiModel }),
     setScriptText: (scriptText) => set({ scriptText }),
     setCaptionLineMode: (captionLineMode) => set({ captionLineMode }),
     setCaptionMaxCharsPerLine: (captionMaxCharsPerLine) =>
@@ -973,6 +984,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         text: firstPart,
         name: firstPart.replace(/\r?\n/g, ' ').slice(0, 18),
         duration: firstDur,
+        voiceEndTime: secondStart,
       };
 
       const secondClip: TimelineClip = {
@@ -983,6 +995,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         name: secondPart.replace(/\r?\n/g, ' ').slice(0, 18),
         startTime: secondStart,
         duration: secondDur,
+        voiceEndTime: target.voiceEndTime ?? Number((secondStart + secondDur).toFixed(4)),
       };
 
       const nextClips: TimelineClip[] = [];
@@ -1069,6 +1082,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         name: mergedText.replace(/\r?\n/g, ' ').slice(0, 18),
         startTime: Number(mergedStart.toFixed(4)),
         duration: mergedDuration,
+        voiceEndTime: secondClip.voiceEndTime ?? Number(mergedEnd.toFixed(4)),
       };
 
       const nextClips = clips
@@ -2131,26 +2145,36 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
       pushHistory();
 
+      const batchStamp = Date.now();
       const textTrack = tracks.find((t) => t.type === 'text' && !t.locked) || tracks[0];
-      const newSubClips: TimelineClip[] = segments.map((seg, idx) => ({
-        id: `sub_ai_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
-        trackId: textTrack.id,
-        type: 'text',
-        name: seg.text.slice(0, 18),
-        startTime: Number(Math.max(0, seg.start).toFixed(4)),
-        duration: Number(Math.max(0.2, seg.end - seg.start).toFixed(4)),
-        sourceStart: 0,
-        volume: 1,
-        muted: false,
-        text: seg.text,
-        originalSttText: seg.text,
-        fontSize: 40,
-        fontColor: '#ffffff',
-        backgroundColor: '#000000',
-        backgroundOpacity: 0.65,
-        strokeColor: '#000000',
-        positionY: 86,
-      }));
+      const newSubClips: TimelineClip[] = segments.map((seg, idx) => {
+        const sStart = Number(Math.max(0, seg.start).toFixed(4));
+        const sDur = Number(Math.max(0.2, seg.end - seg.start).toFixed(4));
+        const sVoiceEnd = Number(
+          Math.max(sStart + 0.15, Math.min(sStart + sDur, seg.voiceEnd ?? seg.end)).toFixed(4)
+        );
+        return {
+          id: `sub_ai_${batchStamp}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+          trackId: textTrack.id,
+          type: 'text',
+          name: seg.text.slice(0, 18),
+          startTime: sStart,
+          duration: sDur,
+          voiceEndTime: sVoiceEnd,
+          sentenceGroupId: `sent_grp_${batchStamp}_${idx}`,
+          sourceStart: 0,
+          volume: 1,
+          muted: false,
+          text: seg.text,
+          originalSttText: seg.text,
+          fontSize: 40,
+          fontColor: '#ffffff',
+          backgroundColor: '#000000',
+          backgroundOpacity: 0.65,
+          strokeColor: '#000000',
+          positionY: 86,
+        };
+      });
 
       // 해당 시간 구간과 겹치지 않는 기존 자막은 유지하거나 새로 추가
       const minStart = Math.min(...newSubClips.map((c) => c.startTime));
@@ -2163,14 +2187,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
       );
 
       let nextClips = [...keptClips, ...newSubClips];
-      if (autoSplitOnCaptionGenerate) {
-        nextClips = reformatSubtitleClipsByLineMode(nextClips, {
-          mode: captionLineMode,
-          maxCharsPerLine: captionMaxCharsPerLine,
-          fps,
-        }).updatedClips;
-      }
-
+      // AI 캡션 생성 시에는 음성과 1:1로 일치하는 온전한 문장 클립 상태를 유지합니다.
+      // (타임라인 클립을 강제로 잘게 쪼개지 않아 깜빡임 및 밀림 현상 방지)
+      nextClips = sanitizeSubtitleClipsNonOverlapping(nextClips, fps);
       const finalTextCount = nextClips.filter((c) => c.type === 'text').length;
       set({
         clips: nextClips,
