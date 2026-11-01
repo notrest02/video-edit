@@ -13,6 +13,7 @@ export async function buildElectron() {
       'ffmpeg-static',
       'ffprobe-static',
       'fluent-ffmpeg',
+      'onnxruntime-node',
     ],
   });
   console.log('[Electron Build] Compiled electron/main.ts and electron/preload.ts');

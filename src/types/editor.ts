@@ -196,6 +196,9 @@ declare global {
         ext: string;
       } | null>;
       probeMedia: (filePath: string) => Promise<Omit<MediaAsset, 'id'>>;
+      mmsWordStarts?: (
+        segments: Array<{ pcm: Float32Array; words: string[] }>
+      ) => Promise<{ available: boolean; results: Array<number[] | null> }>;
       gdiCheckFonts?: (families: string[]) => Promise<boolean[]>;
       gdiGlyphs?: (params: { family: string; style: number; chars: string }) => Promise<{
         asc: number;

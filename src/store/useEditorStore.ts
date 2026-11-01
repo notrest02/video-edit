@@ -17,6 +17,7 @@ import {
   CaptionLineMode,
   alignScriptLinesToExistingCaptions,
   reformatSubtitleClipsByLineMode,
+  type CaptionSplitRequest,
   sanitizeSubtitleClipsNonOverlapping,
 } from '../utils/scriptAligner';
 
@@ -128,7 +129,7 @@ interface EditorState {
   reformatAllCaptionsLineLayout: (
     customMode?: CaptionLineMode,
     customMaxChars?: number
-  ) => void;
+  ) => Promise<void>;
   applyScriptLinesDirectly: (customScript?: string) => CaptionDiffItem[];
   splitSubtitleClipAtTextCursor: (
     clipId: string,
@@ -200,7 +201,7 @@ interface EditorState {
   ) => void;
   applyScriptCorrectionsToCaptions: (
     diffs: Array<{ clipId: string; beforeText: string; afterText: string }>
-  ) => void;
+  ) => Promise<void>;
   snapAllSubtitlesToClips: (customThresholdFrames?: number) => SnapResultSummary;
   undo: () => void;
   redo: () => void;
@@ -329,6 +330,125 @@ function overwriteOverlappingClips(
   }
 
   return { clips: workingClips, overwrittenCount };
+}
+
+// ---------------------------------------------------------------------------
+// 자막 한 줄 / 두 줄 재구성용 음성 데이터
+// 자막을 여러 조각으로 나눌 때 실제 음성(PCM)의 쉼과 말 속도로 분할 시점을 정하기 위해,
+// 자막 아래에 깔린 오디오 클립의 16kHz PCM 을 불러온다 (같은 구간은 캐시).
+// ---------------------------------------------------------------------------
+const captionPcmCache = new Map<string, Promise<Float32Array | null>>();
+
+async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTrack[]) {
+  const api = window.electronAPI;
+  if (!api?.extractAudioFloat32) return undefined;
+  const texts = clips.filter((c) => c.type === 'text');
+  if (texts.length === 0) return undefined;
+  const overlapsText = (c: TimelineClip) =>
+    texts.some((t) => t.startTime < c.startTime + c.duration && t.startTime + t.duration > c.startTime);
+  // 음성 트랙 우선순위: 오디오 트랙 순서(A1 → A2 …), 오디오가 없으면 영상 클립 소리
+  const trackOrder = new Map(tracks.map((t, i) => [t.id, i]));
+  let sources = clips.filter((c) => c.type === 'audio' && c.sourcePath && !c.muted && overlapsText(c));
+  if (sources.length === 0) {
+    sources = clips.filter((c) => c.type === 'video' && c.sourcePath && overlapsText(c));
+  }
+  if (sources.length === 0) return undefined;
+
+  const loaded: Array<{ clip: TimelineClip; pcm: Float32Array }> = [];
+  for (const c of sources) {
+    const key = `${c.sourcePath}|${c.sourceStart.toFixed(3)}|${c.duration.toFixed(3)}`;
+    let job = captionPcmCache.get(key);
+    if (!job) {
+      job = api
+        .extractAudioFloat32({ filePath: c.sourcePath!, sourceStart: c.sourceStart, duration: c.duration })
+        .then((pcm) => (pcm && pcm.length > 0 ? pcm : null))
+        .catch(() => null);
+      captionPcmCache.set(key, job);
+    }
+    const pcm = await job;
+    if (pcm) loaded.push({ clip: c, pcm });
+  }
+  if (loaded.length === 0) return undefined;
+  loaded.sort(
+    (a, b) => (trackOrder.get(a.clip.trackId) ?? 99) - (trackOrder.get(b.clip.trackId) ?? 99)
+  );
+
+  return (start: number, end: number) => {
+    // 자막 구간을 가장 많이 덮는 음성 클립 (같으면 위쪽 오디오 트랙 우선)
+    let best: { clip: TimelineClip; pcm: Float32Array } | null = null;
+    let bestCover = 0;
+    for (const l of loaded) {
+      const cover =
+        Math.min(end, l.clip.startTime + l.clip.duration) - Math.max(start, l.clip.startTime);
+      if (cover > bestCover + 0.05) {
+        best = l;
+        bestCover = cover;
+      }
+    }
+    if (!best || bestCover < (end - start) * 0.6) return null;
+    return { pcm: best.pcm, sampleRate: 16000, timelineOffset: best.clip.startTime };
+  };
+}
+
+type ReformatOptions = Parameters<typeof reformatSubtitleClipsByLineMode>[1];
+type AudioLookup = NonNullable<ReformatOptions['audioLookup']>;
+
+/**
+ * MMS 강제 정렬로 자막 조각 분할 시점을 미리 계산한다.
+ * 1) 같은 옵션으로 한 번 "가상 실행"해서 어떤 문장이 어떤 조각으로 나뉘는지 수집
+ * 2) 그 문장들의 음성 + 단어를 메인 프로세스(MMS 모델)에 한 번에 보내 단어별 시작 시점을 받음
+ * 3) 각 조각의 첫 단어 시작 시점 = 그 조각이 화면에 나타나는 시점
+ * 모델이 없으면 available=false (호출 측은 쉼·말 속도 추정으로 대체)
+ */
+async function buildMmsSplitProvider(
+  clips: TimelineClip[],
+  opts: ReformatOptions,
+  audioLookup: AudioLookup | undefined
+): Promise<{ available: boolean; provider?: ReformatOptions['splitTimesProvider'] }> {
+  const api = window.electronAPI;
+  if (!api?.mmsWordStarts || !audioLookup) return { available: false };
+  const keyOf = (r: CaptionSplitRequest) => `${r.start.toFixed(3)}|${r.pieces.join('\u0001')}`;
+  const wordsOf = (piece: string) => piece.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+
+  const requests: CaptionSplitRequest[] = [];
+  reformatSubtitleClipsByLineMode(clips, {
+    ...opts,
+    audioLookup: undefined,
+    splitTimesProvider: (r) => {
+      requests.push(r);
+      return null;
+    },
+  });
+  if (requests.length === 0) return { available: true };
+
+  const segments: Array<{ pcm: Float32Array; words: string[] }> = [];
+  const meta: Array<{ r: CaptionSplitRequest; segStartAbs: number }> = [];
+  for (const r of requests) {
+    const a = audioLookup(r.start, r.end);
+    if (!a) continue;
+    const from = Math.max(0, Math.floor((r.start - a.timelineOffset) * a.sampleRate));
+    const to = Math.min(a.pcm.length, Math.ceil((r.voiceEnd + 0.15 - a.timelineOffset) * a.sampleRate));
+    if (to - from < a.sampleRate * 0.2) continue;
+    segments.push({ pcm: a.pcm.slice(from, to), words: r.pieces.flatMap(wordsOf) });
+    meta.push({ r, segStartAbs: a.timelineOffset + from / a.sampleRate });
+  }
+  if (segments.length === 0) return { available: true };
+
+  const res = await api.mmsWordStarts(segments).catch(() => null);
+  if (!res || !res.available) return { available: false };
+  const map = new Map<string, number[]>();
+  res.results.forEach((starts, i) => {
+    if (!starts) return;
+    const { r, segStartAbs } = meta[i];
+    const bounds: number[] = [];
+    let wi = 0;
+    r.pieces.forEach((piece, k) => {
+      if (k > 0) bounds.push(segStartAbs + starts[Math.min(wi, starts.length - 1)]);
+      wi += wordsOf(piece).length;
+    });
+    map.set(keyOf(r), bounds);
+  });
+  return { available: true, provider: (r) => map.get(keyOf(r)) ?? null };
 }
 
 export const useEditorStore = create<EditorState>((set, get) => {
@@ -1174,12 +1294,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       return mergedClip.id;
     },
 
-    reformatAllCaptionsLineLayout: (customMode, customMaxChars) => {
-      const { clips, tracks, fps, captionLineMode, captionMaxCharsPerLine } = get();
+    reformatAllCaptionsLineLayout: async (customMode, customMaxChars) => {
+      const { clips: clipsBefore, captionLineMode, captionMaxCharsPerLine } = get();
       const targetMode = customMode ?? captionLineMode;
       const targetMaxChars = customMaxChars ?? captionMaxCharsPerLine;
 
-      const textClips = clips.filter((c) => c.type === 'text');
+      const textClips = clipsBefore.filter((c) => c.type === 'text');
       if (textClips.length === 0) {
         set({
           captionLineMode: targetMode,
@@ -1189,14 +1309,22 @@ export const useEditorStore = create<EditorState>((set, get) => {
         return;
       }
 
+      set({ statusMessage: '자막을 나눌 위치를 찾기 위해 음성을 분석하는 중...' });
+      const audioLookup = await buildCaptionAudioLookup(clipsBefore, get().tracks);
+      const baseOpts: ReformatOptions = {
+        mode: targetMode,
+        maxCharsPerLine: targetMaxChars,
+        fps: get().fps,
+        audioLookup,
+      };
+      const mms = await buildMmsSplitProvider(clipsBefore, baseOpts, audioLookup);
+      // 분석하는 동안 바뀐 최신 상태 기준으로 재구성
+      const { clips, tracks, fps } = get();
+
       pushHistory();
       const { updatedClips, beforeCount, afterCount } = reformatSubtitleClipsByLineMode(
         clips,
-        {
-          mode: targetMode,
-          maxCharsPerLine: targetMaxChars,
-          fps,
-        }
+        { ...baseOpts, fps, splitTimesProvider: mms.provider }
       );
 
       const modeLabel =
@@ -1209,7 +1337,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
         captionMaxCharsPerLine: targetMaxChars,
         clips: updatedClips,
         sequences: syncActiveSequenceData(tracks, updatedClips),
-        statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)`,
+        statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)${
+          audioLookup && !mms.available ? ' · 정밀 정렬 모델이 없어 추정 방식으로 나눴습니다' : ''
+        }`,
       });
     },
 
@@ -2284,7 +2414,31 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     // [STEP 2] 기존 AI 캡션들과 내 대본을 비교한 결과를 타임라인 캡션에 일괄 반영
-    applyScriptCorrectionsToCaptions: (diffs) => {
+    applyScriptCorrectionsToCaptions: async (diffs) => {
+      if (diffs.length === 0) return;
+      const audioLookup = get().autoSplitOnCaptionGenerate
+        ? await buildCaptionAudioLookup(get().clips, get().tracks)
+        : undefined;
+      // 오타 변환 후 텍스트 기준으로 MMS 분할 시점 계산 (자동 분할이 켜져 있을 때만)
+      let mmsProvider: ReformatOptions['splitTimesProvider'];
+      if (audioLookup) {
+        const diffMapPre = new Map(diffs.map((d) => [d.clipId, d.afterText]));
+        const corrected = get().clips.map((c) =>
+          diffMapPre.has(c.id) ? { ...c, text: diffMapPre.get(c.id)! } : c
+        );
+        mmsProvider = (
+          await buildMmsSplitProvider(
+            corrected,
+            {
+              mode: get().captionLineMode,
+              maxCharsPerLine: get().captionMaxCharsPerLine,
+              fps: get().fps,
+              audioLookup,
+            },
+            audioLookup
+          )
+        ).provider;
+      }
       const {
         clips,
         tracks,
@@ -2293,7 +2447,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
         captionMaxCharsPerLine,
         autoSplitOnCaptionGenerate,
       } = get();
-      if (diffs.length === 0) return;
 
       pushHistory();
       const diffMap = new Map(diffs.map((d) => [d.clipId, d]));
@@ -2316,6 +2469,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
           mode: captionLineMode,
           maxCharsPerLine: captionMaxCharsPerLine,
           fps,
+          audioLookup,
+          splitTimesProvider: mmsProvider,
         }).updatedClips;
       }
 

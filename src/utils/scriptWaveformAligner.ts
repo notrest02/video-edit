@@ -281,6 +281,193 @@ function snapToLocalValley(pcm: Float32Array, sampleRate: number, t: number, lo:
 }
 
 // ---------------------------------------------------------------------------
+// 자막 한 개를 여러 줄 조각으로 나눌 때의 분할 시점 (한 줄 / 두 줄 재구성용)
+// ---------------------------------------------------------------------------
+
+/** 단어 하나를 읽는 데 드는 대략의 음절 수 (한글 1, 숫자 1.3, 영문 0.5) */
+function spokenSyllables(word: string): number {
+  let n = 0;
+  for (const ch of word) {
+    if (/[가-힣]/.test(ch)) n += 1;
+    else if (/[0-9]/.test(ch)) n += 1.3;
+    else if (/[a-zA-Z]/.test(ch)) n += 0.5;
+  }
+  // 단어 끝 음절 늘임(+ 단어 사이 미세 간격), 문장부호 뒤 호흡
+  n += 0.35;
+  if (/[,.?!~…]$/.test(word)) n += 0.4;
+  return Math.max(0.5, n);
+}
+
+/**
+ * 자막 문장 하나의 단어별 시작 시점(pcm 기준 초)을 추정한다.
+ *
+ * - 구간 안의 말소리 덩어리(쉼으로 구분)를 찾고,
+ * - 단어들을 순서대로 덩어리 묶음에 배정하되 각 묶음의 "말하는 시간 ÷ 음절 수"가
+ *   문장 평균 속도와 가장 비슷해지도록 동적계획법으로 고른다 (쉼은 단어 사이에만 생긴다는 가정).
+ * - 한 묶음 안의 단어들은 음절 비율로 시간을 나눈다.
+ */
+function estimateWordStarts(
+  pcm: Float32Array,
+  sampleRate: number,
+  spanStart: number,
+  voiceEnd: number,
+  words: string[],
+  /** pauseBonus[w] = 단어 w 바로 앞에 쉼이 오는 배정을 선호하는 정도 (자막 조각 경계·쉼표·연결어미) */
+  pauseBonus: number[]
+): number[] | null {
+  const i0 = Math.max(0, Math.floor(spanStart * sampleRate));
+  const i1 = Math.min(pcm.length, Math.ceil(voiceEnd * sampleRate));
+  if (i1 - i0 < sampleRate * 0.3 || words.length === 0) return null;
+  const seg = pcm.subarray(i0, i1);
+  let peak = 0;
+  for (let i = 0; i < seg.length; i++) {
+    const a = Math.abs(seg[i]);
+    if (a > peak) peak = a;
+  }
+  if (peak < 1e-4) return null;
+  const islands = detectSpeechIslands(seg, sampleRate, 20 * Math.log10(peak) - 30, 0.12).map(
+    ([s, e]) => [s + spanStart, e + spanStart] as Island
+  );
+  if (islands.length === 0) return null;
+
+  const syl = words.map(spokenSyllables);
+  const W = words.length;
+  const I = islands.length;
+  const speechTotal = islands.reduce((a, [s, e]) => a + (e - s), 0);
+  const sylTotal = syl.reduce((a, b) => a + b, 0);
+  const rate = speechTotal / sylTotal; // 음절당 초
+
+  const sylPrefix = [0];
+  for (const v of syl) sylPrefix.push(sylPrefix[sylPrefix.length - 1] + v);
+  const durPrefix = [0];
+  for (const [s, e] of islands) durPrefix.push(durPrefix[durPrefix.length - 1] + (e - s));
+
+  // dp[w][i] = 단어 w개, 덩어리 i개를 소비했을 때 최소 비용
+  const INF = Infinity;
+  const dp = Array.from({ length: W + 1 }, () => new Array<number>(I + 1).fill(INF));
+  const back = Array.from({ length: W + 1 }, () => new Array<[number, number] | null>(I + 1).fill(null));
+  dp[0][0] = 0;
+  for (let w = 0; w < W; w++) {
+    for (let i = 0; i < I; i++) {
+      if (dp[w][i] === INF) continue;
+      for (let w2 = w + 1; w2 <= W; w2++) {
+        const s = sylPrefix[w2] - sylPrefix[w];
+        const expected = s * rate;
+        for (let i2 = i + 1; i2 <= I; i2++) {
+          const d = durPrefix[i2] - durPrefix[i];
+          if (d > expected * 3 + 1) break;
+          const z = (d - expected) / (0.3 * expected + 0.12);
+          // 덩어리 여러 개를 한 묶음으로 합치면(단어 중간의 짧은 끊김) 약간의 벌점,
+          // 묶음 끝(= 쉼)이 끊어 읽기 자연스러운 자리면 가산점
+          const v =
+            dp[w][i] + z * z + 0.15 * (i2 - i - 1) - (w2 < W && i2 < I ? pauseBonus[w2] : 0);
+          if (v < dp[w2][i2]) {
+            dp[w2][i2] = v;
+            back[w2][i2] = [w, i];
+          }
+        }
+      }
+    }
+  }
+  if (dp[W][I] === INF) return null;
+
+  const groups: Array<{ w0: number; w1: number; i0: number; i1: number }> = [];
+  let cw = W;
+  let ci = I;
+  while (cw > 0) {
+    const b = back[cw][ci];
+    if (!b) return null;
+    groups.unshift({ w0: b[0], w1: cw, i0: b[1], i1: ci });
+    [cw, ci] = b;
+  }
+
+  const starts = new Array<number>(W).fill(0);
+  for (const g of groups) {
+    // 묶음 안: 말하는 시간(덩어리 사이 짧은 끊김 제외)을 음절 비율로 나눔
+    const isl = islands.slice(g.i0, g.i1);
+    const speech = isl.reduce((a, [s, e]) => a + (e - s), 0);
+    const gSyl = sylPrefix[g.w1] - sylPrefix[g.w0];
+    let acc = 0;
+    for (let w = g.w0; w < g.w1; w++) {
+      let pos = (speech * acc) / gSyl;
+      let t = isl[0][0];
+      for (const [s, e] of isl) {
+        if (pos <= e - s) {
+          t = s + pos;
+          break;
+        }
+        pos -= e - s;
+        t = e;
+      }
+      starts[w] = t;
+      acc += syl[w];
+    }
+    // 묶음 안쪽 단어 경계는 근처(±0.12초)에서 가장 조용한 지점으로 다듬음
+    for (let w = g.w0 + 1; w < g.w1; w++) {
+      starts[w] = snapToLocalValley(pcm, sampleRate, starts[w], starts[w - 1], isl[isl.length - 1][1], 0.12);
+    }
+  }
+  return starts;
+}
+
+const PIECE_PAUSE_BONUS = 0.5;
+const PUNCT_PAUSE_BONUS = 0.5;
+const CONNECTIVE_PAUSE_BONUS = 0;
+
+/**
+ * 자막 하나(pcm 기준 [spanStart, voiceEnd])를 pieces 텍스트 조각들로 나눌 때,
+ * 각 조각(2번째부터)이 화면에 나타날 시점을 돌려준다 = 그 조각 첫 단어의 시작 시점.
+ * 음성 분석이 안 되면 글자 비율로 나눈다.
+ */
+export function chooseCaptionSplitTimes(
+  pcm: Float32Array,
+  sampleRate: number,
+  spanStart: number,
+  voiceEnd: number,
+  pieces: string[]
+): number[] {
+  const n = pieces.length;
+  if (n <= 1) return [];
+  const cleanPieces = pieces.map((p) => p.replace(/\s+/g, ' ').trim());
+  const words: string[] = [];
+  const pieceFirstWord: number[] = [];
+  for (const p of cleanPieces) {
+    pieceFirstWord.push(words.length);
+    words.push(...p.split(' ').filter(Boolean));
+  }
+
+  // 쉼이 오기 자연스러운 자리: 자막 조각 경계(가장 강함), 쉼표/문장부호, 연결어미 뒤
+  const pieceStartSet = new Set(pieceFirstWord.slice(1));
+  const pauseBonus = words.map((_, w) => {
+    if (w === 0) return 0;
+    if (pieceStartSet.has(w)) return PIECE_PAUSE_BONUS;
+    const prev = words[w - 1];
+    if (/[,.?!~…]$/.test(prev)) return PUNCT_PAUSE_BONUS;
+    if (/(니까|는데|지만|다가|면서|하고|해서|어서|아서|라서|고|며|면|요)$/.test(prev)) return CONNECTIVE_PAUSE_BONUS;
+    return 0;
+  });
+  const starts = estimateWordStarts(pcm, sampleRate, spanStart, voiceEnd, words, pauseBonus);
+  if (!starts) {
+    const syl = cleanPieces.map(spokenSyllables);
+    const total = syl.reduce((a, b) => a + b, 0);
+    const out: number[] = [];
+    let acc = 0;
+    for (let k = 0; k < n - 1; k++) {
+      acc += syl[k];
+      out.push(spanStart + ((voiceEnd - spanStart) * acc) / total);
+    }
+    return out;
+  }
+  const out: number[] = [];
+  for (let k = 1; k < n; k++) {
+    const t = starts[Math.min(starts.length - 1, pieceFirstWord[k])];
+    const prev = out.length ? out[out.length - 1] : spanStart;
+    out.push(Math.max(prev + 0.1, t));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // 4~5. 동적계획법 배정
 // ---------------------------------------------------------------------------
 

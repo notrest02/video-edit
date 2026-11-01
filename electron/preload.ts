@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gdiGlyphs: (params: { family: string; style: number; chars: string }) =>
     ipcRenderer.invoke('font:gdiGlyphs', params),
   probeMedia: (filePath: string) => ipcRenderer.invoke('media:probe', filePath),
+  mmsWordStarts: (segments: Array<{ pcm: Float32Array; words: string[] }>) =>
+    ipcRenderer.invoke('align:mmsWordStarts', segments),
   ensurePreviewProxy: (filePath: string) => ipcRenderer.invoke('media:ensurePreviewProxy', filePath),
   detectSilence: (params: {
     filePath: string;

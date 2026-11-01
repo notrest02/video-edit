@@ -9,6 +9,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
+import { MMS_SAMPLE_RATE, wordStartsFromEmission } from '../src/utils/mmsAligner';
 
 const resolvedFfmpegPath = ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : '';
 const resolvedFfprobePath = ffprobeStatic?.path ? ffprobeStatic.path.replace('app.asar', 'app.asar.unpacked') : '';
@@ -414,6 +415,61 @@ ipcMain.handle('dialog:openFontFile', async () => {
 });
 
 // 3. Probe Arbitrary File Path (e.g. Drag and Drop)
+// 3-0. MMS 강제 정렬: 자막 글자가 음성의 어디서 시작하는지 (자막 한 줄/두 줄 분할 시점 계산용)
+// 모델: userData/models/mms_fa_int8.onnx (Meta MMS forced aligner → ONNX int8, 약 317MB)
+// 모델이 없으면 available:false 를 돌려주고, 렌더러는 쉼·말 속도 기반 추정으로 대체한다.
+let mmsSessionPromise: Promise<any> | null = null;
+function findMmsModel(): string | null {
+  const candidates = [
+    path.join(app.getPath('userData'), 'models', 'mms_fa_int8.onnx'),
+    path.join(app.getAppPath(), 'models', 'mms_fa_int8.onnx'),
+    path.join(process.resourcesPath || '', 'models', 'mms_fa_int8.onnx'),
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) || null;
+}
+function getMmsSession(): Promise<any> | null {
+  if (mmsSessionPromise) return mmsSessionPromise;
+  const modelPath = findMmsModel();
+  if (!modelPath) return null;
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const ort = require('onnxruntime-node');
+  mmsSessionPromise = ort.InferenceSession.create(modelPath).catch((err: unknown) => {
+    console.warn('[mms] model load failed', err);
+    mmsSessionPromise = null;
+    return null;
+  });
+  return mmsSessionPromise;
+}
+
+ipcMain.handle(
+  'align:mmsWordStarts',
+  async (_event, segments: Array<{ pcm: Float32Array; words: string[] }>) => {
+    const sessionPromise = getMmsSession();
+    const session = sessionPromise ? await sessionPromise : null;
+    if (!session) return { available: false, results: segments.map(() => null) };
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ort = require('onnxruntime-node');
+    const results: Array<number[] | null> = [];
+    for (const seg of segments) {
+      try {
+        const pcm = seg.pcm instanceof Float32Array ? seg.pcm : new Float32Array(seg.pcm as ArrayLike<number>);
+        if (pcm.length < MMS_SAMPLE_RATE * 0.2 || seg.words.length === 0) {
+          results.push(null);
+          continue;
+        }
+        const out = await session.run({ audio: new ort.Tensor('float32', pcm, [1, pcm.length]) });
+        const em = out.emission;
+        const [, frames, labels] = em.dims as number[];
+        results.push(wordStartsFromEmission(em.data as Float32Array, frames, labels, pcm.length, seg.words));
+      } catch (err) {
+        console.warn('[mms] align failed', err);
+        results.push(null);
+      }
+    }
+    return { available: true, results };
+  }
+);
+
 // 3-1. 미리보기 전용 프록시 생성
 // 원본(긴 GOP H.264/HEVC)은 임의 위치 시크마다 디코딩 비용이 커서 인디케이터를 끌면 프레임이 몇 장만 보인다
 // (측정: 1080x1920 원본 천천히 2초 끌기 → 5프레임 / 프록시 → 120프레임).

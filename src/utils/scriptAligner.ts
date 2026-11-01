@@ -1,5 +1,6 @@
 import { AlignedSubtitleItem, TimelineClip, WordTimestamp } from '../types/editor';
 import { normalizeAudioPath, rendererWaveformCache } from '../components/AudioWaveformCanvas';
+import { chooseCaptionSplitTimes } from './scriptWaveformAligner';
 
 const CHOSUNG = [
   'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
@@ -916,15 +917,36 @@ export function splitSentenceIntoNaturalChunks(
  * 어색하게 잘려 있더라도, 연속된 자막 클립들의 어절별 타임스탬프를 보존한 채 문장을 먼저 하나로 이어 붙인 뒤
  * 한국어 호흡·의미 덩어리 기준으로 다시 깔끔하게 재분할합니다!
  */
+export type CaptionSplitRequest = {
+  start: number;
+  end: number;
+  voiceEnd: number;
+  pieces: string[];
+};
+
 export function reformatSubtitleClipsByLineMode(
   allClips: TimelineClip[],
   options: {
     mode: CaptionLineMode;
     maxCharsPerLine: number;
     fps?: number;
+    /**
+     * 자막 구간 [start, end](타임라인 초)의 실제 음성 PCM 을 돌려주는 함수.
+     * 있으면 조각 분할 시점을 실제 쉼(무음) 기준으로 정한다 (없으면 기존 글자 비율 + 파형 스냅).
+     * timelineOffset = pcm 0번 샘플의 타임라인 시각
+     */
+    audioLookup?: (
+      start: number,
+      end: number
+    ) => { pcm: Float32Array; sampleRate: number; timelineOffset: number } | null;
+    /**
+     * 자막(문장) 하나를 pieces 로 나눌 때 2번째 조각부터의 시작 시점(타임라인 초)을 직접 돌려주는 함수.
+     * MMS 강제 정렬 결과를 넣는 용도. null 이면 audioLookup 방식으로 대체.
+     */
+    splitTimesProvider?: (req: CaptionSplitRequest) => number[] | null | undefined;
   }
 ): { updatedClips: TimelineClip[]; beforeCount: number; afterCount: number } {
-  const { mode, maxCharsPerLine = 13, fps = 30 } = options;
+  const { mode, maxCharsPerLine = 13, fps = 30, audioLookup, splitTimesProvider } = options;
   const frameSec = 1 / Math.max(1, fps);
 
   const nonTextClips = allClips.filter((c) => c.type !== 'text');
@@ -1123,6 +1145,59 @@ export function reformatSubtitleClipsByLineMode(
     }
 
     const effectiveVoiceSpan = Math.max(0.3, effectiveVoiceEnd - clipStart);
+
+    // 분할 시점 결정 우선순위
+    // 1) splitTimesProvider (MMS 강제 정렬: 각 조각 첫 단어가 실제로 발음되기 시작하는 시점)
+    // 2) 실제 음성 PCM 의 쉼 + 말 속도 추정
+    // 3) (아래 기존 방식) 글자 비율 + 표시용 파형 스냅
+    let boundariesAbs: number[] | null = null;
+    const provided = splitTimesProvider
+      ? splitTimesProvider({ start: clipStart, end: clipEnd, voiceEnd: effectiveVoiceEnd, pieces: finalPieces })
+      : null;
+    if (
+      provided &&
+      provided.length === finalPieces.length - 1 &&
+      provided.every((t, i) => t > (i ? provided[i - 1] : clipStart) && t < clipEnd)
+    ) {
+      boundariesAbs = provided;
+    } else {
+      const audio = audioLookup ? audioLookup(clipStart, clipEnd) : null;
+      if (audio) {
+        boundariesAbs = chooseCaptionSplitTimes(
+          audio.pcm,
+          audio.sampleRate,
+          clipStart - audio.timelineOffset,
+          effectiveVoiceEnd - audio.timelineOffset,
+          finalPieces
+        ).map((t) => t + audio.timelineOffset);
+      }
+    }
+    if (boundariesAbs) {
+      const bounds = boundariesAbs;
+      let segStart = clipStart;
+      finalPieces.forEach((piece, idx) => {
+        const isLast = idx === finalPieces.length - 1;
+        const segEnd = isLast ? clipEnd : Number(bounds[idx].toFixed(4));
+        const roundedStart = Number(segStart.toFixed(4));
+        reformattedTextClips.push({
+          ...clip,
+          id:
+            idx === 0
+              ? clip.id
+              : `${clip.id}_sub_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+          sentenceGroupId: groupId,
+          name: piece.replace(/\r?\n/g, ' ').slice(0, 18),
+          text: piece,
+          startTime: roundedStart,
+          duration: Number(Math.max(frameSec * 3, segEnd - roundedStart).toFixed(4)),
+          voiceEndTime: isLast
+            ? Number(Math.max(roundedStart + 0.15, effectiveVoiceEnd).toFixed(4))
+            : segEnd,
+        });
+        segStart = segEnd;
+      });
+      continue;
+    }
 
     let curStart = clipStart;
     let accumWeight = 0;
