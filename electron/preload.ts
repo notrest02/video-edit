@@ -56,23 +56,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     filePath: string;
     samplesPerSec?: number;
   }) => ipcRenderer.invoke('media:getWaveformPeaks', params),
-  transcribeOpenAI: (params: {
-    filePath: string;
-    sourceStart: number;
-    duration: number;
-    apiKey: string;
-    language?: string;
-    scriptHint?: string;
-  }) => ipcRenderer.invoke('ai:transcribeOpenAI', params),
-  analyzeWithGemini: (params: {
-    filePath: string;
-    sourceStart: number;
-    duration: number;
-    apiKey: string;
-    model?: string;
-    scriptText?: string;
-    captionMaxChars?: number;
-  }) => ipcRenderer.invoke('ai:analyzeWithGemini', params),
   createSampleVideo: () => ipcRenderer.invoke('demo:createSampleVideo'),
   exportVideo: (payload: unknown) => ipcRenderer.invoke('editor:exportVideo', payload),
   onExportProgress: (callback: (progress: number) => void) => {

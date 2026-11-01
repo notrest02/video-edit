@@ -7,7 +7,7 @@ import {
   StepBack,
   StepForward,
 } from 'lucide-react';
-import { useEditorStore } from '../store/useEditorStore';
+import { useEditorStore, clipSpeed } from '../store/useEditorStore';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
 import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
@@ -317,12 +317,14 @@ export const PreviewPlayer: React.FC = () => {
       // 1순위: 활성 오디오가 재생 중이면 오디오 하드웨어 클럭을 마스터 클럭으로 삼음!
       if (audioEl && !audioEl.paused && !audioEl.ended && activeAudioClip) {
         nextTime =
-          activeAudioClip.startTime + (audioEl.currentTime - activeAudioClip.sourceStart);
+          activeAudioClip.startTime +
+          (audioEl.currentTime - activeAudioClip.sourceStart) / clipSpeed(activeAudioClip);
       }
       // 2순위: 비디오가 소리를 내며 재생 중이면 비디오 클럭 동기화
       else if (videoEl && !videoEl.paused && !videoEl.ended && activeVideoClip && !videoEl.muted) {
         nextTime =
-          activeVideoClip.startTime + (videoEl.currentTime - activeVideoClip.sourceStart);
+          activeVideoClip.startTime +
+          (videoEl.currentTime - activeVideoClip.sourceStart) / clipSpeed(activeVideoClip);
       }
       // 3순위: 일반 소프트웨어 타이머
       else {
@@ -369,7 +371,11 @@ export const PreviewPlayer: React.FC = () => {
     }
 
     const targetMediaTime =
-      activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime);
+      activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime) * clipSpeed(activeVideoClip);
+    // 속도 조절된 클립은 그 속도로 재생
+    if (Math.abs(videoEl.playbackRate - clipSpeed(activeVideoClip)) > 1e-3) {
+      videoEl.playbackRate = clipSpeed(activeVideoClip);
+    }
 
     // 음성이 A 트랙으로 분리되어 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
     const hasActiveAudio = Boolean(activeAudioClip);
@@ -430,7 +436,10 @@ export const PreviewPlayer: React.FC = () => {
     }
 
     const targetAudioTime =
-      activeAudioClip.sourceStart + (currentTime - activeAudioClip.startTime);
+      activeAudioClip.sourceStart + (currentTime - activeAudioClip.startTime) * clipSpeed(activeAudioClip);
+    if (Math.abs(audioEl.playbackRate - clipSpeed(activeAudioClip)) > 1e-3) {
+      audioEl.playbackRate = clipSpeed(activeAudioClip);
+    }
 
     const safeVol =
       typeof activeAudioClip.volume === 'number' && !isNaN(activeAudioClip.volume)

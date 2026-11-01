@@ -100,6 +100,10 @@ export const App: React.FC = () => {
         state.setActiveTool('select');
       } else if (e.code === 'KeyC' || e.key === 'c' || e.key === 'C' || e.key === 'ㅊ') {
         state.setActiveTool('razor');
+      } else if (e.code === 'KeyD' && !e.altKey) {
+        // D: 인디케이터 위치에서 선택한 클립만 자르기
+        e.preventDefault();
+        state.splitSelectedClipsAtPlayhead();
       } else if (e.code === 'KeyS' || e.key === 's' || e.key === 'S' || e.key === 'ㄴ') {
         // 순수 'S' 키만 눌렸을 때만 인디케이터 클립 분할!
         e.preventDefault();

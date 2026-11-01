@@ -18,7 +18,8 @@ function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): Tim
     ...c,
     startTime: s - rangeStart,
     duration: e - s,
-    sourceStart: c.type === 'text' ? c.sourceStart : c.sourceStart + (s - c.startTime),
+    sourceStart:
+      c.type === 'text' ? c.sourceStart : c.sourceStart + (s - c.startTime) * (c.speed && c.speed > 0 ? c.speed : 1),
   };
 }
 
@@ -101,6 +102,7 @@ export const TopHeader: React.FC = () => {
           startTime: c.startTime,
           duration: c.duration,
           sourceStart: c.sourceStart,
+          speed: c.speed && c.speed > 0 ? c.speed : 1,
           volume: c.volume,
           muted: c.muted,
         }));
@@ -113,6 +115,7 @@ export const TopHeader: React.FC = () => {
           startTime: c.startTime,
           duration: c.duration,
           sourceStart: c.sourceStart,
+          speed: c.speed && c.speed > 0 ? c.speed : 1,
           volume: c.volume,
           muted: c.muted,
         }));

@@ -59,11 +59,7 @@ interface EditorState {
   statusMessage: string | null;
 
   // AI Settings
-  aiEngine: 'local' | 'openai' | 'gemini';
   localWhisperModel: string;
-  openAiApiKey: string;
-  geminiApiKey: string;
-  geminiModel: string;
   scriptText: string;
   captionLineMode: CaptionLineMode;
   captionMaxCharsPerLine: number;
@@ -112,11 +108,7 @@ interface EditorState {
   setActiveTool: (tool: EditorTool) => void;
   setSnapThresholdFrames: (frames: number) => void;
   setStatusMessage: (msg: string | null) => void;
-  setAiEngine: (engine: 'local' | 'openai' | 'gemini') => void;
-  setGeminiApiKey: (key: string) => void;
-  setGeminiModel: (model: string) => void;
   setLocalWhisperModel: (model: string) => void;
-  setOpenAiApiKey: (key: string) => void;
   setScriptText: (text: string) => void;
   setCaptionLineMode: (mode: CaptionLineMode) => void;
   setCaptionMaxCharsPerLine: (maxChars: number) => void;
@@ -182,7 +174,13 @@ interface EditorState {
   unlinkClip: (clipId?: string) => void;
   deleteClip: (clipId?: string) => void;
   splitClipAtPlayhead: () => void;
+  /** D 키: 인디케이터 위치에서 '선택된' 클립만 자르기 (연결된 V+A 포함) */
+  splitSelectedClipsAtPlayhead: () => void;
   splitClipAtTime: (clipId: string, splitTime: number) => void;
+  /** 클립 속도 변경 (1 = 100%). 길이가 바뀌며, 뒤 클립과 겹치지 않게 맞춤 */
+  setClipSpeed: (clipId: string, speed: number) => void;
+  /** 클립 길이를 지정 길이(초) / 다음 클립까지 / 인디케이터까지 맞추도록 속도 조절 */
+  fitClipLength: (clipId: string, target: number | 'next-clip' | 'playhead') => void;
   rippleCloseGaps: () => void;
   replaceClipWithSegments: (
     clipId: string,
@@ -219,6 +217,11 @@ interface EditorState {
   relinkAsset: (assetId: string, newPath: string) => Promise<boolean>;
   relinkAssetsInBatch: (relinkMap: Record<string, string>) => Promise<number>;
 }
+
+/** 클립 재생 속도 (1 = 100%) */
+export const clipSpeed = (c: Pick<TimelineClip, 'speed'>) => (c.speed && c.speed > 0 ? c.speed : 1);
+export const MIN_CLIP_SPEED = 0.1;
+export const MAX_CLIP_SPEED = 4;
 
 export const MIN_ZOOM_PX_PER_SEC = 1;
 export const MAX_ZOOM_PX_PER_SEC = 600;
@@ -305,7 +308,7 @@ function overwriteOverlappingClips(
           startTime: Number(aEnd.toFixed(4)),
           duration: Number(rightRemain.toFixed(4)),
           sourceStart:
-            c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta).toFixed(4)),
+            c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta * clipSpeed(c)).toFixed(4)),
         });
       } else {
         // 4) 새 클립이 기존 긴 클립의 한가운데 올라온 경우 -> 가운데 겹친 구간을 삭제하고 앞/뒤로 분할
@@ -321,7 +324,7 @@ function overwriteOverlappingClips(
             startTime: Number(aEnd.toFixed(4)),
             duration: Number(rightRemain.toFixed(4)),
             sourceStart:
-              c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta).toFixed(4)),
+              c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta * clipSpeed(c)).toFixed(4)),
           }
         );
       }
@@ -349,9 +352,12 @@ async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTr
     texts.some((t) => t.startTime < c.startTime + c.duration && t.startTime + t.duration > c.startTime);
   // 음성 트랙 우선순위: 오디오 트랙 순서(A1 → A2 …), 오디오가 없으면 영상 클립 소리
   const trackOrder = new Map(tracks.map((t, i) => [t.id, i]));
-  let sources = clips.filter((c) => c.type === 'audio' && c.sourcePath && !c.muted && overlapsText(c));
+  // 속도를 바꾼 클립은 원본 시간과 타임라인 시간이 달라 정렬 기준으로 쓰지 않음
+  let sources = clips.filter(
+    (c) => c.type === 'audio' && c.sourcePath && !c.muted && clipSpeed(c) === 1 && overlapsText(c)
+  );
   if (sources.length === 0) {
-    sources = clips.filter((c) => c.type === 'video' && c.sourcePath && overlapsText(c));
+    sources = clips.filter((c) => c.type === 'video' && c.sourcePath && clipSpeed(c) === 1 && overlapsText(c));
   }
   if (sources.length === 0) return undefined;
 
@@ -489,6 +495,14 @@ async function buildAlignedSplitProvider(
   return { available: true, provider: (r) => map.get(keyOf(r)) ?? null };
 }
 
+// 받아쓰기용 Gemini/OpenAI 엔진을 없애면서 브라우저 저장소에 남아 있던 API 키도 지움
+try {
+  localStorage.removeItem('agy_openai_key');
+  localStorage.removeItem('agy_gemini_key');
+} catch {
+  // ignore
+}
+
 export const useEditorStore = create<EditorState>((set, get) => {
   const pushHistory = () => {
     const { tracks, clips, past } = get();
@@ -574,11 +588,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     statusMessage:
       '좌측 하단에서 [+ 새 시퀀스]를 만들거나, 미디어를 바로 타임라인으로 드래그하면 영상 규격에 맞는 시퀀스가 자동 생성됩니다.',
 
-    aiEngine: 'local',
     localWhisperModel: LOCAL_WHISPER_MODEL,
-    openAiApiKey: localStorage.getItem('agy_openai_key') || '',
-    geminiApiKey: localStorage.getItem('agy_gemini_key') || '',
-    geminiModel: 'gemini-3.8-flash',
     scriptText: DEFAULT_SAMPLE_SCRIPT,
     captionLineMode: 'single-line',
     captionMaxCharsPerLine: 18,
@@ -1031,17 +1041,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setSnapThresholdFrames: (snapThresholdFrames) =>
       set({ snapThresholdFrames: Math.max(1, Math.min(30, snapThresholdFrames)) }),
     setStatusMessage: (statusMessage) => set({ statusMessage }),
-    setAiEngine: (aiEngine) => set({ aiEngine }),
     setLocalWhisperModel: (localWhisperModel) => set({ localWhisperModel }),
-    setOpenAiApiKey: (openAiApiKey) => {
-      localStorage.setItem('agy_openai_key', openAiApiKey);
-      set({ openAiApiKey });
-    },
-    setGeminiApiKey: (geminiApiKey) => {
-      localStorage.setItem('agy_gemini_key', geminiApiKey);
-      set({ geminiApiKey });
-    },
-    setGeminiModel: (geminiModel) => set({ geminiModel }),
     setScriptText: (scriptText) => set({ scriptText }),
     setCaptionLineMode: (captionLineMode) => set({ captionLineMode }),
     setCaptionMaxCharsPerLine: (captionMaxCharsPerLine) =>
@@ -1902,7 +1902,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           sourceStart:
             c.type === 'text'
               ? 0
-              : Number(Math.max(0, c.sourceStart + deltaSourceStart).toFixed(4)),
+              : Number(Math.max(0, c.sourceStart + deltaSourceStart * clipSpeed(c)).toFixed(4)),
           snappedToClip: snapped ?? c.snappedToClip,
           // 검토 표시된 자막을 사용자가 직접 옮기거나 길이를 바꾸면 검토 완료로 본다
           ...(c.needsReview && (deltaStart !== 0 || deltaDuration !== 0) ? { needsReview: false } : {}),
@@ -2119,7 +2119,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
             startTime: Number(currentTime.toFixed(4)),
             duration: secondDuration,
             sourceStart:
-              clip.type === 'text' ? 0 : Number((clip.sourceStart + firstDuration).toFixed(4)),
+              clip.type === 'text'
+                ? 0
+                : Number((clip.sourceStart + firstDuration * clipSpeed(clip)).toFixed(4)),
             linkedGroupId: secondGroupId,
           }
         );
@@ -2129,6 +2131,171 @@ export const useEditorStore = create<EditorState>((set, get) => {
         clips: nextClips,
         sequences: syncActiveSequenceData(tracks, nextClips),
         statusMessage: '재생 헤드 위치에서 클립이 분할되었습니다.',
+      });
+    },
+
+    splitSelectedClipsAtPlayhead: () => {
+      const { clips, tracks, currentTime, selectedClipId, selectedClipIds, linkedSelection } = get();
+      const selected = new Set<string>([...selectedClipIds, ...(selectedClipId ? [selectedClipId] : [])]);
+      if (selected.size === 0) {
+        set({ statusMessage: '자를 클립을 먼저 선택해 주세요. (D: 인디케이터 위치에서 선택한 클립 자르기)' });
+        return;
+      }
+      // 연결된 V+A 짝도 함께
+      if (linkedSelection) {
+        const groups = new Set(
+          clips.filter((c) => selected.has(c.id) && c.linkedGroupId).map((c) => c.linkedGroupId!)
+        );
+        for (const c of clips) if (c.linkedGroupId && groups.has(c.linkedGroupId)) selected.add(c.id);
+      }
+      const lockedTracks = new Set(tracks.filter((t) => t.locked).map((t) => t.id));
+      const targets = clips.filter(
+        (c) =>
+          selected.has(c.id) &&
+          !lockedTracks.has(c.trackId) &&
+          currentTime > c.startTime + 0.04 &&
+          currentTime < c.startTime + c.duration - 0.04
+      );
+      if (targets.length === 0) {
+        set({ statusMessage: '인디케이터(파란 선)가 선택한 클립 안에 있어야 자를 수 있습니다.' });
+        return;
+      }
+
+      pushHistory();
+      const targetIds = new Set(targets.map((t) => t.id));
+      const newGroupMap = new Map<string, string>();
+      const nextClips: TimelineClip[] = [];
+      const newSelected: string[] = [];
+      for (const clip of clips) {
+        if (!targetIds.has(clip.id)) {
+          nextClips.push(clip);
+          continue;
+        }
+        const firstDuration = Number((currentTime - clip.startTime).toFixed(4));
+        const secondDuration = Number((clip.duration - firstDuration).toFixed(4));
+        let secondGroupId = clip.linkedGroupId;
+        if (clip.linkedGroupId) {
+          if (!newGroupMap.has(clip.linkedGroupId)) {
+            newGroupMap.set(clip.linkedGroupId, `link_d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+          }
+          secondGroupId = newGroupMap.get(clip.linkedGroupId);
+        }
+        const secondId = `${clip.id}_d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
+        nextClips.push(
+          { ...clip, duration: firstDuration },
+          {
+            ...clip,
+            id: secondId,
+            startTime: Number(currentTime.toFixed(4)),
+            duration: secondDuration,
+            sourceStart:
+              clip.type === 'text'
+                ? 0
+                : Number((clip.sourceStart + firstDuration * clipSpeed(clip)).toFixed(4)),
+            linkedGroupId: secondGroupId,
+          }
+        );
+        newSelected.push(secondId);
+      }
+      set({
+        clips: nextClips,
+        sequences: syncActiveSequenceData(tracks, nextClips),
+        // 자른 뒤쪽 조각을 선택 상태로 → D 를 이어서 눌러 계속 자르기 편하게
+        selectedClipIds: newSelected,
+        selectedClipId: newSelected[0] ?? null,
+        statusMessage: `인디케이터 위치에서 선택한 클립 ${targets.length}개를 잘랐습니다.`,
+      });
+    },
+
+    setClipSpeed: (clipId, speed) => {
+      const target = get().clips.find((c) => c.id === clipId);
+      if (!target || target.type === 'text') return;
+      const span = target.duration * clipSpeed(target);
+      get().fitClipLength(clipId, span / Math.min(MAX_CLIP_SPEED, Math.max(MIN_CLIP_SPEED, speed)));
+    },
+
+    fitClipLength: (clipId, targetLen) => {
+      const { clips, tracks, currentTime, linkedSelection } = get();
+      const primary = clips.find((c) => c.id === clipId);
+      if (!primary || primary.type === 'text') return;
+      const group = clips.filter(
+        (c) =>
+          c.id === clipId ||
+          (linkedSelection && primary.linkedGroupId && c.linkedGroupId === primary.linkedGroupId)
+      );
+      const groupIds = new Set(group.map((g) => g.id));
+      // 같은 트랙에서 바로 뒤에 오는 클립 시작 (겹침 방지 한계)
+      const nextStartOf = (c: TimelineClip) => {
+        let best = Infinity;
+        for (const o of clips) {
+          if (groupIds.has(o.id) || o.trackId !== c.trackId) continue;
+          if (o.startTime >= c.startTime + c.duration - 0.01 && o.startTime < best) best = o.startTime;
+        }
+        return best;
+      };
+      const maxLen = Math.min(...group.map((c) => nextStartOf(c) - c.startTime));
+
+      let desired: number;
+      if (targetLen === 'next-clip') {
+        if (!Number.isFinite(maxLen)) {
+          set({ statusMessage: '같은 트랙에 뒤 클립이 없어 맞출 길이가 없습니다.' });
+          return;
+        }
+        desired = maxLen;
+      } else if (targetLen === 'playhead') {
+        desired = currentTime - primary.startTime;
+        if (desired <= 0.05) {
+          set({ statusMessage: '인디케이터가 클립 시작보다 뒤에 있어야 합니다.' });
+          return;
+        }
+      } else {
+        desired = targetLen;
+      }
+
+      const span = primary.duration * clipSpeed(primary);
+      let newLen = Math.max(0.05, desired);
+      let limitedByNext = false;
+      if (newLen > maxLen + 1e-4) {
+        newLen = maxLen;
+        limitedByNext = true;
+      }
+      let newSpeed = span / newLen;
+      let limitedBySpeed = false;
+      if (newSpeed > MAX_CLIP_SPEED || newSpeed < MIN_CLIP_SPEED) {
+        newSpeed = Math.min(MAX_CLIP_SPEED, Math.max(MIN_CLIP_SPEED, newSpeed));
+        limitedBySpeed = true;
+      }
+      if (Math.abs(newSpeed - clipSpeed(primary)) < 1e-4) {
+        set({
+          statusMessage: limitedByNext
+            ? '바로 뒤에 다른 클립이 붙어 있어 더 늘릴 수 없습니다. 뒤 클립을 옮기거나 줄인 뒤 다시 해 주세요.'
+            : `이미 ${Math.round(newSpeed * 100)}% 속도입니다.`,
+        });
+        return;
+      }
+
+      pushHistory();
+      const nextClips = clips.map((c) => {
+        if (!groupIds.has(c.id)) return c;
+        const cSpan = c.duration * clipSpeed(c);
+        const isOne = Math.abs(newSpeed - 1) < 1e-6;
+        return {
+          ...c,
+          speed: isOne ? undefined : newSpeed,
+          // 길이는 계산값 그대로 (반올림으로 다음 클립과 틈이 생기지 않게)
+          duration: limitedBySpeed ? cSpan / newSpeed : (newLen * cSpan) / span,
+        };
+      });
+      const finalLen = span / newSpeed;
+      set({
+        clips: nextClips,
+        sequences: syncActiveSequenceData(tracks, nextClips),
+        statusMessage:
+          `클립 속도 ${Math.round(newSpeed * 100)}% · 길이 ${finalLen.toFixed(2)}초` +
+          (limitedByNext ? ' (뒤 클립과 겹치지 않게 그 앞까지만 늘렸습니다)' : '') +
+          (limitedBySpeed
+            ? ` (속도는 ${Math.round(MIN_CLIP_SPEED * 100)}~${Math.round(MAX_CLIP_SPEED * 100)}% 범위로 제한됩니다)`
+            : ''),
       });
     },
 
@@ -2173,7 +2340,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
             id: `${c.id}_rz_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
             startTime: Number(splitTime.toFixed(4)),
             duration: secondDur,
-            sourceStart: c.type === 'text' ? 0 : Number((c.sourceStart + firstDur).toFixed(4)),
+            sourceStart:
+              c.type === 'text' ? 0 : Number((c.sourceStart + firstDur * clipSpeed(c)).toFixed(4)),
             linkedGroupId: newLinkGroupId,
           }
         );
@@ -2299,37 +2467,95 @@ export const useEditorStore = create<EditorState>((set, get) => {
       );
       const targetIds = new Set(targets.map((t) => t.id));
 
+      // segments: 클립 원본 기준(초) 말소리 구간. 타임라인 길이 = 원본 길이 ÷ 속도
+      const sp = clipSpeed(target);
+      const kept = segments.map((seg) => ({
+        a: seg.start / sp,
+        b: seg.start / sp + Math.max(0.08, (seg.end - seg.start) / sp),
+        srcStart: seg.start,
+      }));
+      const cum: number[] = [];
+      let acc = 0;
+      for (const k of kept) {
+        cum.push(acc);
+        acc += k.b - k.a;
+      }
+      const keptTotal = acc;
+      const clipStart = target.startTime;
+      const clipEnd = target.startTime + target.duration;
+      const removedTotal = Math.max(0, target.duration - keptTotal);
+
       const generatedClips: TimelineClip[] = [];
       const segmentGroupIds = segments.map(
         (_, idx) => `link_cut_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`
       );
-
       for (const tClip of targets) {
-        let timelineCursor = tClip.startTime;
-        segments.forEach((seg, idx) => {
-          const segDur = Math.max(0.08, seg.end - seg.start);
-          const startT = rippleCompact ? timelineCursor : tClip.startTime + seg.start;
-          timelineCursor = startT + segDur;
-
+        const tsp = clipSpeed(tClip);
+        kept.forEach((k, idx) => {
+          const segDur = k.b - k.a;
+          const startT = rippleCompact ? tClip.startTime + cum[idx] : tClip.startTime + k.a;
           generatedClips.push({
             ...tClip,
             id: `clip_cut_${tClip.type}_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
             name: `${tClip.name.replace(/\s*#\d+$/, '')} #${idx + 1}`,
             startTime: Number(startT.toFixed(4)),
             duration: Number(segDur.toFixed(4)),
-            sourceStart: Number((tClip.sourceStart + seg.start).toFixed(4)),
+            sourceStart: Number((tClip.sourceStart + k.a * tsp).toFixed(4)),
             linkedGroupId: tClip.linkedGroupId ? segmentGroupIds[idx] : undefined,
           });
         });
       }
 
-      const remainingClips = clips.filter((c) => !targetIds.has(c.id));
+      let remainingClips = clips.filter((c) => !targetIds.has(c.id));
+      let captionNote = '';
+      if (rippleCompact && removedTotal > 0.001) {
+        // 무음을 빼서 당겨진 만큼 자막도 같은 방식으로 당기고 줄임
+        const mapTime = (t: number) => {
+          if (t <= clipStart) return t;
+          if (t >= clipEnd) return t - removedTotal;
+          const rel = t - clipStart;
+          for (let i = 0; i < kept.length; i++) {
+            if (rel < kept[i].a) return clipStart + cum[i]; // 빠진 무음 안 → 그 무음 자리로 모임
+            if (rel <= kept[i].b) return clipStart + cum[i] + (rel - kept[i].a);
+          }
+          return clipStart + keptTotal;
+        };
+        let shrunk = 0;
+        let dropped = 0;
+        const mapped: TimelineClip[] = [];
+        for (const c of remainingClips) {
+          if (c.type !== 'text') {
+            mapped.push(c);
+            continue;
+          }
+          const ns = mapTime(c.startTime);
+          const ne = mapTime(c.startTime + c.duration);
+          if (ne - ns < 0.05) {
+            dropped++;
+            continue;
+          }
+          if (Math.abs(ne - ns - c.duration) > 0.001) shrunk++;
+          mapped.push({
+            ...c,
+            startTime: Number(ns.toFixed(4)),
+            duration: Number((ne - ns).toFixed(4)),
+            ...(c.voiceEndTime !== undefined
+              ? { voiceEndTime: Number(Math.min(ne, Math.max(ns, mapTime(c.voiceEndTime))).toFixed(4)) }
+              : {}),
+          });
+        }
+        remainingClips = mapped;
+        if (shrunk || dropped) {
+          captionNote = ` 자막 ${shrunk}개를 함께 줄였습니다${dropped ? ` (무음 안에만 있던 자막 ${dropped}개 제거)` : ''}.`;
+        }
+      }
+
       const nextClips = [...remainingClips, ...generatedClips];
       set({
         clips: nextClips,
         sequences: syncActiveSequenceData(tracks, nextClips),
         selectedClipId: generatedClips[0]?.id || null,
-        statusMessage: `무음 구간이 제거되어 영상(V) 및 음성(A) 클립이 ${segments.length}개의 유음 컷으로 동시에 분할되었습니다!`,
+        statusMessage: `무음 구간이 제거되어 영상(V) 및 음성(A) 클립이 ${segments.length}개의 유음 컷으로 동시에 분할되었습니다!${captionNote}`,
       });
     },
 
@@ -2624,7 +2850,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
         autoSplitOnCaptionGenerate,
         isQuickSplitMergeMode,
         autoSyncSubtitleStyle,
-        aiEngine,
         localWhisperModel,
       } = get();
 
@@ -2652,7 +2877,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
         autoSplitOnCaptionGenerate,
         isQuickSplitMergeMode,
         autoSyncSubtitleStyle,
-        aiEngine,
         localWhisperModel,
       };
     },
@@ -2845,7 +3069,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
         autoSplitOnCaptionGenerate: data.autoSplitOnCaptionGenerate ?? true,
         isQuickSplitMergeMode: data.isQuickSplitMergeMode ?? false,
         autoSyncSubtitleStyle: data.autoSyncSubtitleStyle ?? false,
-        aiEngine: data.aiEngine || 'local',
         // 예전 프로젝트에 Tiny/Base가 저장돼 있어도 검증된 Small 하나만 사용
         localWhisperModel: LOCAL_WHISPER_MODEL,
         past: [],

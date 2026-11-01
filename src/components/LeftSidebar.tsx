@@ -32,7 +32,6 @@ import {
   normalizeAudioPath,
 } from './AudioWaveformCanvas';
 import { WordTimestamp } from '../types/editor';
-import { refineWaveformLockedSegmentsWithGemini } from '../utils/geminiAligner';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 
 export const LeftSidebar: React.FC = () => {
@@ -54,21 +53,13 @@ export const LeftSidebar: React.FC = () => {
     currentTime,
     selectedClipId,
     selectedClipIds,
-    aiEngine,
     localWhisperModel,
-    openAiApiKey,
-    geminiApiKey,
-    geminiModel,
     scriptText,
     captionLineMode,
     captionMaxCharsPerLine,
     autoSplitOnCaptionGenerate,
     setCurrentTime,
     setSelectedClipId,
-    setAiEngine,
-    setOpenAiApiKey,
-    setGeminiApiKey,
-    setGeminiModel,
     setScriptText,
     setCaptionLineMode,
     setCaptionMaxCharsPerLine,
@@ -155,9 +146,6 @@ export const LeftSidebar: React.FC = () => {
     setIsProcessing(true);
     try {
       const generatedSegments: WordTimestamp[] = [];
-      const activeUserScript = scriptText.includes('안티그래비티 AI 비디오 편집기')
-        ? ''
-        : scriptText.trim();
 
       for (let i = 0; i < targetAudioClips.length; i++) {
         const clip = targetAudioClips[i];
@@ -184,56 +172,13 @@ export const LeftSidebar: React.FC = () => {
           }
         }
 
-        // 1. 파형 기반 무음 골짜기(Silence Valley) 직후 성대 발화 시작점(Rising Edge) 스냅 세그먼트 추출
-        let baseSegments: WordTimestamp[] = [];
-
-        if (aiEngine === 'openai' && openAiApiKey.trim()) {
-          setProgressText('OpenAI Whisper로 음성 구간 인식 중...');
-          const resp = await window.electronAPI.transcribeOpenAI({
-            filePath: clip.sourcePath,
-            sourceStart: clip.sourceStart,
-            duration: clip.duration,
-            apiKey: openAiApiKey.trim(),
-            language: 'ko',
-          });
-          if (resp.segments && resp.segments.length > 0) {
-            baseSegments = resp.segments.map((seg) => ({
-              text: String(seg.text || '').trim(),
-              start: clip.startTime + seg.start,
-              end: clip.startTime + seg.end,
-            }));
-          }
-        } else {
-          baseSegments = await transcribeWithLocalWhisper(pcmFloat32, clip.startTime, {
-            modelId: localWhisperModel,
-            language: 'korean',
-            maxCharsPerLine: captionMaxCharsPerLine,
-            onProgress: (msg) => setProgressText(msg),
-          });
-        }
-
-        // 2. Gemini 모드인 경우: 파형에 고정된 각 세그먼트의 타이밍은 유지한 채 문맥/오타/대본 1:1 교정 수행
-        if (aiEngine === 'gemini') {
-          if (!geminiApiKey.trim()) {
-            setStatusMessage('Google Gemini API 키를 입력하거나 로컬 무료 모드를 선택해 주세요.');
-            setIsProcessing(false);
-            return;
-          }
-
-          const refined = await refineWaveformLockedSegmentsWithGemini({
-            pcmFloat32,
-            baseSegments,
-            clipTimelineStart: clip.startTime,
-            apiKey: geminiApiKey.trim(),
-            model: geminiModel || 'gemini-3.8-flash',
-            scriptText: activeUserScript || undefined,
-            captionMaxChars: captionMaxCharsPerLine,
-            fps,
-            onProgress: (msg) => setProgressText(msg),
-          });
-
-          baseSegments = refined;
-        }
+        // 1. 로컬 Whisper 로 받아쓰기
+        let baseSegments: WordTimestamp[] = await transcribeWithLocalWhisper(pcmFloat32, clip.startTime, {
+          modelId: localWhisperModel,
+          language: 'korean',
+          maxCharsPerLine: captionMaxCharsPerLine,
+          onProgress: (msg) => setProgressText(msg),
+        });
 
         // 3. 받아쓴 글자를 음성에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
         if (window.electronAPI.alignWordSpans && baseSegments.length > 0) {
@@ -481,7 +426,7 @@ export const LeftSidebar: React.FC = () => {
       const result = await window.electronAPI.detectSilence({
         filePath: targetClip.sourcePath,
         sourceStart: targetClip.sourceStart,
-        duration: targetClip.duration,
+        duration: targetClip.duration * (targetClip.speed && targetClip.speed > 0 ? targetClip.speed : 1),
         noiseDb,
         minSilenceDuration: minSilenceDur,
         paddingMs,
@@ -798,99 +743,9 @@ export const LeftSidebar: React.FC = () => {
                 </div>
               )}
 
-              {/* AI 엔진 선택 (로컬 무료 Whisper vs OpenAI Whisper) */}
-              <div className="pt-1 space-y-2">
-                <div className="text-[11px] text-[#bbbbbb] font-medium">AI 음성인식 엔진 선택</div>
-                <div className="grid grid-cols-3 gap-1">
-                  <button
-                    onClick={() => setAiEngine('gemini')}
-                    className={`py-1.5 px-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1 border transition ${
-                      aiEngine === 'gemini'
-                        ? 'bg-[#1a382b] border-[#2ea043] text-[#7ee787] shadow-sm'
-                        : 'bg-[#141414] border-[#333333] text-[#888888] hover:text-[#cccccc]'
-                    }`}
-                  >
-                    <Sparkles className="w-3.5 h-3.5 text-[#7ee787]" /> Gemini (추천)
-                  </button>
-                  <button
-                    onClick={() => setAiEngine('local')}
-                    className={`py-1.5 px-1.5 rounded text-[11px] font-medium flex items-center justify-center gap-1 border transition ${
-                      aiEngine === 'local'
-                        ? 'bg-[#2d8ceb]/20 border-[#2d8ceb] text-white'
-                        : 'bg-[#141414] border-[#333333] text-[#888888] hover:text-[#cccccc]'
-                    }`}
-                  >
-                    <Cpu className="w-3.5 h-3.5" /> 로컬 무료
-                  </button>
-                  <button
-                    onClick={() => setAiEngine('openai')}
-                    className={`py-1.5 px-1.5 rounded text-[11px] font-medium flex items-center justify-center gap-1 border transition ${
-                      aiEngine === 'openai'
-                        ? 'bg-[#2d8ceb]/20 border-[#2d8ceb] text-white'
-                        : 'bg-[#141414] border-[#333333] text-[#888888] hover:text-[#cccccc]'
-                    }`}
-                  >
-                    <KeyRound className="w-3.5 h-3.5" /> OpenAI
-                  </button>
-                </div>
-
-                {aiEngine === 'gemini' && (
-                  <div className="bg-[#121915] border border-[#234231] rounded-md p-2 space-y-2">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-[#a1e8b9] font-semibold flex items-center gap-1">
-                        <Sparkles className="w-3 h-3" /> Gemini 멀티모달 모델:
-                      </span>
-                      <select
-                        value={geminiModel}
-                        onChange={(e) => setGeminiModel(e.target.value)}
-                        className="bg-[#0b120e] border border-[#2d5940] rounded px-1.5 py-0.5 text-[#e6f4ea] text-[11px] focus:outline-none"
-                      >
-                        <option value="gemini-3.8-flash">Gemini 3.8 Flash (최신 추천)</option>
-                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                        <option value="gemini-1.5-flash-latest">Gemini 1.5 Flash (Latest)</option>
-                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                      </select>
-                    </div>
-                    <div>
-                      <input
-                        type="password"
-                        value={geminiApiKey}
-                        onChange={(e) => setGeminiApiKey(e.target.value)}
-                        placeholder="AIzaSy... (Google Gemini API Key)"
-                        className="w-full bg-[#0b120e] border border-[#2d5940] rounded px-2 py-1.5 text-xs text-white focus:outline-none select-text"
-                      />
-                      <div className="text-[10px] text-[#789d87] mt-1 flex justify-between">
-                        <span>💡 오디오 직접 청취 + 0.01초 파형 칼싱크 스냅</span>
-                        <a
-                          href="https://aistudio.google.com/app/apikey"
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[#58a6ff] hover:underline"
-                        >
-                          무료 키 발급 ↗
-                        </a>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {aiEngine === 'local' && (
-                  <div className="flex items-center justify-between text-[11px] text-[#999999] bg-[#16181d] px-2.5 py-1.5 rounded border border-[#2c313c]">
-                    <span>로컬 모델:</span>
-                    <span className="text-white">Whisper Small</span>
-                  </div>
-                )}
-
-                {aiEngine === 'openai' && (
-                  <input
-                    type="password"
-                    value={openAiApiKey}
-                    onChange={(e) => setOpenAiApiKey(e.target.value)}
-                    placeholder="sk-... (OpenAI API Key 입력)"
-                    className="w-full bg-[#121212] border border-[#333333] rounded px-2.5 py-1.5 text-xs text-white focus:outline-none select-text"
-                  />
-                )}
+              <div className="flex items-center justify-between text-[11px] text-[#999999] bg-[#16181d] px-2.5 py-1.5 rounded border border-[#2c313c]">
+                <span>받아쓰기 엔진:</span>
+                <span className="text-white">로컬 Whisper Small (무료, 인터넷 불필요)</span>
               </div>
 
               {/* STEP 1 메인 실행 버튼 */}

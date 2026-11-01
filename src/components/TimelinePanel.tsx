@@ -17,8 +17,10 @@ import {
   ZoomOut,
   X,
 } from 'lucide-react';
+import { ClipContextMenu } from './ClipContextMenu';
 import {
   useEditorStore,
+  clipSpeed,
   getTrackHeightPx,
   MIN_ZOOM_PX_PER_SEC,
   MAX_ZOOM_PX_PER_SEC,
@@ -98,6 +100,15 @@ export const TimelinePanel: React.FC = () => {
     outPoint,
     setTrackHeightsByType,
   } = useEditorStore();
+  // 클립 우클릭 메뉴 (속도/길이 조절, 자르기)
+  const [clipMenu, setClipMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
+  const openClipMenu = (e: React.MouseEvent, clip: TimelineClip) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const st = useEditorStore.getState();
+    if (!st.selectedClipIds.includes(clip.id)) st.setSelectedClipId(clip.id, false);
+    setClipMenu({ clipId: clip.id, x: e.clientX, y: e.clientY });
+  };
   // 타임라인 본문(트랙 헤더 + 레인) 전체: 휠 조작(이동/줌/트랙 높이)을 받는 영역
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
   // Alt+휠 줌 시 마우스 아래 시간이 그대로 유지되도록, 줌 반영 직후 적용할 스크롤 위치
@@ -438,7 +449,9 @@ export const TimelinePanel: React.FC = () => {
       } else if (mode === 'trim-start') {
         const maxDelta = initialDur - frameSec * 2;
         const minDelta =
-          clip.type === 'text' ? -initialStart : -Math.min(initialStart, initialSourceStart);
+          clip.type === 'text'
+            ? -initialStart
+            : -Math.min(initialStart, initialSourceStart / clipSpeed(clip));
         let clampedDelta = Math.max(minDelta, Math.min(maxDelta, rawDeltaSec));
         let newStart = initialStart + clampedDelta;
         let activeGuide: number | null = null;
@@ -1196,7 +1209,14 @@ export const TimelinePanel: React.FC = () => {
                               left: `${leftPx}px`,
                               width: `${widthPx}px`,
                             }}
-                            onMouseDown={(e) => handleClipMouseDown(e, clip, 'move')}
+                            onMouseDown={(e) => {
+                              if (e.button === 2) {
+                                e.stopPropagation(); // 우클릭은 메뉴용 (배경 클릭으로 선택이 풀리지 않게)
+                                return;
+                              }
+                              handleClipMouseDown(e, clip, 'move');
+                            }}
+                            onContextMenu={(e) => openClipMenu(e, clip)}
                             className={`group absolute top-[3px] bottom-[3px] rounded-xs border px-2 py-0.5 overflow-hidden flex flex-col ${
                               clip.type === 'audio' ? 'justify-start' : 'justify-center'
                             } transition-colors ${
@@ -1224,6 +1244,14 @@ export const TimelinePanel: React.FC = () => {
                                   ⚠ 검토
                                 </span>
                               )}
+                              {clip.type !== 'text' && clipSpeed(clip) !== 1 && (
+                                <span
+                                  className="text-[9px] bg-black/50 text-[#ffd479] px-1 rounded shrink-0"
+                                  title="재생 속도 (우클릭으로 변경)"
+                                >
+                                  {Math.round(clipSpeed(clip) * 100)}%
+                                </span>
+                              )}
                               {clip.snappedToClip && clip.type === 'text' && (
                                 <span className="text-[9px] bg-black/40 text-[#f5a623] px-1 rounded shrink-0">
                                   🧲
@@ -1235,7 +1263,7 @@ export const TimelinePanel: React.FC = () => {
                               <AudioWaveformCanvas
                                 sourcePath={clip.sourcePath}
                                 sourceStart={clip.sourceStart}
-                                duration={clip.duration}
+                                duration={clip.duration * clipSpeed(clip)}
                                 widthPx={widthPx}
                                 heightPx={getTrackHeight(track) - 8}
                                 volume={clip.volume}
@@ -1382,6 +1410,15 @@ export const TimelinePanel: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {clipMenu && (
+        <ClipContextMenu
+          clipId={clipMenu.clipId}
+          x={clipMenu.x}
+          y={clipMenu.y}
+          onClose={() => setClipMenu(null)}
+        />
+      )}
 
       {/* 3. 우측 끝 오디오 레벨 미터 (실제 오디오 파형/신호와 1:1 실시간 매칭) */}
       <AudioVuMeter />

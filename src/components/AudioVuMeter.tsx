@@ -54,7 +54,7 @@ export const AudioVuMeter: React.FC = () => {
 
       for (const clip of activeClips) {
         if (!clip.sourcePath) continue;
-        const sourceTime = clip.sourceStart + (currTime - clip.startTime);
+        const sourceTime = clip.sourceStart + (currTime - clip.startTime) * (clip.speed && clip.speed > 0 ? clip.speed : 1);
         const lvl = getInstantAudioLevelAtTime(clip.sourcePath, sourceTime, clip.volume, clip.muted);
         if (lvl.peak > maxPeak) maxPeak = lvl.peak;
         if (lvl.rms > maxRms) maxRms = lvl.rms;

@@ -63,6 +63,7 @@ export interface TimelineClip {
   volume: number;        // 0 ~ 2 (1 = 100%)
   muted: boolean;
   scale?: number;        // 비디오 클립 크기 비율 (기본 100%)
+  speed?: number;        // 재생 속도 (1 = 100%). 타임라인 길이 = 원본 사용 길이 ÷ 속도
 
   // 자막/텍스트 클립 전용 속성
   text?: string;
@@ -173,9 +174,6 @@ export interface ProjectFileData {
   autoSplitOnCaptionGenerate?: boolean;
   isQuickSplitMergeMode?: boolean;
   autoSyncSubtitleStyle?: boolean;
-  aiEngine?: 'local' | 'openai' | 'gemini';
-  geminiApiKey?: string;
-  geminiModel?: string;
   localWhisperModel?: string;
 }
 
@@ -244,29 +242,6 @@ declare global {
         peaks: number[];
         rms: number[];
         samplesPerSec: number;
-      }>;
-      transcribeOpenAI: (params: {
-        filePath: string;
-        sourceStart: number;
-        duration: number;
-        apiKey: string;
-        language?: string;
-        scriptHint?: string;
-      }) => Promise<{
-        text: string;
-        words?: Array<{ word: string; start: number; end: number }>;
-        segments?: Array<{ text: string; start: number; end: number }>;
-      }>;
-      analyzeWithGemini: (params: {
-        filePath: string;
-        sourceStart: number;
-        duration: number;
-        apiKey: string;
-        model?: string;
-        scriptText?: string;
-        captionMaxChars?: number;
-      }) => Promise<{
-        captions: Array<{ text: string; start: number; end: number; speaker?: string }>;
       }>;
       createSampleVideo: () => Promise<Omit<MediaAsset, 'id'>>;
       exportVideo: (payload: unknown) => Promise<{ canceled: boolean; outputPath?: string }>;
