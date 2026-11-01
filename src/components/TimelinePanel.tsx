@@ -3,7 +3,6 @@ import {
   MousePointer,
   Scissors,
   Type,
-  Hand,
   ArrowLeftRight,
   Magnet,
   Link2,
@@ -13,8 +12,6 @@ import {
   EyeOff,
   Mic,
   Plus,
-  Trash2,
-  Wrench,
   Subtitles,
   ZoomIn,
   ZoomOut,
@@ -85,7 +82,6 @@ export const TimelinePanel: React.FC = () => {
     toggleTrackSolo,
     toggleTrackVisible,
     toggleTrackLock,
-    addAssets,
     addAssetToTimeline,
     addSubtitleClipAtCurrentTime,
     moveOrTrimClipWithLink,
@@ -95,7 +91,6 @@ export const TimelinePanel: React.FC = () => {
     commitMultiClipsOverlapOverwrite,
     splitClipAtPlayhead,
     splitClipAtTime,
-    deleteSelectedLayers,
     rippleCloseGaps,
     snapAllSubtitlesToClips,
     getTotalDuration,
@@ -772,14 +767,6 @@ export const TimelinePanel: React.FC = () => {
         </button>
 
         <button
-          onClick={rippleCloseGaps}
-          title="잔물결 빈 공간 이어붙이기 (Ripple Close Gaps)"
-          className="w-7 h-7 rounded flex items-center justify-center text-[#999999] hover:text-white hover:bg-[#2a2a2a] transition"
-        >
-          <ArrowLeftRight className="w-3.5 h-3.5" />
-        </button>
-
-        <button
           onClick={() => {
             setActiveTool('text');
             addSubtitleClipAtCurrentTime();
@@ -794,36 +781,6 @@ export const TimelinePanel: React.FC = () => {
           <Type className="w-3.5 h-3.5" />
         </button>
 
-        <button
-          onClick={() => setActiveTool('hand')}
-          title="손 도구 (H)"
-          className={`w-7 h-7 rounded flex items-center justify-center transition ${
-            activeTool === 'hand'
-              ? 'bg-[#2d8ceb] text-white shadow'
-              : 'text-[#999999] hover:text-white hover:bg-[#2a2a2a]'
-          }`}
-        >
-          <Hand className="w-3.5 h-3.5" />
-        </button>
-
-        <div className="w-5 h-[1px] bg-[#2e2e2e] my-1" />
-
-        <button
-          onClick={() => snapAllSubtitlesToClips()}
-          title="클립 경계에 모든 자막 칼맞춤"
-          className="w-7 h-7 rounded flex items-center justify-center bg-[#f5a623]/15 text-[#f5a623] hover:bg-[#f5a623]/30 transition"
-        >
-          <Magnet className="w-3.5 h-3.5" />
-        </button>
-
-        <button
-          onClick={() => deleteSelectedLayers()}
-          disabled={!selectedClipId && selectedClipIds.length === 0 && !selectedTrackId}
-          title="선택한 클립 또는 트랙 레이어 삭제 (Delete)"
-          className="w-7 h-7 rounded flex items-center justify-center text-[#999999] hover:text-rose-400 disabled:opacity-30 transition mt-auto"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
       </div>
 
       {/* 2. 중앙 타임라인 본체 */}
@@ -965,11 +922,10 @@ export const TimelinePanel: React.FC = () => {
                   <Scissors className="w-3 h-3" />
                 </button>
 
-                <Wrench className="w-3 h-3 text-[#888888] mx-0.5" />
 
                 <button
                   onClick={() => snapAllSubtitlesToClips()}
-                  title={`컷 편집된 클립 시작/끝과 자막의 미세 오차(±${snapThresholdFrames}프레임)를 0프레임으로 칼맞춤`}
+                  title={`클립에 자막 맞추기: 모든 자막의 시작/끝을 가까운 클립 경계(±${snapThresholdFrames}프레임 이내)에 맞춥니다`}
                   className="ml-auto px-1.5 py-0.5 rounded bg-[#f5a623]/20 hover:bg-[#f5a623]/35 border border-[#f5a623]/50 text-[#f5a623] text-[10px] font-bold flex items-center gap-0.5 transition"
                 >
                   <Subtitles className="w-3 h-3" />

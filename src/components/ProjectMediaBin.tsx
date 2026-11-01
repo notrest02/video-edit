@@ -5,8 +5,6 @@ import {
   Wand2,
   Film,
   Music,
-  List,
-  Grid,
   Trash2,
   Layers,
   PlusSquare,
@@ -26,7 +24,6 @@ export const ProjectMediaBin: React.FC = () => {
     projectName,
     assets,
     missingAssetIds,
-    isRelinkModalOpen,
     setIsRelinkModalOpen,
     sequences,
     activeSequenceId,
@@ -41,7 +38,6 @@ export const ProjectMediaBin: React.FC = () => {
     duplicateSequence,
     removeAsset,
     setSelectedBinItem,
-    deleteSelectedLayers,
     setStatusMessage,
   } = useEditorStore();
 
@@ -367,32 +363,6 @@ export const ProjectMediaBin: React.FC = () => {
         )}
       </div>
 
-      {/* 하단 상태 아이콘 바 */}
-      <div className="h-6 bg-[#1d1d1d] border-t border-[#2b2b2b] px-2 flex items-center justify-between text-[#888888]">
-        <div className="flex items-center gap-2">
-          <List className="w-3.5 h-3.5 text-white cursor-pointer" />
-          <Grid className="w-3.5 h-3.5 hover:text-white cursor-pointer" />
-          <span className="text-[10px] text-[#777777]">
-            시퀀스 클릭 시 진입 · 미디어 드래그 시 배치
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={openNewSequenceModal}
-            title="새 시퀀스 만들기"
-            className="hover:text-white"
-          >
-            <PlusSquare className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={deleteSelectedLayers}
-            title="선택한 시퀀스/미디어/레이어 삭제 (Delete)"
-            className="hover:text-rose-400 cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
     </section>
   );
 };

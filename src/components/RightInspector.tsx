@@ -7,7 +7,6 @@ import {
   Magnet,
   Clock,
   Unlink,
-  PlusSquare,
   Sparkles,
   CopyCheck,
   Palette,
@@ -69,8 +68,6 @@ export const RightInspector: React.FC = () => {
     updateClip,
     deleteClip,
     unlinkClip,
-    addSubtitleClipAtCurrentTime,
-    snapAllSubtitlesToClips,
     setStatusMessage,
   } = useEditorStore();
 
@@ -392,7 +389,7 @@ export const RightInspector: React.FC = () => {
                 onClick={handleSnapSingleClipToNearestMedia}
                 className="w-full py-1.5 bg-[#2d8ceb]/20 hover:bg-[#2d8ceb]/30 border border-[#2d8ceb]/50 rounded text-[11px] font-semibold text-[#79b8ff] flex items-center justify-center gap-1"
               >
-                <Magnet className="w-3 h-3" /> 이 자막을 인접 클립 경계에 즉시 맞춤
+                <Magnet className="w-3 h-3" /> 이 자막만 클립 경계에 맞추기
               </button>
             )}
           </div>
@@ -1143,22 +1140,6 @@ export const RightInspector: React.FC = () => {
         </div>
       )}
 
-      {/* 3. 하단 버튼 바 (새 그래픽 만들기 & 클립 자막 맞추기) */}
-      <div className="p-2.5 bg-[#1d1d1d] border-t border-[#2b2b2b] flex items-center gap-2">
-        <button
-          onClick={() => addSubtitleClipAtCurrentTime()}
-          className="flex-1 py-1.5 px-2.5 rounded-full bg-[#2a2a2a] hover:bg-[#363636] border border-[#444444] text-xs text-[#dddddd] flex items-center justify-center gap-1.5 transition"
-        >
-          <PlusSquare className="w-3.5 h-3.5" /> 새 그래픽 만들기
-        </button>
-        <button
-          onClick={() => snapAllSubtitlesToClips()}
-          title="모든 자막을 클립 시작/끝에 칼맞춤"
-          className="p-1.5 rounded-full bg-[#2a2a2a] hover:bg-[#363636] border border-[#444444] text-[#f5a623]"
-        >
-          <Magnet className="w-3.5 h-3.5" />
-        </button>
-      </div>
     </aside>
   );
 };

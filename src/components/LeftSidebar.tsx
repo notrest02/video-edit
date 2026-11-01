@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   Subtitles,
-  Magnet,
   Scissors,
   Upload,
   Loader2,
@@ -17,7 +16,6 @@ import {
 import { useEditorStore, LOCAL_WHISPER_MODEL } from '../store/useEditorStore';
 import {
   CaptionDiffItem,
-  CaptionLineMode,
   compareAndCorrectCaptionsWithScript,
   splitSentenceIntoNaturalChunks,
 } from '../utils/scriptAligner';
@@ -60,30 +58,24 @@ export const LeftSidebar: React.FC = () => {
     geminiApiKey,
     geminiModel,
     scriptText,
-    snapThresholdFrames,
     captionLineMode,
     captionMaxCharsPerLine,
     autoSplitOnCaptionGenerate,
-    isQuickSplitMergeMode,
     setCurrentTime,
     setSelectedClipId,
     setAiEngine,
-    setLocalWhisperModel,
     setOpenAiApiKey,
     setGeminiApiKey,
     setGeminiModel,
     setScriptText,
-    setSnapThresholdFrames,
     setCaptionLineMode,
     setCaptionMaxCharsPerLine,
     setAutoSplitOnCaptionGenerate,
-    setIsQuickSplitMergeMode,
     reformatAllCaptionsLineLayout,
     applyScriptLinesDirectly,
     replaceClipWithSegments,
     addRawAiCaptions,
     applyScriptCorrectionsToCaptions,
-    snapAllSubtitlesToClips,
     updateClip,
     setStatusMessage,
   } = useEditorStore();
@@ -594,24 +586,6 @@ export const LeftSidebar: React.FC = () => {
         </button>
       </div>
 
-      {/* [방안 2] 실제 렌더링되는 프리뷰 화면 위에서 Enter(나누기) / Backspace(합치기) 단축키 토글 */}
-      <div className="pt-1 border-t border-[#283242] flex items-center justify-between gap-2">
-        <div className="text-[10px] text-[#a8b3c5] leading-tight">
-          <strong className="text-[#7ee787]">프리뷰 화면 직접 분할/합치기:</strong> 중앙 영상 화면의 자막 글자 사이를 클릭 후{' '}
-          <kbd className="px-1 py-0.2 bg-black/50 border border-[#444] rounded text-white">Enter</kbd> 나누기 ·{' '}
-          <kbd className="px-1 py-0.2 bg-black/50 border border-[#444] rounded text-white">Backspace</kbd> 합치기
-        </div>
-        <button
-          onClick={() => setIsQuickSplitMergeMode(!isQuickSplitMergeMode)}
-          className={`px-2 py-1 rounded text-[10px] font-bold shrink-0 border transition ${
-            isQuickSplitMergeMode
-              ? 'bg-[#2ea043] border-[#3fb950] text-white'
-              : 'bg-[#161920] border-[#333] text-[#888]'
-          }`}
-        >
-          {isQuickSplitMergeMode ? '단축키 ON' : '단축키 OFF'}
-        </button>
-      </div>
     </div>
   );
 
@@ -1058,47 +1032,7 @@ export const LeftSidebar: React.FC = () => {
            ===================================================================== */}
         {subTab === 'step3-manage' && (
           <div className="space-y-3.5">
-            {/* 캡션 한줄 / 두줄 이내 변환 시스템 */}
-            {renderCaptionLineSystemCard()}
-
-            {/* 후순위 정리 1: 컷 편집된 클립과 자막 시작/끝 맞추기 */}
-            <div className="bg-[#202020] border border-[#f5a623]/40 rounded-lg p-3 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-[#f5a623] flex items-center gap-1.5">
-                  <Magnet className="w-4 h-4" />
-                  컷 편집 후 클립과 자막 시작/끝 맞추기 (정리)
-                </span>
-                <span className="text-[11px] font-mono text-[#aaaaaa]">
-                  ±{snapThresholdFrames} 프레임
-                </span>
-              </div>
-              <p className="text-[11px] text-[#999999] leading-relaxed">
-                음성/영상 파일을 컷 편집한 뒤, 자막 캡션의 시작점·끝점이 컷 편집된 클립과 1~{snapThresholdFrames}프레임 미세하게 차이 날 때 클릭 한 번으로 클립 경계에 딱 맞춰 정리합니다.
-              </p>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-[#aaaaaa] shrink-0">허용 오차:</span>
-                <input
-                  type="range"
-                  min={1}
-                  max={15}
-                  value={snapThresholdFrames}
-                  onChange={(e) => setSnapThresholdFrames(Number(e.target.value))}
-                  className="flex-1 accent-[#f5a623]"
-                />
-                <span className="text-xs font-mono text-[#f5a623] w-14 text-right">
-                  ±{snapThresholdFrames}F
-                </span>
-              </div>
-              <button
-                onClick={() => snapAllSubtitlesToClips()}
-                className="w-full py-2 bg-[#f5a623] hover:bg-[#e09612] text-black font-bold text-xs rounded flex items-center justify-center gap-1.5 transition"
-              >
-                <Magnet className="w-3.5 h-3.5" />
-                클립 경계에 자막 시작/끝 일괄 맞추기
-              </button>
-            </div>
-
-            {/* 후순위 정리 2: 무음 구간 자동 컷 편집 */}
+            {/* 무음 구간 자동 컷 편집 */}
             <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2.5 text-xs">
               <div className="font-semibold text-white flex items-center gap-1.5">
                 <Scissors className="w-4 h-4 text-[#2d8ceb]" />

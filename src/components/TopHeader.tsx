@@ -1,17 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import {
-  Home,
-  Undo2,
-  Redo2,
-  Download,
-  Magnet,
-  Loader2,
-  LayoutGrid,
-  Volume2,
-  Save,
-  FolderOpen,
-  FilePlus,
-} from 'lucide-react';
+import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
 import { ensureFontsForValues } from '../utils/pcFonts';
@@ -55,12 +43,8 @@ export const TopHeader: React.FC = () => {
     saveProject,
     openProject,
     newProject,
-    openNewSequenceModal,
-    addAssets,
-    addAssetToTimeline,
     undo,
     redo,
-    snapAllSubtitlesToClips,
     getTotalDuration,
     setStatusMessage,
     inPoint,
@@ -76,17 +60,6 @@ export const TopHeader: React.FC = () => {
     });
     return () => unsubscribe();
   }, []);
-
-  const handleOpenImport = async () => {
-    if (!window.electronAPI) return;
-    const files = await window.electronAPI.openMediaDialog();
-    if (files && files.length > 0) {
-      const created = addAssets(files);
-      if (clips.length === 0 && created[0]) {
-        addAssetToTimeline(created[0].id);
-      }
-    }
-  };
 
   const handleExportMp4 = async () => {
     if (!window.electronAPI) return;
@@ -197,7 +170,6 @@ export const TopHeader: React.FC = () => {
     <header className="h-9 shrink-0 bg-[#161616] border-b border-[#111111] px-3 flex items-center justify-between select-none text-xs text-[#cccccc]">
       {/* 좌측: 프로젝트(새로만들기/열기/저장) | 가져오기 | 시퀀스 | 내보내기 */}
       <div className="flex items-center gap-2.5 h-full">
-        <Home className="w-4 h-4 text-[#888888] hover:text-white cursor-pointer mr-0.5" />
 
         {/* 프로젝트 관리 그룹 (새 프로젝트, 열기, 저장) */}
         <div className="flex items-center gap-1 bg-[#202020] px-1 py-0.5 rounded border border-[#2d2d2d]">
@@ -238,28 +210,6 @@ export const TopHeader: React.FC = () => {
             다른이름저장
           </button>
         </div>
-
-        <div className="h-3.5 w-[1px] bg-[#333333] mx-0.5" />
-
-        <button
-          onClick={handleOpenImport}
-          className="h-full px-1 text-[#aaaaaa] hover:text-white transition"
-        >
-          미디어 가져오기
-        </button>
-        <button
-          onClick={openNewSequenceModal}
-          className="h-full px-1 text-[#aaaaaa] hover:text-white transition"
-        >
-          + 새 시퀀스
-        </button>
-        <button
-          onClick={handleExportMp4}
-          disabled={isExporting}
-          className="h-full px-1 text-[#aaaaaa] hover:text-white transition flex items-center gap-1"
-        >
-          {isExporting ? `내보내는 중 (${exportProgress}%)` : '내보내기'}
-        </button>
 
         <div className="h-3.5 w-[1px] bg-[#333333] mx-0.5" />
 
@@ -312,14 +262,6 @@ export const TopHeader: React.FC = () => {
 
       {/* 우측: 빠른 클립-자막 맞춤 & 워크스페이스/내보내기 */}
       <div className="flex items-center gap-2.5">
-        <button
-          onClick={() => snapAllSubtitlesToClips()}
-          className="px-2.5 py-1 rounded bg-[#262626] hover:bg-[#333333] border border-[#3e3e3e] text-[#f5a623] text-[11px] font-semibold flex items-center gap-1 transition"
-        >
-          <Magnet className="w-3 h-3" />
-          클립에 자막 맞추기
-        </button>
-
         <select
           value={hasInOut ? renderRange : 'all'}
           onChange={(e) => setRenderRange(e.target.value as 'all' | 'inout')}
@@ -343,11 +285,9 @@ export const TopHeader: React.FC = () => {
           ) : (
             <Download className="w-3 h-3" />
           )}
-          MP4 출력
+          {isExporting ? `내보내는 중 ${exportProgress}%` : 'MP4 출력'}
         </button>
 
-        <LayoutGrid className="w-3.5 h-3.5 text-[#888888]" />
-        <Volume2 className="w-3.5 h-3.5 text-[#888888]" />
       </div>
     </header>
   );

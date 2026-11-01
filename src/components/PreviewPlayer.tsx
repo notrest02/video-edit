@@ -6,14 +6,9 @@ import {
   SkipForward,
   StepBack,
   StepForward,
-  Scissors,
-  Magnet,
-  Wrench,
-  Camera,
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
-import { splitSentenceIntoNaturalChunks } from '../utils/scriptAligner';
 import { TimelineClip } from '../types/editor';
 import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
 import {
@@ -150,8 +145,6 @@ export const PreviewPlayer: React.FC = () => {
     isPlaying,
     selectedClipId,
     activeSequenceId,
-    captionLineMode,
-    captionMaxCharsPerLine,
     isQuickSplitMergeMode,
     setCurrentTime,
     setIsPlaying,
@@ -159,8 +152,6 @@ export const PreviewPlayer: React.FC = () => {
     setIsQuickSplitMergeMode,
     openEditSequenceModal,
     openNewSequenceModal,
-    splitClipAtPlayhead,
-    snapAllSubtitlesToClips,
     updateClip,
     splitSubtitleClipAtTextCursor,
     mergeSubtitleClipWithAdjacent,
@@ -867,12 +858,6 @@ export const PreviewPlayer: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
-            <select className="bg-[#262626] border border-[#3a3a3a] rounded px-2 py-0.5 text-[11px] text-[#dddddd] focus:outline-none">
-              <option>전체</option>
-              <option>1/2</option>
-              <option>1/4</option>
-            </select>
-            <Wrench className="w-3.5 h-3.5 text-[#999999]" />
             <span className="font-mono text-[#bbbbbb] text-xs tracking-wider">
               {formatFullTimecode(totalDuration, fps)}
             </span>
@@ -943,25 +928,6 @@ export const PreviewPlayer: React.FC = () => {
             <SkipForward className="w-3.5 h-3.5" />
           </button>
 
-          <div className="h-3.5 w-[1px] bg-[#333333] mx-1" />
-
-          <button
-            onClick={splitClipAtPlayhead}
-            title="재생 헤드 위치에서 클립 분할 (S)"
-            className="p-1 hover:text-white transition"
-          >
-            <Scissors className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={() => snapAllSubtitlesToClips()}
-            title="클립 경계에 자막 칼맞춤"
-            className="p-1 text-[#f5a623] hover:text-amber-300 transition"
-          >
-            <Magnet className="w-3.5 h-3.5" />
-          </button>
-
-          <Camera className="w-3.5 h-3.5 text-[#777777]" />
         </div>
       </div>
     </main>
