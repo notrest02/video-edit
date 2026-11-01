@@ -421,16 +421,32 @@ async function buildMmsSplitProvider(
   });
   if (requests.length === 0) return { available: true };
 
+  // 앞뒤 자막도 함께 정렬: 자막 구간 자체가 조금 어긋나 있어도(긴 숨 묶음 안의 문장 경계 등)
+  // 글자가 좁은 구간에 억지로 눌려 들어가지 않고 실제 위치를 찾는다
+  const texts = clips
+    .filter((c) => c.type === 'text' && (c.text || '').trim())
+    .sort((x, y) => x.startTime - y.startTime);
   const segments: Array<{ pcm: Float32Array; words: string[] }> = [];
-  const meta: Array<{ r: CaptionSplitRequest; segStartAbs: number }> = [];
+  const meta: Array<{ r: CaptionSplitRequest; segStartAbs: number; wordOffset: number }> = [];
   for (const r of requests) {
     const a = audioLookup(r.start, r.end);
     if (!a) continue;
-    const from = Math.max(0, Math.floor((r.start - a.timelineOffset) * a.sampleRate));
-    const to = Math.min(a.pcm.length, Math.ceil((r.voiceEnd + 0.15 - a.timelineOffset) * a.sampleRate));
+    const prev = [...texts].reverse().find((c) => Math.abs(c.startTime + c.duration - r.start) < 0.05);
+    const next = texts.find((c) => Math.abs(c.startTime - r.end) < 0.05);
+    const prevWords = prev ? wordsOf(prev.text || '') : [];
+    const nextWords = next ? wordsOf(next.text || '') : [];
+    const segStart = prev ? prev.startTime : r.start;
+    const segEnd = next
+      ? (next.voiceEndTime && next.voiceEndTime > next.startTime ? next.voiceEndTime : next.startTime + next.duration) + 0.15
+      : r.voiceEnd + 0.15;
+    const from = Math.max(0, Math.floor((segStart - a.timelineOffset) * a.sampleRate));
+    const to = Math.min(a.pcm.length, Math.ceil((segEnd - a.timelineOffset) * a.sampleRate));
     if (to - from < a.sampleRate * 0.2) continue;
-    segments.push({ pcm: a.pcm.slice(from, to), words: r.pieces.flatMap(wordsOf) });
-    meta.push({ r, segStartAbs: a.timelineOffset + from / a.sampleRate });
+    segments.push({
+      pcm: a.pcm.slice(from, to),
+      words: [...prevWords, ...r.pieces.flatMap(wordsOf), ...nextWords],
+    });
+    meta.push({ r, segStartAbs: a.timelineOffset + from / a.sampleRate, wordOffset: prevWords.length });
   }
   if (segments.length === 0) return { available: true };
 
@@ -439,9 +455,9 @@ async function buildMmsSplitProvider(
   const map = new Map<string, number[]>();
   res.results.forEach((starts, i) => {
     if (!starts) return;
-    const { r, segStartAbs } = meta[i];
+    const { r, segStartAbs, wordOffset } = meta[i];
     const bounds: number[] = [];
-    let wi = 0;
+    let wi = wordOffset;
     r.pieces.forEach((piece, k) => {
       if (k > 0) bounds.push(segStartAbs + starts[Math.min(wi, starts.length - 1)]);
       wi += wordsOf(piece).length;

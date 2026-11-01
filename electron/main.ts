@@ -9,7 +9,13 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
-import { MMS_SAMPLE_RATE, wordStartsFromEmission } from '../src/utils/mmsAligner';
+import {
+  MMS_SAMPLE_RATE,
+  alignWordSpansLong,
+  createSyllableTokenizer,
+  wordStartsFromEmission,
+  type AlignTokenizer,
+} from '../src/utils/mmsAligner';
 
 const resolvedFfmpegPath = ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : '';
 const resolvedFfprobePath = ffprobeStatic?.path ? ffprobeStatic.path.replace('app.asar', 'app.asar.unpacked') : '';
@@ -415,38 +421,49 @@ ipcMain.handle('dialog:openFontFile', async () => {
 });
 
 // 3. Probe Arbitrary File Path (e.g. Drag and Drop)
-// 3-0. MMS 강제 정렬: 자막 글자가 음성의 어디서 시작하는지 (자막 한 줄/두 줄 분할 시점 계산용)
-// 모델: userData/models/mms_fa_int8.onnx (Meta MMS forced aligner → ONNX int8, 약 317MB)
+// 3-0. 강제 정렬: 자막 글자가 음성의 어디서 시작하는지 (자막 한 줄/두 줄 분할 시점 계산용)
+// 모델: kresnik/wav2vec2-large-xlsr-korean (Apache-2.0, 한글 음절 CTC) → ONNX int8 (약 318MB)
+//   userData/models/ko-wav2vec2/{model_int8.onnx, vocab.json}
 // 모델이 없으면 available:false 를 돌려주고, 렌더러는 쉼·말 속도 기반 추정으로 대체한다.
-let mmsSessionPromise: Promise<any> | null = null;
-function findMmsModel(): string | null {
+const ALIGN_MODEL_DIR_NAME = path.join('models', 'ko-wav2vec2');
+let alignModelPromise: Promise<{ session: any; tokenizer: AlignTokenizer } | null> | null = null;
+function findAlignModelDir(): string | null {
   const candidates = [
-    path.join(app.getPath('userData'), 'models', 'mms_fa_int8.onnx'),
-    path.join(app.getAppPath(), 'models', 'mms_fa_int8.onnx'),
-    path.join(process.resourcesPath || '', 'models', 'mms_fa_int8.onnx'),
+    path.join(app.getPath('userData'), ALIGN_MODEL_DIR_NAME),
+    path.join(app.getAppPath(), ALIGN_MODEL_DIR_NAME),
+    path.join(process.resourcesPath || '', ALIGN_MODEL_DIR_NAME),
   ];
-  return candidates.find((p) => p && fs.existsSync(p)) || null;
+  return (
+    candidates.find(
+      (d) => d && fs.existsSync(path.join(d, 'model_int8.onnx')) && fs.existsSync(path.join(d, 'vocab.json'))
+    ) || null
+  );
 }
-function getMmsSession(): Promise<any> | null {
-  if (mmsSessionPromise) return mmsSessionPromise;
-  const modelPath = findMmsModel();
-  if (!modelPath) return null;
+function getAlignModel() {
+  if (alignModelPromise) return alignModelPromise;
+  const dir = findAlignModelDir();
+  if (!dir) return null;
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const ort = require('onnxruntime-node');
-  mmsSessionPromise = ort.InferenceSession.create(modelPath).catch((err: unknown) => {
-    console.warn('[mms] model load failed', err);
-    mmsSessionPromise = null;
+  alignModelPromise = (async () => {
+    const vocab = JSON.parse(await fs.promises.readFile(path.join(dir, 'vocab.json'), 'utf8'));
+    const session = await ort.InferenceSession.create(path.join(dir, 'model_int8.onnx'));
+    return { session, tokenizer: createSyllableTokenizer(vocab, { useWordDelimiter: true }) };
+  })().catch((err: unknown) => {
+    console.warn('[align] model load failed', err);
+    alignModelPromise = null;
     return null;
   });
-  return mmsSessionPromise;
+  return alignModelPromise;
 }
 
 ipcMain.handle(
   'align:mmsWordStarts',
   async (_event, segments: Array<{ pcm: Float32Array; words: string[] }>) => {
-    const sessionPromise = getMmsSession();
-    const session = sessionPromise ? await sessionPromise : null;
-    if (!session) return { available: false, results: segments.map(() => null) };
+    const modelPromise = getAlignModel();
+    const model = modelPromise ? await modelPromise : null;
+    if (!model) return { available: false, results: segments.map(() => null) };
+    const { session, tokenizer } = model;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ort = require('onnxruntime-node');
     const results: Array<number[] | null> = [];
@@ -460,15 +477,43 @@ ipcMain.handle(
         const out = await session.run({ audio: new ort.Tensor('float32', pcm, [1, pcm.length]) });
         const em = out.emission;
         const [, frames, labels] = em.dims as number[];
-        results.push(wordStartsFromEmission(em.data as Float32Array, frames, labels, pcm.length, seg.words));
+        results.push(
+          wordStartsFromEmission(em.data as Float32Array, frames, labels, pcm.length, seg.words, tokenizer)
+        );
       } catch (err) {
-        console.warn('[mms] align failed', err);
+        console.warn('[align] failed', err);
         results.push(null);
       }
     }
     return { available: true, results };
   }
 );
+
+// 클립 전체(긴 음성)를 한 번에 정렬: 단어별 [시작, 끝] 초
+ipcMain.handle('align:wordSpansLong', async (_event, params: { pcm: Float32Array; words: string[] }) => {
+  const modelPromise = getAlignModel();
+  const model = modelPromise ? await modelPromise : null;
+  if (!model) return { available: false, spans: null };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const ort = require('onnxruntime-node');
+  try {
+    const pcm = params.pcm instanceof Float32Array ? params.pcm : new Float32Array(params.pcm as ArrayLike<number>);
+    const spans = await alignWordSpansLong(
+      async (chunk) => {
+        const out = await model.session.run({ audio: new ort.Tensor('float32', chunk, [1, chunk.length]) });
+        const [, frames, labels] = out.emission.dims as number[];
+        return { data: out.emission.data as Float32Array, frames, labels };
+      },
+      pcm,
+      params.words,
+      model.tokenizer
+    );
+    return { available: true, spans };
+  } catch (err) {
+    console.warn('[align] long alignment failed', err);
+    return { available: true, spans: null };
+  }
+});
 
 // 3-1. 미리보기 전용 프록시 생성
 // 원본(긴 GOP H.264/HEVC)은 임의 위치 시크마다 디코딩 비용이 커서 인디케이터를 끌면 프레임이 몇 장만 보인다

@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   probeMedia: (filePath: string) => ipcRenderer.invoke('media:probe', filePath),
   mmsWordStarts: (segments: Array<{ pcm: Float32Array; words: string[] }>) =>
     ipcRenderer.invoke('align:mmsWordStarts', segments),
+  alignWordSpansLong: (params: { pcm: Float32Array; words: string[] }) =>
+    ipcRenderer.invoke('align:wordSpansLong', params),
   ensurePreviewProxy: (filePath: string) => ipcRenderer.invoke('media:ensurePreviewProxy', filePath),
   detectSilence: (params: {
     filePath: string;

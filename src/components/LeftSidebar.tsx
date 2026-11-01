@@ -24,6 +24,7 @@ import {
   transcribeRawChunksWithLocalWhisper,
   computeVisualWaveformPeaks,
 } from '../utils/localWhisper';
+import { refineCaptionsByFullAlignment } from '../utils/captionBoundaryRefiner';
 import { alignScriptToAudio, parseScriptVariants } from '../utils/scriptWaveformAligner';
 import {
   rendererWaveformCache,
@@ -288,7 +289,19 @@ export const LeftSidebar: React.FC = () => {
           );
         }
 
-        for (const cap of result.captions) {
+        // 대본 전체 글자를 음성 전체에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
+        // (대본 정렬기가 쉼을 잘못 골랐거나, 쉼 없이 이어 말한 구간의 문장 경계까지 바로잡음)
+        let finalCaptions = result.captions;
+        if (window.electronAPI.alignWordSpansLong) {
+          setProgressText(`${label} 자막 위치 정밀 보정 중...`);
+          const refined = await refineCaptionsByFullAlignment(pcm, 16000, result.captions, (p, words) =>
+            window.electronAPI!.alignWordSpansLong!({ pcm: p, words })
+          );
+          finalCaptions = refined.captions;
+          if (!refined.available) notes.push('정밀 정렬 모델이 없어 자막 위치는 추정값입니다');
+        }
+
+        for (const cap of finalCaptions) {
           segments.push({
             text: cap.text,
             start: clip.startTime + cap.start,

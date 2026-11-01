@@ -196,6 +196,10 @@ declare global {
         ext: string;
       } | null>;
       probeMedia: (filePath: string) => Promise<Omit<MediaAsset, 'id'>>;
+      alignWordSpansLong?: (params: {
+        pcm: Float32Array;
+        words: string[];
+      }) => Promise<{ available: boolean; spans: Array<[number, number] | null> | null }>;
       mmsWordStarts?: (
         segments: Array<{ pcm: Float32Array; words: string[] }>
       ) => Promise<{ available: boolean; results: Array<number[] | null> }>;
