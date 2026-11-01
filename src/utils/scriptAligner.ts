@@ -938,10 +938,10 @@ export function reformatSubtitleClipsByLineMode(
     audioLookup?: (
       start: number,
       end: number
-    ) => { pcm: Float32Array; sampleRate: number; timelineOffset: number } | null;
+    ) => { pcm: Float32Array; sampleRate: number; timelineOffset: number; key?: string } | null;
     /**
      * 자막(문장) 하나를 pieces 로 나눌 때 2번째 조각부터의 시작 시점(타임라인 초)을 직접 돌려주는 함수.
-     * MMS 강제 정렬 결과를 넣는 용도. null 이면 audioLookup 방식으로 대체.
+     * 강제 정렬 결과를 넣는 용도. null 이면 audioLookup 방식으로 대체.
      */
     splitTimesProvider?: (req: CaptionSplitRequest) => number[] | null | undefined;
   }
@@ -1147,7 +1147,7 @@ export function reformatSubtitleClipsByLineMode(
     const effectiveVoiceSpan = Math.max(0.3, effectiveVoiceEnd - clipStart);
 
     // 분할 시점 결정 우선순위
-    // 1) splitTimesProvider (MMS 강제 정렬: 각 조각 첫 단어가 실제로 발음되기 시작하는 시점)
+    // 1) splitTimesProvider (강제 정렬: 각 조각 첫 단어가 실제로 발음되기 시작하는 시점)
     // 2) 실제 음성 PCM 의 쉼 + 말 속도 추정
     // 3) (아래 기존 방식) 글자 비율 + 표시용 파형 스냅
     let boundariesAbs: number[] | null = null;

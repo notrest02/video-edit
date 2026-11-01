@@ -11,12 +11,12 @@ import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
-  MMS_SAMPLE_RATE,
-  alignWordSpansLong,
+  computeEmission,
   createSyllableTokenizer,
-  wordStartsFromEmission,
+  wordSpansInRange,
   type AlignTokenizer,
-} from '../src/utils/mmsAligner';
+  type Emission,
+} from '../src/utils/forcedAligner';
 
 const resolvedFfmpegPath = ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : '';
 const resolvedFfprobePath = ffprobeStatic?.path ? ffprobeStatic.path.replace('app.asar', 'app.asar.unpacked') : '';
@@ -516,66 +516,58 @@ function getAlignModel() {
   return alignModelPromise;
 }
 
+// 음성 클립별 emission 캐시: 같은 클립은 모델을 한 번만 돌리고, 자막 구간마다 필요한 프레임만 잘라 정렬
+// (자막 만들기 → 바로 이어서 한 줄/두 줄 나누기를 하면 모델 계산 없이 끝남)
+const emissionCache = new Map<string, Promise<Emission | null>>();
+const EMISSION_CACHE_MAX = 4;
+
 ipcMain.handle(
-  'align:mmsWordStarts',
-  async (_event, segments: Array<{ pcm: Float32Array; words: string[] }>) => {
+  'align:wordSpans',
+  async (
+    _event,
+    params: { key: string; pcm: Float32Array; ranges: Array<{ start: number; end: number; words: string[] }> }
+  ) => {
     // 모델이 없으면 먼저 받음 (진행 상황은 'model:status' 로 화면에 표시)
     await getModelDownloader().ensure();
     const modelPromise = getAlignModel();
     const model = modelPromise ? await modelPromise : null;
-    if (!model) return { available: false, results: segments.map(() => null) };
-    const { session, tokenizer } = model;
+    if (!model) return { available: false, results: params.ranges.map(() => null) };
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ort = require('onnxruntime-node');
-    const results: Array<number[] | null> = [];
-    for (const seg of segments) {
-      try {
-        const pcm = seg.pcm instanceof Float32Array ? seg.pcm : new Float32Array(seg.pcm as ArrayLike<number>);
-        if (pcm.length < MMS_SAMPLE_RATE * 0.2 || seg.words.length === 0) {
-          results.push(null);
-          continue;
-        }
-        const out = await session.run({ audio: new ort.Tensor('float32', pcm, [1, pcm.length]) });
-        const em = out.emission;
-        const [, frames, labels] = em.dims as number[];
-        results.push(
-          wordStartsFromEmission(em.data as Float32Array, frames, labels, pcm.length, seg.words, tokenizer)
-        );
-      } catch (err) {
-        console.warn('[align] failed', err);
-        results.push(null);
-      }
-    }
-    return { available: true, results };
-  }
-);
 
-// 클립 전체(긴 음성)를 한 번에 정렬: 단어별 [시작, 끝] 초
-ipcMain.handle('align:wordSpansLong', async (_event, params: { pcm: Float32Array; words: string[] }) => {
-  await getModelDownloader().ensure();
-  const modelPromise = getAlignModel();
-  const model = modelPromise ? await modelPromise : null;
-  if (!model) return { available: false, spans: null };
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const ort = require('onnxruntime-node');
-  try {
-    const pcm = params.pcm instanceof Float32Array ? params.pcm : new Float32Array(params.pcm as ArrayLike<number>);
-    const spans = await alignWordSpansLong(
-      async (chunk) => {
+    let emPromise = emissionCache.get(params.key);
+    if (!emPromise) {
+      const pcm =
+        params.pcm instanceof Float32Array ? params.pcm : new Float32Array(params.pcm as ArrayLike<number>);
+      emPromise = computeEmission(async (chunk) => {
         const out = await model.session.run({ audio: new ort.Tensor('float32', chunk, [1, chunk.length]) });
         const [, frames, labels] = out.emission.dims as number[];
         return { data: out.emission.data as Float32Array, frames, labels };
-      },
-      pcm,
-      params.words,
-      model.tokenizer
-    );
-    return { available: true, spans };
-  } catch (err) {
-    console.warn('[align] long alignment failed', err);
-    return { available: true, spans: null };
+      }, pcm).catch((err) => {
+        console.warn('[align] emission failed', err);
+        return null;
+      });
+      emissionCache.set(params.key, emPromise);
+      while (emissionCache.size > EMISSION_CACHE_MAX) {
+        emissionCache.delete(emissionCache.keys().next().value as string);
+      }
+    }
+    const em = await emPromise;
+    if (!em) {
+      emissionCache.delete(params.key);
+      return { available: true, results: params.ranges.map(() => null) };
+    }
+    const results = params.ranges.map((r) => {
+      try {
+        return wordSpansInRange(em, Math.max(0, r.start), r.end, r.words, model.tokenizer);
+      } catch (err) {
+        console.warn('[align] range failed', err);
+        return null;
+      }
+    });
+    return { available: true, results };
   }
-});
+);
 
 // 3-1. 미리보기 전용 프록시 생성
 // 원본(긴 GOP H.264/HEVC)은 임의 위치 시크마다 디코딩 비용이 커서 인디케이터를 끌면 프레임이 몇 장만 보인다

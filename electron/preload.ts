@@ -25,8 +25,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gdiGlyphs: (params: { family: string; style: number; chars: string }) =>
     ipcRenderer.invoke('font:gdiGlyphs', params),
   probeMedia: (filePath: string) => ipcRenderer.invoke('media:probe', filePath),
-  mmsWordStarts: (segments: Array<{ pcm: Float32Array; words: string[] }>) =>
-    ipcRenderer.invoke('align:mmsWordStarts', segments),
   modelGetStatus: () => ipcRenderer.invoke('model:getStatus'),
   modelEnsure: () => ipcRenderer.invoke('model:ensure'),
   modelImportDialog: () => ipcRenderer.invoke('model:importDialog'),
@@ -35,8 +33,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('model:status', handler);
     return () => ipcRenderer.removeListener('model:status', handler);
   },
-  alignWordSpansLong: (params: { pcm: Float32Array; words: string[] }) =>
-    ipcRenderer.invoke('align:wordSpansLong', params),
+  alignWordSpans: (params: {
+    key: string;
+    pcm: Float32Array;
+    ranges: Array<{ start: number; end: number; words: string[] }>;
+  }) => ipcRenderer.invoke('align:wordSpans', params),
   ensurePreviewProxy: (filePath: string) => ipcRenderer.invoke('media:ensurePreviewProxy', filePath),
   detectSilence: (params: {
     filePath: string;

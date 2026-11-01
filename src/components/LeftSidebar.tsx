@@ -25,6 +25,7 @@ import {
   computeVisualWaveformPeaks,
 } from '../utils/localWhisper';
 import { refineCaptionsByFullAlignment } from '../utils/captionBoundaryRefiner';
+import { clipAudioKey } from '../utils/forcedAligner';
 import { alignScriptToAudio, parseScriptVariants } from '../utils/scriptWaveformAligner';
 import {
   rendererWaveformCache,
@@ -121,12 +122,35 @@ export const LeftSidebar: React.FC = () => {
     selectedMediaClips.length > 0 ? selectedMediaClips : allAudioOrVideoClips;
 
   // [STEP 1] 파형 무음 골짜기(Silence Valley) 직후 발화 시작점 스냅 + Gemini 문맥/대본 무밀림 교정
+  // 자막 위치 정밀 맞춤 모델이 준비됐는지 확인 (없으면 먼저 받음). 받지 못하면 false
+  const ensureAlignModel = async (): Promise<boolean> => {
+    if (!window.electronAPI?.modelEnsure) return true;
+    setStatusMessage('자막 위치 맞춤 모델 확인 중... (처음 한 번은 다운로드합니다)');
+    const st = await window.electronAPI.modelEnsure();
+    if (st.state !== 'ready') {
+      setStatusMessage('자막 위치 맞춤 모델을 받지 못해 자막을 만들지 않았습니다. 상단 안내에서 [다시 시도]해 주세요.');
+      return false;
+    }
+    return true;
+  };
+
+  // 음성 클립(pcm)의 자막들을 강제 정렬로 실제 발음 위치에 맞춤 (자막 시각은 클립 기준 초)
+  const alignCaptionsToClip = (key: string) => async (p: Float32Array, words: string[]) => {
+    const r = await window.electronAPI!.alignWordSpans!({
+      key,
+      pcm: p,
+      ranges: [{ start: 0, end: p.length / 16000, words }],
+    });
+    return { available: r.available, spans: r.results[0] ?? null };
+  };
+
   const handleRunStep1AiCaption = async () => {
     if (!window.electronAPI) return;
     if (targetAudioClips.length === 0) {
       setStatusMessage('먼저 시퀀스 타임라인에 오디오 또는 비디오 클립을 넣어주세요.');
       return;
     }
+    if (!(await ensureAlignModel())) return;
 
     setIsProcessing(true);
     try {
@@ -208,10 +232,37 @@ export const LeftSidebar: React.FC = () => {
             onProgress: (msg) => setProgressText(msg),
           });
 
-          generatedSegments.push(...refined);
-        } else {
-          generatedSegments.push(...baseSegments);
+          baseSegments = refined;
         }
+
+        // 3. 받아쓴 글자를 음성에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
+        if (window.electronAPI.alignWordSpans && baseSegments.length > 0) {
+          setProgressText(`'${clip.name}' 자막 위치 정밀 보정 중...`);
+          const rel = baseSegments.map((sg) => ({
+            ...sg,
+            start: sg.start - clip.startTime,
+            end: sg.end - clip.startTime,
+            voiceEnd: (sg.voiceEnd ?? sg.end) - clip.startTime,
+            inBreath: false,
+          }));
+          const r = await refineCaptionsByFullAlignment(
+            pcmFloat32,
+            16000,
+            rel,
+            alignCaptionsToClip(clipAudioKey(clip.sourcePath, clip.sourceStart, clip.duration))
+          );
+          if (!r.available) {
+            setStatusMessage('자막 위치 맞춤 모델을 사용할 수 없어 자막을 만들지 않았습니다.');
+            return;
+          }
+          baseSegments = r.captions.map(({ inBreath: _ib, ...c }) => ({
+            ...c,
+            start: c.start + clip.startTime,
+            end: c.end + clip.startTime,
+            voiceEnd: c.voiceEnd + clip.startTime,
+          }));
+        }
+        generatedSegments.push(...baseSegments);
       }
 
       if (generatedSegments.length === 0) {
@@ -221,7 +272,7 @@ export const LeftSidebar: React.FC = () => {
 
       addRawAiCaptions(generatedSegments);
       setStatusMessage(
-        `파형 발화 시작점 스냅 및 묵음 연장으로 ${generatedSegments.length}개의 칼싱크 자막 클립이 생성되었습니다!`
+        `받아쓰기 자막 ${generatedSegments.length}개를 만들고 실제 발음 위치에 맞췄습니다.`
       );
     } catch (err: any) {
       setStatusMessage(`AI 캡션 생성 오류: ${err.message}`);
@@ -247,14 +298,7 @@ export const LeftSidebar: React.FC = () => {
     }
 
     // 자막 위치 정밀 맞춤 모델 필요 (없으면 먼저 받음, 받지 못하면 진행하지 않음)
-    if (window.electronAPI.modelEnsure) {
-      setStatusMessage('자막 위치 맞춤 모델 확인 중... (처음 한 번은 다운로드합니다)');
-      const st = await window.electronAPI.modelEnsure();
-      if (st.state !== 'ready') {
-        setStatusMessage('자막 위치 맞춤 모델을 받지 못해 자막을 만들지 않았습니다. 상단 안내에서 [다시 시도]해 주세요.');
-        return;
-      }
-    }
+    if (!(await ensureAlignModel())) return;
 
     setIsProcessing(true);
     try {
@@ -302,10 +346,13 @@ export const LeftSidebar: React.FC = () => {
         // 대본 전체 글자를 음성 전체에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
         // (대본 정렬기가 쉼을 잘못 골랐거나, 쉼 없이 이어 말한 구간의 문장 경계까지 바로잡음)
         let finalCaptions = result.captions;
-        if (window.electronAPI.alignWordSpansLong) {
+        if (window.electronAPI.alignWordSpans) {
           setProgressText(`${label} 자막 위치 정밀 보정 중...`);
-          const refined = await refineCaptionsByFullAlignment(pcm, 16000, result.captions, (p, words) =>
-            window.electronAPI!.alignWordSpansLong!({ pcm: p, words })
+          const refined = await refineCaptionsByFullAlignment(
+            pcm,
+            16000,
+            result.captions,
+            alignCaptionsToClip(clipAudioKey(clip.sourcePath, clip.sourceStart, clip.duration))
           );
           if (!refined.available) {
             skipped.push(`${clip.name}: 자막 위치 맞춤 모델을 사용할 수 없습니다`);

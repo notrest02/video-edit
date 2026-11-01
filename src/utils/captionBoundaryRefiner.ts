@@ -1,11 +1,8 @@
 import { detectSpeechIslands } from './scriptWaveformAligner';
 /**
- * 숨 묶음(쉼 없이 이어 말한 구간) 안의 자막 경계를 강제 정렬로 바로잡는다.
- *
- * 대본 + 파형 정렬기는 쉼이 없는 구간에서 문장 경계를 글자 비율로 나누기 때문에
- * 말 속도가 고르지 않으면 1초 가까이 어긋날 수 있다(예: 루시아이 #46~#49).
- * 숨 묶음 전체의 글자를 그 구간 음성에 한 번에 정렬해, 각 자막이 실제로 발음되기 시작하는
- * 시점으로 시작점을 옮긴다. 쉼에서 나뉜 경계는 이미 정확하므로 건드리지 않는다.
+ * 자막 시작/끝을 강제 정렬로 실제 발음 위치에 맞춘다.
+ * 대본 + 파형 정렬기는 쉼과 글자 수로 위치를 추정하므로, 쉼을 잘못 고르거나
+ * 쉼 없이 이어 말한 구간의 문장 경계에서 1초 가까이 어긋날 수 있다.
  */
 
 export type RefinableCaption = {
@@ -16,88 +13,13 @@ export type RefinableCaption = {
   inBreath: boolean;
 };
 
-export type AlignFn = (
-  segments: Array<{ pcm: Float32Array; words: string[] }>
-) => Promise<{ available: boolean; results: Array<number[] | null> }>;
-
-const wordsOf = (t: string) => t.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-
-export async function refineBreathGroupBoundaries<T extends RefinableCaption>(
-  pcm: Float32Array,
-  sampleRate: number,
-  captions: T[],
-  align: AlignFn
-): Promise<{ captions: T[]; moved: number; available: boolean }> {
-  const caps = captions.map((c) => ({ ...c }));
-  // 연속된 숨 묶음 자막 찾기 (앞 자막 끝 = 뒤 자막 시작으로 이어진 것)
-  const groups: Array<[number, number]> = [];
-  let i = 0;
-  while (i < caps.length) {
-    if (!caps[i].inBreath) {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (
-      j + 1 < caps.length &&
-      caps[j + 1].inBreath &&
-      Math.abs(caps[j + 1].start - caps[j].end) < 0.05
-    ) {
-      j++;
-    }
-    if (j > i) groups.push([i, j]);
-    i = j + 1;
-  }
-  if (groups.length === 0) return { captions: caps, moved: 0, available: true };
-
-  const segments: Array<{ pcm: Float32Array; words: string[] }> = [];
-  const meta: Array<{ g: [number, number]; segStart: number; wordIdx: number[] }> = [];
-  for (const g of groups) {
-    const [a, b] = g;
-    const segStart = caps[a].start;
-    const segEnd = caps[b].voiceEnd + 0.15;
-    const from = Math.max(0, Math.floor(segStart * sampleRate));
-    const to = Math.min(pcm.length, Math.ceil(segEnd * sampleRate));
-    if (to - from < sampleRate * 0.3) continue;
-    const words: string[] = [];
-    const wordIdx: number[] = [];
-    for (let k = a; k <= b; k++) {
-      wordIdx.push(words.length);
-      words.push(...wordsOf(caps[k].text));
-    }
-    segments.push({ pcm: pcm.slice(from, to), words });
-    meta.push({ g, segStart: from / sampleRate, wordIdx });
-  }
-  if (segments.length === 0) return { captions: caps, moved: 0, available: true };
-
-  const res = await align(segments).catch(() => null);
-  if (!res || !res.available) return { captions: caps, moved: 0, available: false };
-
-  let moved = 0;
-  res.results.forEach((starts, si) => {
-    if (!starts) return;
-    const { g, segStart, wordIdx } = meta[si];
-    const [a, b] = g;
-    for (let k = a + 1; k <= b; k++) {
-      const t = segStart + starts[Math.min(wordIdx[k - a], starts.length - 1)];
-      const prev = caps[k - 1];
-      const cur = caps[k];
-      // 앞뒤 자막이 최소 0.3초씩은 남아야 하고, 지나치게 멀리(2.5초 이상) 옮기지는 않음
-      if (t < prev.start + 0.3 || t > cur.voiceEnd - 0.3 || Math.abs(t - cur.start) > 2.5) continue;
-      if (Math.abs(t - cur.start) > 0.02) moved++;
-      cur.start = t;
-      prev.end = t;
-      prev.voiceEnd = t; // 숨 묶음 안이라 쉼 없이 다음 자막까지 말이 이어짐
-    }
-  });
-  return { captions: caps, moved, available: true };
-}
-
 /**
  * 클립 전체 정렬: 모든 자막 글자를 음성 전체에 한 번에 강제 정렬해 시작/끝을 실제 발음 위치로 맞춘다.
  * (대본 정렬기가 엉뚱한 쉼을 문장 경계로 고른 경우까지 바로잡음)
  * alignSpans: (전체 pcm, 단어들) → 단어별 [시작, 끝] 초 (메인 프로세스 모델)
  */
+const wordsOf = (t: string) => t.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+
 export type AlignSpansFn = (
   pcm: Float32Array,
   words: string[]

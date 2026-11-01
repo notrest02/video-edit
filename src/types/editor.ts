@@ -207,13 +207,12 @@ declare global {
       modelEnsure?: () => Promise<AlignModelStatus>;
       modelImportDialog?: () => Promise<{ ok: boolean; message: string; status?: AlignModelStatus }>;
       onModelStatus?: (callback: (status: AlignModelStatus) => void) => () => void;
-      alignWordSpansLong?: (params: {
+      /** 음성 클립(key)의 [start,end] 구간들에 단어를 강제 정렬 → 구간별 단어 [시작, 끝] 초 (클립 기준) */
+      alignWordSpans?: (params: {
+        key: string;
         pcm: Float32Array;
-        words: string[];
-      }) => Promise<{ available: boolean; spans: Array<[number, number] | null> | null }>;
-      mmsWordStarts?: (
-        segments: Array<{ pcm: Float32Array; words: string[] }>
-      ) => Promise<{ available: boolean; results: Array<number[] | null> }>;
+        ranges: Array<{ start: number; end: number; words: string[] }>;
+      }) => Promise<{ available: boolean; results: Array<Array<[number, number] | null> | null> }>;
       gdiCheckFonts?: (families: string[]) => Promise<boolean[]>;
       gdiGlyphs?: (params: { family: string; style: number; chars: string }) => Promise<{
         asc: number;

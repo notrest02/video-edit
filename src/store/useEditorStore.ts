@@ -12,6 +12,7 @@ import {
   TrackType,
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
+import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
   CaptionLineMode,
@@ -356,7 +357,7 @@ async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTr
 
   const loaded: Array<{ clip: TimelineClip; pcm: Float32Array }> = [];
   for (const c of sources) {
-    const key = `${c.sourcePath}|${c.sourceStart.toFixed(3)}|${c.duration.toFixed(3)}`;
+    const key = clipAudioKey(c.sourcePath!, c.sourceStart, c.duration);
     let job = captionPcmCache.get(key);
     if (!job) {
       job = api
@@ -386,7 +387,12 @@ async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTr
       }
     }
     if (!best || bestCover < (end - start) * 0.6) return null;
-    return { pcm: best.pcm, sampleRate: 16000, timelineOffset: best.clip.startTime };
+    return {
+      pcm: best.pcm,
+      sampleRate: 16000,
+      timelineOffset: best.clip.startTime,
+      key: clipAudioKey(best.clip.sourcePath!, best.clip.sourceStart, best.clip.duration),
+    };
   };
 }
 
@@ -394,20 +400,20 @@ type ReformatOptions = Parameters<typeof reformatSubtitleClipsByLineMode>[1];
 type AudioLookup = NonNullable<ReformatOptions['audioLookup']>;
 
 /**
- * MMS 강제 정렬로 자막 조각 분할 시점을 미리 계산한다.
+ * 강제 정렬로 자막 조각 분할 시점을 미리 계산한다.
  * 1) 같은 옵션으로 한 번 "가상 실행"해서 어떤 문장이 어떤 조각으로 나뉘는지 수집
- * 2) 그 문장들의 음성 + 단어를 메인 프로세스(MMS 모델)에 한 번에 보내 단어별 시작 시점을 받음
+ * 2) 문장마다 앞뒤 자막 글자까지 포함한 구간을 만들어 음성 클립별로 한 번에 메인 프로세스에 보냄
+ *    (메인은 클립당 모델 계산을 한 번만 하고 구간별로 잘라 정렬 → 빠름)
  * 3) 각 조각의 첫 단어 시작 시점 = 그 조각이 화면에 나타나는 시점
- * 모델이 없으면 available=false (호출 측은 쉼·말 속도 추정으로 대체)
  */
-async function buildMmsSplitProvider(
+async function buildAlignedSplitProvider(
   clips: TimelineClip[],
   opts: ReformatOptions,
   audioLookup: AudioLookup | undefined
 ): Promise<{ available: boolean; provider?: ReformatOptions['splitTimesProvider'] }> {
   const api = window.electronAPI;
-  if (!api?.mmsWordStarts || !audioLookup) return { available: false };
-  const keyOf = (r: CaptionSplitRequest) => `${r.start.toFixed(3)}|${r.pieces.join('\u0001')}`;
+  if (!api?.alignWordSpans || !audioLookup) return { available: false };
+  const keyOf = (r: CaptionSplitRequest) => `${r.start.toFixed(3)}|${r.pieces.join('')}`;
   const wordsOf = (piece: string) => piece.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
 
   const requests: CaptionSplitRequest[] = [];
@@ -421,13 +427,18 @@ async function buildMmsSplitProvider(
   });
   if (requests.length === 0) return { available: true };
 
-  // 앞뒤 자막도 함께 정렬: 자막 구간 자체가 조금 어긋나 있어도(긴 숨 묶음 안의 문장 경계 등)
-  // 글자가 좁은 구간에 억지로 눌려 들어가지 않고 실제 위치를 찾는다
+  // 앞뒤 자막도 함께 정렬: 자막 구간 자체가 조금 어긋나 있어도 글자가 좁은 구간에 억지로 눌려 들어가지 않음
   const texts = clips
     .filter((c) => c.type === 'text' && (c.text || '').trim())
     .sort((x, y) => x.startTime - y.startTime);
-  const segments: Array<{ pcm: Float32Array; words: string[] }> = [];
-  const meta: Array<{ r: CaptionSplitRequest; segStartAbs: number; wordOffset: number }> = [];
+  const byClip = new Map<
+    string,
+    {
+      pcm: Float32Array;
+      ranges: Array<{ start: number; end: number; words: string[] }>;
+      meta: Array<{ r: CaptionSplitRequest; offset: number; wordOffset: number }>;
+    }
+  >();
   for (const r of requests) {
     const a = audioLookup(r.start, r.end);
     if (!a) continue;
@@ -439,31 +450,42 @@ async function buildMmsSplitProvider(
     const segEnd = next
       ? (next.voiceEndTime && next.voiceEndTime > next.startTime ? next.voiceEndTime : next.startTime + next.duration) + 0.15
       : r.voiceEnd + 0.15;
-    const from = Math.max(0, Math.floor((segStart - a.timelineOffset) * a.sampleRate));
-    const to = Math.min(a.pcm.length, Math.ceil((segEnd - a.timelineOffset) * a.sampleRate));
-    if (to - from < a.sampleRate * 0.2) continue;
-    segments.push({
-      pcm: a.pcm.slice(from, to),
+    const clipKey = a.key ?? `clip@${a.timelineOffset}`;
+    let entry = byClip.get(clipKey);
+    if (!entry) {
+      entry = { pcm: a.pcm, ranges: [], meta: [] };
+      byClip.set(clipKey, entry);
+    }
+    entry.ranges.push({
+      start: segStart - a.timelineOffset,
+      end: segEnd - a.timelineOffset,
       words: [...prevWords, ...r.pieces.flatMap(wordsOf), ...nextWords],
     });
-    meta.push({ r, segStartAbs: a.timelineOffset + from / a.sampleRate, wordOffset: prevWords.length });
+    entry.meta.push({ r, offset: a.timelineOffset, wordOffset: prevWords.length });
   }
-  if (segments.length === 0) return { available: true };
+  if (byClip.size === 0) return { available: true };
 
-  const res = await api.mmsWordStarts(segments).catch(() => null);
-  if (!res || !res.available) return { available: false };
   const map = new Map<string, number[]>();
-  res.results.forEach((starts, i) => {
-    if (!starts) return;
-    const { r, segStartAbs, wordOffset } = meta[i];
-    const bounds: number[] = [];
-    let wi = wordOffset;
-    r.pieces.forEach((piece, k) => {
-      if (k > 0) bounds.push(segStartAbs + starts[Math.min(wi, starts.length - 1)]);
-      wi += wordsOf(piece).length;
+  for (const [key, entry] of byClip) {
+    const res = await api.alignWordSpans({ key, pcm: entry.pcm, ranges: entry.ranges }).catch(() => null);
+    if (!res || !res.available) return { available: false };
+    res.results.forEach((spans, i) => {
+      if (!spans) return;
+      const { r, offset, wordOffset } = entry.meta[i];
+      const bounds: number[] = [];
+      let wi = wordOffset;
+      let ok = true;
+      r.pieces.forEach((piece, k) => {
+        if (k > 0) {
+          const sp = spans[Math.min(wi, spans.length - 1)];
+          if (!sp) ok = false;
+          else bounds.push(offset + sp[0]);
+        }
+        wi += wordsOf(piece).length;
+      });
+      if (ok) map.set(keyOf(r), bounds);
     });
-    map.set(keyOf(r), bounds);
-  });
+  }
   return { available: true, provider: (r) => map.get(keyOf(r)) ?? null };
 }
 
@@ -1341,8 +1363,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         fps: get().fps,
         audioLookup,
       };
-      const mms = await buildMmsSplitProvider(clipsBefore, baseOpts, audioLookup);
-      if (audioLookup && !mms.available) {
+      const aligned = await buildAlignedSplitProvider(clipsBefore, baseOpts, audioLookup);
+      if (audioLookup && !aligned.available) {
         set({ statusMessage: '자막 위치 맞춤 모델을 사용할 수 없어 자막 나누기를 진행하지 않았습니다.' });
         return;
       }
@@ -1352,7 +1374,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       pushHistory();
       const { updatedClips, beforeCount, afterCount } = reformatSubtitleClipsByLineMode(
         clips,
-        { ...baseOpts, fps, splitTimesProvider: mms.provider }
+        { ...baseOpts, fps, splitTimesProvider: aligned.provider }
       );
 
       const modeLabel =
@@ -2450,15 +2472,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const audioLookup = autoSplit
         ? await buildCaptionAudioLookup(get().clips, get().tracks)
         : undefined;
-      // 오타 변환 후 텍스트 기준으로 MMS 분할 시점 계산 (자동 분할이 켜져 있을 때만)
-      let mmsProvider: ReformatOptions['splitTimesProvider'];
+      // 오타 변환 후 텍스트 기준으로 강제 정렬 분할 시점 계산 (자동 분할이 켜져 있을 때만)
+      let alignedProvider: ReformatOptions['splitTimesProvider'];
       if (audioLookup) {
         const diffMapPre = new Map(diffs.map((d) => [d.clipId, d.afterText]));
         const corrected = get().clips.map((c) =>
           diffMapPre.has(c.id) ? { ...c, text: diffMapPre.get(c.id)! } : c
         );
-        mmsProvider = (
-          await buildMmsSplitProvider(
+        alignedProvider = (
+          await buildAlignedSplitProvider(
             corrected,
             {
               mode: get().captionLineMode,
@@ -2501,7 +2523,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           maxCharsPerLine: captionMaxCharsPerLine,
           fps,
           audioLookup,
-          splitTimesProvider: mmsProvider,
+          splitTimesProvider: alignedProvider,
         }).updatedClips;
       }
 
