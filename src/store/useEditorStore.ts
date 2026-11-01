@@ -88,6 +88,16 @@ interface EditorState {
   setCurrentTime: (time: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setZoomPxPerSec: (zoom: number) => void;
+  inPoint: number | null;
+  outPoint: number | null;
+  // 원본 경로 → 미리보기용 프록시 경로 (저장하지 않음, 디스크 캐시라 다시 열면 즉시 재사용)
+  previewProxyMap: Record<string, string>;
+  setPreviewProxy: (sourcePath: string, proxyPath: string) => void;
+  setInPoint: (time: number | null) => void;
+  setOutPoint: (time: number | null) => void;
+  clearInOut: () => void;
+  setTrackHeight: (trackId: string, height: number) => void;
+  setTrackHeightsByType: (type: TimelineTrack['type'], height: number) => void;
   setSelectedClipId: (id: string | null, multiToggle?: boolean) => void;
   setSelectedClipIds: (ids: string[]) => void;
   setSelectedTrackId: (trackId: string | null) => void;
@@ -207,6 +217,13 @@ interface EditorState {
   relinkAsset: (assetId: string, newPath: string) => Promise<boolean>;
   relinkAssetsInBatch: (relinkMap: Record<string, string>) => Promise<number>;
 }
+
+export const MIN_ZOOM_PX_PER_SEC = 1;
+export const MAX_ZOOM_PX_PER_SEC = 600;
+export const MIN_TRACK_HEIGHT = 24;
+export const MAX_TRACK_HEIGHT = 260;
+export const getTrackHeightPx = (track: TimelineTrack) =>
+  track.height ?? (track.type === 'audio' ? 84 : 44);
 
 export function createDefaultTracks(): TimelineTrack[] {
   return [
@@ -335,7 +352,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     nextSeqSettings?: SequenceSettings,
     nextCurrentTime?: number
   ) => {
-    const { sequences, activeSequenceId, sequence, currentTime } = get();
+    const { sequences, activeSequenceId, sequence, currentTime, inPoint, outPoint } = get();
     if (!activeSequenceId) return sequences;
     const seqMeta = nextSeqSettings || sequence;
     const cTime = nextCurrentTime !== undefined ? nextCurrentTime : currentTime;
@@ -353,6 +370,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
             tracks: nextTracks,
             clips: nextClips,
             currentTime: cTime,
+            inPoint,
+            outPoint,
           }
         : s
     );
@@ -659,7 +678,46 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ currentTime: safe });
     },
     setIsPlaying: (isPlaying) => set({ isPlaying }),
-    setZoomPxPerSec: (zoom) => set({ zoomPxPerSec: Math.min(600, Math.max(12, zoom)) }),
+    setZoomPxPerSec: (zoom) =>
+      set({ zoomPxPerSec: Math.min(MAX_ZOOM_PX_PER_SEC, Math.max(MIN_ZOOM_PX_PER_SEC, zoom)) }),
+
+    inPoint: null,
+    outPoint: null,
+    previewProxyMap: {},
+    setPreviewProxy: (sourcePath, proxyPath) =>
+      set((state) => ({ previewProxyMap: { ...state.previewProxyMap, [sourcePath]: proxyPath } })),
+    setInPoint: (time) => {
+      const { outPoint } = get();
+      const t = time === null ? null : Math.max(0, Number(time.toFixed(4)));
+      // 아웃보다 뒤에 인을 찍으면 아웃을 해제 (프리미어와 동일)
+      const nextOut = t !== null && outPoint !== null && outPoint <= t ? null : outPoint;
+      set({ inPoint: t, outPoint: nextOut, isDirty: true });
+      set({ sequences: syncActiveSequenceData(get().tracks, get().clips) });
+    },
+    setOutPoint: (time) => {
+      const { inPoint } = get();
+      const t = time === null ? null : Math.max(0, Number(time.toFixed(4)));
+      const nextIn = t !== null && inPoint !== null && inPoint >= t ? null : inPoint;
+      set({ outPoint: t, inPoint: nextIn, isDirty: true });
+      set({ sequences: syncActiveSequenceData(get().tracks, get().clips) });
+    },
+    clearInOut: () => {
+      set({ inPoint: null, outPoint: null, isDirty: true });
+      set({ sequences: syncActiveSequenceData(get().tracks, get().clips) });
+    },
+
+    setTrackHeight: (trackId, height) =>
+      set((state) => {
+        const h = Math.round(Math.min(MAX_TRACK_HEIGHT, Math.max(MIN_TRACK_HEIGHT, height)));
+        const nextTracks = state.tracks.map((t) => (t.id === trackId ? { ...t, height: h } : t));
+        return { tracks: nextTracks, sequences: syncActiveSequenceData(nextTracks, state.clips) };
+      }),
+    setTrackHeightsByType: (type, height) =>
+      set((state) => {
+        const h = Math.round(Math.min(MAX_TRACK_HEIGHT, Math.max(MIN_TRACK_HEIGHT, height)));
+        const nextTracks = state.tracks.map((t) => (t.type === type ? { ...t, height: h } : t));
+        return { tracks: nextTracks, sequences: syncActiveSequenceData(nextTracks, state.clips) };
+      }),
     setSelectedClipId: (selectedClipId, multiToggle = false) =>
       set((state) => {
         if (!selectedClipId) {
@@ -2554,6 +2612,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
         },
         sequences: Array.isArray(data.sequences) ? data.sequences : [],
         activeSequenceId: data.activeSequenceId || null,
+        inPoint:
+          (data.sequences || []).find((sq: any) => sq.id === data.activeSequenceId)?.inPoint ?? null,
+        outPoint:
+          (data.sequences || []).find((sq: any) => sq.id === data.activeSequenceId)?.outPoint ?? null,
         openSequenceIds: Array.isArray(data.openSequenceIds) ? data.openSequenceIds : [],
         tracks,
         clips,
@@ -2589,6 +2651,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     newProject: () => {
       set({
+        inPoint: null,
+        outPoint: null,
         projectName: '새 프로젝트',
         projectFilePath: null,
         isDirty: false,
@@ -2693,4 +2757,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
       return count;
     },
   };
+});
+
+// 활성 시퀀스가 바뀌면 그 시퀀스에 저장된 인/아웃 지점을 불러온다
+// (이전 시퀀스의 인/아웃은 syncActiveSequenceData 가 전환 직전에 sequences 에 기록해 둔다)
+useEditorStore.subscribe((state, prev) => {
+  if (state.activeSequenceId === prev.activeSequenceId) return;
+  const seq = state.sequences.find((s) => s.id === state.activeSequenceId);
+  const nextIn = seq?.inPoint ?? null;
+  const nextOut = seq?.outPoint ?? null;
+  if (nextIn !== state.inPoint || nextOut !== state.outPoint) {
+    useEditorStore.setState({ inPoint: nextIn, outPoint: nextOut });
+  }
 });

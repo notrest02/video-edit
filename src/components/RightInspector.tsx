@@ -20,6 +20,7 @@ import {
 import { useEditorStore } from '../store/useEditorStore';
 import { SystemFontItem } from '../types/editor';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
+import { buildPcFontList, ensurePcFont, extractPcfPostscriptName } from '../utils/pcFonts';
 
 let globalCachedFonts: SystemFontItem[] = [];
 
@@ -87,11 +88,24 @@ export const RightInspector: React.FC = () => {
       const mergedMap = new Map<string, SystemFontItem>();
 
       // 1) Electron 메인 프로세스 (Windows InstalledFontCollection: 한글/영문 패밀리명 모두 수집)
+      let ipcFonts: SystemFontItem[] = [];
       if (window.electronAPI?.getSystemFonts) {
-        const ipcFonts = await window.electronAPI.getSystemFonts(forceRefresh);
-        for (const f of ipcFonts) {
-          mergedMap.set(f.familyKo.toLowerCase(), f);
+        ipcFonts = await window.electronAPI.getSystemFonts(forceRefresh);
+      }
+
+      // 1-1) 우선: 글꼴 면(face) 단위로 실제 파일 데이터를 등록하는 방식 (이름 불일치로 엉뚱한 글꼴이 나오는 문제 해결)
+      const faceList = await buildPcFontList(ipcFonts);
+      if (faceList) {
+        globalCachedFonts = faceList;
+        setSystemFonts(faceList);
+        if (forceRefresh) {
+          setStatusMessage(`내 PC에 설치된 글꼴 ${faceList.length}개를 불러왔습니다.`);
         }
+        return;
+      }
+
+      for (const f of ipcFonts) {
+        mergedMap.set(f.familyKo.toLowerCase(), f);
       }
 
       // 2) Chromium window.queryLocalFonts() 보조 수집
@@ -183,6 +197,15 @@ export const RightInspector: React.FC = () => {
         f.familyEn.toLowerCase().includes(q)
     );
   }, [systemFonts, fontSearchQuery]);
+
+  // 검색 결과 빠른 목록에 보이는 글꼴은 미리 등록해 두어야 "가나다 ABC" 미리보기가 실제 글꼴로 보임
+  useEffect(() => {
+    if (!fontSearchQuery.trim()) return;
+    for (const f of filteredSystemFonts.slice(0, 40)) {
+      const ps = extractPcfPostscriptName(f.value);
+      if (ps) ensurePcFont(ps);
+    }
+  }, [filteredSystemFonts, fontSearchQuery]);
 
   const selectedClip = clips.find((c) => c.id === selectedClipId) || null;
   const totalSubtitleCount = clips.filter((c) => c.type === 'text').length;

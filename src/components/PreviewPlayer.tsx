@@ -15,6 +15,13 @@ import { useEditorStore } from '../store/useEditorStore';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { splitSentenceIntoNaturalChunks } from '../utils/scriptAligner';
 import { TimelineClip } from '../types/editor';
+import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
+import {
+  ensureGdiTextReady,
+  extractGdiFamily,
+  gdiStyleOf,
+  onGdiGlyphsLoaded,
+} from '../utils/gdiFonts';
 
 export const PreviewPlayer: React.FC = () => {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
@@ -27,6 +34,112 @@ export const PreviewPlayer: React.FC = () => {
   const lastVideoSeekWallRef = useRef<number>(0);
   const lastAudioSeekWallRef = useRef<number>(0);
   const [canvasWidth, setCanvasWidth] = useState<number>(360);
+
+  // 스크럽(인디케이터 드래그) 중 시크 요청 합치기:
+  // 이전 시크가 끝나기 전에 새 시크를 계속 걸면 디코더가 매번 취소돼 프레임이 건너뛰어 보인다.
+  // → 시크 중이면 "마지막 목표 시간"만 기억했다가, 끝나는(seeked) 즉시 그 시간으로 한 번 더 이동.
+  const pendingVideoSeekRef = useRef<number | null>(null);
+  const pendingAudioSeekRef = useRef<number | null>(null);
+  const requestSeek = (
+    el: HTMLMediaElement,
+    target: number,
+    pendingRef: React.MutableRefObject<number | null>
+  ) => {
+    const t = Math.max(0, target);
+    if (el.seeking) {
+      pendingRef.current = t;
+      return;
+    }
+    pendingRef.current = null;
+    el.currentTime = t;
+  };
+  useEffect(() => {
+    const pairs: Array<[HTMLMediaElement | null, React.MutableRefObject<number | null>]> = [
+      [videoRef.current, pendingVideoSeekRef],
+      [audioRef.current, pendingAudioSeekRef],
+    ];
+    const cleanups: Array<() => void> = [];
+    for (const [el, ref] of pairs) {
+      if (!el) continue;
+      const onSeeked = () => {
+        const next = ref.current;
+        if (next === null) return;
+        ref.current = null;
+        if (Math.abs(el.currentTime - next) > 0.001) el.currentTime = next;
+      };
+      el.addEventListener('seeked', onSeeked);
+      cleanups.push(() => el.removeEventListener('seeked', onSeeked));
+    }
+    return () => cleanups.forEach((fn) => fn());
+  }, []);
+
+  // ---------- 9. 미리보기 확대/이동 ----------
+  // viewZoom: 1 = 화면에 맞추기. 휠로 마우스 위치 기준 확대, 확대 상태에서 드래그(또는 휠 버튼 드래그)로 이동,
+  // 빈 곳 더블클릭으로 맞추기 복귀.
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewZoom, setViewZoom] = useState(1);
+  const [viewPan, setViewPan] = useState({ x: 0, y: 0 });
+  const viewStateRef = useRef({ zoom: 1, pan: { x: 0, y: 0 } });
+  viewStateRef.current = { zoom: viewZoom, pan: viewPan };
+
+  const applyViewZoom = (nextZoomRaw: number, anchorClient?: { x: number; y: number }) => {
+    const el = canvasContainerRef.current;
+    const { zoom, pan } = viewStateRef.current;
+    const nextZoom = Math.min(8, Math.max(1, nextZoomRaw));
+    if (nextZoom === 1) {
+      setViewZoom(1);
+      setViewPan({ x: 0, y: 0 });
+      return;
+    }
+    if (!el || !anchorClient) {
+      setViewZoom(nextZoom);
+      setViewPan({ x: (pan.x * nextZoom) / zoom, y: (pan.y * nextZoom) / zoom });
+      return;
+    }
+    // 변환 전 캔버스 중심 = 현재 화면상 중심 - pan (가운데 기준 확대이므로)
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2 - pan.x;
+    const cy = rect.top + rect.height / 2 - pan.y;
+    const sx = anchorClient.x - cx;
+    const sy = anchorClient.y - cy;
+    const k = nextZoom / zoom;
+    setViewZoom(nextZoom);
+    setViewPan({ x: sx - (sx - pan.x) * k, y: sy - (sy - pan.y) * k });
+  };
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) return;
+      e.preventDefault();
+      const { zoom } = viewStateRef.current;
+      applyViewZoom(zoom * Math.pow(1.0018, -e.deltaY), { x: e.clientX, y: e.clientY });
+    };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    return () => vp.removeEventListener('wheel', onWheel);
+  }, []);
+
+  const handleViewportMouseDown = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    const onSubtitle = Boolean(target.closest('textarea, button, [data-subtitle-box]'));
+    const isMiddle = e.button === 1;
+    const isLeftPan = e.button === 0 && viewStateRef.current.zoom > 1 && !onSubtitle;
+    if (!isMiddle && !isLeftPan) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startPan = { ...viewStateRef.current.pan };
+    const onMove = (ev: MouseEvent) => {
+      setViewPan({ x: startPan.x + ev.clientX - startX, y: startPan.y + ev.clientY - startY });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const {
     clips,
@@ -52,6 +165,7 @@ export const PreviewPlayer: React.FC = () => {
     splitSubtitleClipAtTextCursor,
     mergeSubtitleClipWithAdjacent,
     getTotalDuration,
+    previewProxyMap,
   } = useEditorStore();
 
   const totalDuration = getTotalDuration();
@@ -112,6 +226,23 @@ export const PreviewPlayer: React.FC = () => {
     return Array.from(trackMap.values());
   }, [activeSubtitles, selectedClipId]);
 
+  // ---------- Windows(GDI) 렌더 글꼴 자막: 화면 위 캔버스에 윤곽선으로 그림 ----------
+  // (글자 수정용 textarea 는 그대로 두고 글자만 투명하게 → 클릭/커서/Enter 나누기 동작 유지)
+  const gdiOverlayRef = useRef<HTMLCanvasElement | null>(null);
+  const [gdiGlyphVersion, setGdiGlyphVersion] = useState(0);
+  useEffect(() => onGdiGlyphsLoaded(() => setGdiGlyphVersion((v) => v + 1)), []);
+  const gdiSubs = displayedActiveSubtitles.filter((sub) => extractGdiFamily(sub.fontFamily));
+  const gdiSubsKey = gdiSubs
+    .map((sub) => `${sub.id}|${sub.fontFamily}|${sub.fontWeight}|${sub.fontItalic}|${sub.text}`)
+    .join('§');
+  useEffect(() => {
+    for (const sub of gdiSubs) {
+      const fam = extractGdiFamily(sub.fontFamily);
+      if (fam && sub.text) ensureGdiTextReady(fam, gdiStyleOf(sub), sub.text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gdiSubsKey]);
+
   const primaryActiveSub =
     activeSubtitles.find((s) => s.id === selectedClipId) || activeSubtitles[0] || null;
   const activeSubIndex = primaryActiveSub
@@ -157,6 +288,25 @@ export const PreviewPlayer: React.FC = () => {
     observer.observe(el);
     return () => observer.disconnect();
   }, [sequence.width, sequence.height]);
+
+  useEffect(() => {
+    const cv = gdiOverlayRef.current;
+    if (!cv) return;
+    const cssW = canvasWidth;
+    const cssH = (canvasWidth * sequence.height) / Math.max(1, sequence.width);
+    const scale = (window.devicePixelRatio || 1) * Math.max(1, viewZoom);
+    const pxW = Math.max(1, Math.round(cssW * scale));
+    const pxH = Math.max(1, Math.round(cssH * scale));
+    if (cv.width !== pxW) cv.width = pxW;
+    if (cv.height !== pxH) cv.height = pxH;
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, pxW, pxH);
+    ctx.scale(scale, scale);
+    for (const sub of gdiSubs) drawSubtitleClip(ctx, sub, cssW, cssH);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gdiSubsKey, gdiGlyphVersion, canvasWidth, sequence.width, sequence.height, viewZoom, displayedActiveSubtitles]);
 
   // 재생 루프 (하드웨어 오디오/비디오 요소를 마스터 클럭으로 동기화하여 소리 끊김 및 누적 시크 오류 원천 차단)
   useEffect(() => {
@@ -216,12 +366,15 @@ export const PreviewPlayer: React.FC = () => {
       return;
     }
 
-    const mediaUrl = `media://local?path=${encodeURIComponent(activeVideoClip.sourcePath)}`;
-    const isNewSrc = videoEl.dataset.srcPath !== activeVideoClip.sourcePath;
+    // 미리보기용 프록시가 준비돼 있으면 그것을 사용 (렌더는 항상 원본)
+    const previewPath = previewProxyMap[activeVideoClip.sourcePath] || activeVideoClip.sourcePath;
+    const mediaUrl = `media://local?path=${encodeURIComponent(previewPath)}`;
+    const isNewSrc = videoEl.dataset.srcPath !== previewPath;
     if (isNewSrc) {
-      videoEl.dataset.srcPath = activeVideoClip.sourcePath;
+      videoEl.dataset.srcPath = previewPath;
       videoEl.src = mediaUrl;
       lastVideoClipIdRef.current = null;
+      pendingVideoSeekRef.current = null;
     }
 
     const targetMediaTime =
@@ -243,11 +396,12 @@ export const PreviewPlayer: React.FC = () => {
     const canSeek = !videoEl.seeking && (now - lastVideoSeekWallRef.current > 350);
 
     if (isClipChanged) {
+      pendingVideoSeekRef.current = null;
       videoEl.currentTime = Math.max(0, targetMediaTime);
       lastVideoClipIdRef.current = activeVideoClip.id;
       lastVideoSeekWallRef.current = now;
     } else if (!isPlaying && timeDiff > 0.02) {
-      videoEl.currentTime = Math.max(0, targetMediaTime);
+      requestSeek(videoEl, targetMediaTime, pendingVideoSeekRef);
       lastVideoSeekWallRef.current = now;
     } else if (isPlaying && timeDiff > 0.6 && canSeek) {
       videoEl.currentTime = Math.max(0, targetMediaTime);
@@ -263,7 +417,7 @@ export const PreviewPlayer: React.FC = () => {
         videoEl.pause();
       }
     }
-  }, [activeVideoClip, currentTime, isPlaying, activeAudioClip, clips]);
+  }, [activeVideoClip, currentTime, isPlaying, activeAudioClip, clips, previewProxyMap]);
 
   // 분리된 오디오(A1/A2/A3) 동기화
   useEffect(() => {
@@ -300,11 +454,12 @@ export const PreviewPlayer: React.FC = () => {
     const canSeek = !audioEl.seeking && (now - lastAudioSeekWallRef.current > 350);
 
     if (isClipChanged) {
+      pendingAudioSeekRef.current = null;
       audioEl.currentTime = Math.max(0, targetAudioTime);
       lastAudioClipIdRef.current = activeAudioClip.id;
       lastAudioSeekWallRef.current = now;
     } else if (!isPlaying && timeDiff > 0.02) {
-      audioEl.currentTime = Math.max(0, targetAudioTime);
+      requestSeek(audioEl, targetAudioTime, pendingAudioSeekRef);
       lastAudioSeekWallRef.current = now;
     } else if (isPlaying && timeDiff > 0.8 && canSeek) {
       audioEl.currentTime = Math.max(0, targetAudioTime);
@@ -375,7 +530,18 @@ export const PreviewPlayer: React.FC = () => {
       </div>
 
       {/* 2. 중앙 시퀀스 규격 비율(aspectRatio) 비디오 캔버스 영역 */}
-      <div className="flex-1 p-3 flex items-center justify-center min-h-0 bg-[#151515] overflow-hidden relative">
+      <div
+        ref={viewportRef}
+        onMouseDown={handleViewportMouseDown}
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest('textarea, button, [data-subtitle-box]')) return;
+          applyViewZoom(1);
+        }}
+        title="휠: 확대/축소 · 확대 중 드래그: 화면 이동 · 빈 곳 더블클릭: 맞추기"
+        className={`flex-1 p-3 flex items-center justify-center min-h-0 bg-[#151515] overflow-hidden relative ${
+          viewZoom > 1 ? 'cursor-grab active:cursor-grabbing' : ''
+        }`}
+      >
         {/* 상단 플로팅 화면 자막 즉시 제어 바 (보여지는 창 기준 나누기/합치기/이동) */}
         {allSubtitleClips.length > 0 && (
           <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 bg-[#12161f]/90 backdrop-blur border border-[#388bfd]/40 px-2.5 py-1 rounded-full shadow-lg text-[10px]">
@@ -436,6 +602,10 @@ export const PreviewPlayer: React.FC = () => {
           ref={canvasContainerRef}
           style={{
             aspectRatio: `${sequence.width} / ${sequence.height}`,
+            transform:
+              viewZoom !== 1
+                ? `translate(${viewPan.x}px, ${viewPan.y}px) scale(${viewZoom})`
+                : undefined,
           }}
           className="relative max-w-full max-h-full h-full bg-black border border-[#2a2a2a] shadow-2xl flex items-center justify-center overflow-hidden"
         >
@@ -451,6 +621,11 @@ export const PreviewPlayer: React.FC = () => {
             playsInline
           />
           <audio ref={audioRef} preload="auto" />
+          <canvas
+            ref={gdiOverlayRef}
+            style={{ width: '100%', height: '100%' }}
+            className={`absolute inset-0 z-10 pointer-events-none ${gdiSubs.length ? '' : 'hidden'}`}
+          />
 
           {/* 실시간 자막 오버레이: 실제 렌더링되는 화면 위에서 직접 클릭해 글자 수정 또는 Enter(나누기)/Backspace(합치기) 수행! */}
           {displayedActiveSubtitles.map((sub) => {
@@ -463,6 +638,8 @@ export const PreviewPlayer: React.FC = () => {
 
             const isSelected = sub.id === selectedClipId;
             const rawText = sub.text || '';
+            // Windows(GDI) 렌더 글꼴: 실제 글자는 위 캔버스가 그리므로 여기서는 투명 처리
+            const isGdiFont = Boolean(extractGdiFamily(sub.fontFamily));
 
             const displayLines = rawText.split(/\r?\n/);
 
@@ -537,6 +714,7 @@ export const PreviewPlayer: React.FC = () => {
                 className="absolute w-full z-20 flex flex-col items-center justify-center px-2 pointer-events-none"
               >
                 <div
+                  data-subtitle-box
                   onClick={(e) => {
                     e.stopPropagation();
                     setSelectedClipId(sub.id);
@@ -559,7 +737,7 @@ export const PreviewPlayer: React.FC = () => {
                       ...sharedTypographyStyle,
                       maxWidth: `${maxBoxWidthPx}px`,
                       backgroundColor:
-                        bgOpacity > 0 && sub.backgroundColor !== 'transparent'
+                        !isGdiFont && bgOpacity > 0 && sub.backgroundColor !== 'transparent'
                           ? hexToRgba(sub.backgroundColor || '#000000', bgOpacity)
                           : 'transparent',
                       borderRadius: `${bgRadius}px`,
@@ -645,13 +823,14 @@ export const PreviewPlayer: React.FC = () => {
                       }}
                       style={{
                         ...sharedTypographyStyle,
-                        color: resolvedFontColor,
+                        color: isGdiFont ? 'transparent' : resolvedFontColor,
+                        caretColor: '#3fb950',
                         WebkitTextStroke:
-                          scaledStrokePx > 0
+                          !isGdiFont && scaledStrokePx > 0
                             ? `${scaledStrokePx}px ${resolvedStrokeColor}`
                             : undefined,
                         paintOrder: 'stroke fill',
-                        textShadow: computedTextShadow,
+                        textShadow: isGdiFont ? 'none' : computedTextShadow,
                       }}
                       className="col-start-1 row-start-1 min-w-0 w-full h-full bg-transparent text-center resize-none overflow-hidden focus:outline-none px-2.5 py-1 select-text caret-[#3fb950]"
                     />
@@ -671,10 +850,19 @@ export const PreviewPlayer: React.FC = () => {
             <span className="font-mono font-bold text-[#2d8ceb] text-xs tracking-wider">
               {formatFullTimecode(currentTime, fps)}
             </span>
-            <select className="bg-[#262626] border border-[#3a3a3a] rounded px-2 py-0.5 text-[11px] text-[#dddddd] focus:outline-none">
-              <option>맞추기</option>
-              <option>50%</option>
-              <option>100%</option>
+            <select
+              value={String(viewZoom)}
+              onChange={(e) => applyViewZoom(Number(e.target.value))}
+              title="미리보기 확대 (화면 위에서 휠로도 조절)"
+              className="bg-[#262626] border border-[#3a3a3a] rounded px-2 py-0.5 text-[11px] text-[#dddddd] focus:outline-none"
+            >
+              <option value="1">맞추기</option>
+              <option value="1.5">150%</option>
+              <option value="2">200%</option>
+              <option value="4">400%</option>
+              {![1, 1.5, 2, 4].includes(viewZoom) && (
+                <option value={String(viewZoom)}>{Math.round(viewZoom * 100)}%</option>
+              )}
             </select>
           </div>
 

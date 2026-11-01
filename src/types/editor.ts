@@ -21,6 +21,8 @@ export interface SequenceItem {
   tracks: TimelineTrack[];
   clips: TimelineClip[];
   currentTime: number;
+  inPoint?: number | null;  // 시퀀스 인 지점 (초)
+  outPoint?: number | null; // 시퀀스 아웃 지점 (초)
 }
 
 export interface MediaAsset {
@@ -44,6 +46,7 @@ export interface TimelineTrack {
   solo: boolean;         // 오디오 S (Solo)
   visible: boolean;      // 비디오/자막 👁️ (Eye toggle)
   locked: boolean;       // 트랙 잠금 🔒
+  height?: number;       // 트랙별 높이(px) - 없으면 기본값(오디오 84 / 그 외 44)
 }
 
 export interface TimelineClip {
@@ -180,6 +183,10 @@ declare global {
       }>
     >;
     electronAPI?: {
+      getPathForFile?: (file: File) => string;
+      setDirtyState?: (dirty: boolean) => void;
+      onRequestSaveBeforeClose?: (callback: () => void) => () => void;
+      reportSaveBeforeClose?: (saved: boolean) => void;
       openMediaDialog: () => Promise<Array<Omit<MediaAsset, 'id'>>>;
       openScriptFileDialog: () => Promise<{ name: string; content: string } | null>;
       getSystemFonts: (forceRefresh?: boolean) => Promise<SystemFontItem[]>;
@@ -189,6 +196,14 @@ declare global {
         ext: string;
       } | null>;
       probeMedia: (filePath: string) => Promise<Omit<MediaAsset, 'id'>>;
+      gdiCheckFonts?: (families: string[]) => Promise<boolean[]>;
+      gdiGlyphs?: (params: { family: string; style: number; chars: string }) => Promise<{
+        asc: number;
+        desc: number;
+        synthBold: boolean;
+        glyphs: Array<{ cp: number; adv: number; d: string }>;
+      } | null>;
+      ensurePreviewProxy?: (filePath: string) => Promise<string | null>;
       detectSilence: (params: {
         filePath: string;
         sourceStart: number;

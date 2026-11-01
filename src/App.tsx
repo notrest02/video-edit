@@ -8,6 +8,8 @@ import { TimelinePanel } from './components/TimelinePanel';
 import { SequenceSettingsModal } from './components/SequenceSettingsModal';
 import { RelinkMediaModal } from './components/RelinkMediaModal';
 import { useEditorStore } from './store/useEditorStore';
+import { ensureFontsForValues } from './utils/pcFonts';
+import { importDroppedFiles } from './utils/dropImport';
 
 export const App: React.FC = () => {
   useEffect(() => {
@@ -70,6 +72,14 @@ export const App: React.FC = () => {
           return;
         }
 
+        // Ctrl+Shift+X: 인/아웃 지점 지우기 (프리미어와 동일)
+        if (e.shiftKey && (e.code === 'KeyX' || e.key.toLowerCase() === 'x' || e.key === 'ㅌ')) {
+          e.preventDefault();
+          state.clearInOut();
+          state.setStatusMessage('인/아웃 지점을 지웠습니다.');
+          return;
+        }
+
         return; // 기타 Ctrl 조합 시 하단의 단일 문자 단축키 실행 방지
       }
 
@@ -77,6 +87,14 @@ export const App: React.FC = () => {
       if (e.code === 'Space') {
         e.preventDefault();
         state.setIsPlaying(!state.isPlaying);
+      } else if (e.code === 'KeyI' && !e.altKey) {
+        // I: 인 지점 표시
+        e.preventDefault();
+        state.setInPoint(state.currentTime);
+      } else if (e.code === 'KeyO' && !e.altKey) {
+        // O: 아웃 지점 표시
+        e.preventDefault();
+        state.setOutPoint(state.currentTime);
       } else if (e.code === 'KeyV' || e.key === 'v' || e.key === 'V' || e.key === 'ㅍ') {
         state.setActiveTool('select');
       } else if (e.code === 'KeyC' || e.key === 'c' || e.key === 'C' || e.key === 'ㅊ') {
@@ -133,6 +151,76 @@ export const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // 저장 안 된 변경 여부를 메인 프로세스에 알려서, 창을 닫을 때 저장 여부를 묻게 한다
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.setDirtyState) return;
+    api.setDirtyState(useEditorStore.getState().isDirty);
+    const unsubDirty = useEditorStore.subscribe((st, prev) => {
+      if (st.isDirty !== prev.isDirty) api.setDirtyState?.(st.isDirty);
+    });
+    const unsubClose = api.onRequestSaveBeforeClose?.(async () => {
+      const saved = await useEditorStore.getState().saveProject(false);
+      api.reportSaveBeforeClose?.(saved);
+    });
+    return () => {
+      unsubDirty();
+      unsubClose?.();
+    };
+  }, []);
+
+  // 창 아무 곳에나 파일을 끌어다 놓으면 프로젝트 미디어로 가져오기
+  // (트랙/미디어 패널 위에 놓은 경우는 각 패널이 먼저 처리하고 preventDefault 한다)
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) {
+        e.preventDefault();
+      }
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!e.dataTransfer?.files?.length) return;
+      const alreadyHandled = e.defaultPrevented;
+      e.preventDefault(); // 파일을 창에 놓았을 때 앱 화면이 그 파일로 바뀌어 버리는 기본 동작 차단
+      if (alreadyHandled) return;
+      importDroppedFiles(Array.from(e.dataTransfer.files));
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, []);
+
+  // 영상 미디어마다 미리보기용 프록시를 백그라운드에서 생성 (인디케이터를 끌 때 프레임이 부드럽게 보이도록)
+  const assets = useEditorStore((st) => st.assets);
+  const requestedProxyRef = React.useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.ensurePreviewProxy) return;
+    const todo = assets.filter(
+      (a) => a.type === 'video' && a.path && !requestedProxyRef.current.has(a.path)
+    );
+    for (const a of todo) {
+      requestedProxyRef.current.add(a.path);
+      api
+        .ensurePreviewProxy(a.path)
+        .then((proxy) => {
+          if (proxy) useEditorStore.getState().setPreviewProxy(a.path, proxy);
+        })
+        .catch(() => {
+          // 프록시 생성 실패 시 원본으로 계속 미리보기
+        });
+    }
+  }, [assets]);
+
+  // 자막에 쓰인 내 PC 글꼴을 실제 글꼴 파일로 등록 (프로젝트를 다시 열었을 때도 동일하게 보이도록)
+  const clips = useEditorStore((st) => st.clips);
+  const fontKey = Array.from(new Set(clips.map((c) => c.fontFamily || ''))).sort().join('|');
+  useEffect(() => {
+    if (fontKey) ensureFontsForValues(fontKey.split('|'));
+  }, [fontKey]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#111111] text-[#cccccc] overflow-hidden">

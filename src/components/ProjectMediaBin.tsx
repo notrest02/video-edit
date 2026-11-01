@@ -15,6 +15,7 @@ import {
   FolderSearch,
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
+import { importDroppedFiles } from '../utils/dropImport';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 
 export const ProjectMediaBin: React.FC = () => {
@@ -74,26 +75,9 @@ export const ProjectMediaBin: React.FC = () => {
 
   const handleExternalDrop = async (e: React.DragEvent) => {
     e.preventDefault();
-    if (!window.electronAPI) return;
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
-
-    const probedList = [];
-    for (const f of files) {
-      const filePath = (f as any).path;
-      if (filePath) {
-        try {
-          const info = await window.electronAPI.probeMedia(filePath);
-          probedList.push(info);
-        } catch (err) {
-          console.error('Probe failed:', err);
-        }
-      }
-    }
-    if (probedList.length > 0) {
-      addAssets(probedList);
-      setStatusMessage(`${probedList.length}개의 미디어가 프로젝트 보관함에 추가되었습니다.`);
-    }
+    await importDroppedFiles(files);
   };
 
   const filteredSequences = sequences.filter((s) =>

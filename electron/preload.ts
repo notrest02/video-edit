@@ -1,11 +1,31 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  // Electron 32+ 에서는 드롭된 File 객체에 .path 가 없으므로 webUtils 로 실제 경로를 얻는다
+  getPathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file) || '';
+    } catch {
+      return '';
+    }
+  },
+  // 창 닫기 전 저장 확인용: 저장 안 된 변경 여부를 메인 프로세스에 알림
+  setDirtyState: (dirty: boolean) => ipcRenderer.send('app:setDirty', dirty),
+  onRequestSaveBeforeClose: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('app:requestSaveBeforeClose', handler);
+    return () => ipcRenderer.removeListener('app:requestSaveBeforeClose', handler);
+  },
+  reportSaveBeforeClose: (saved: boolean) => ipcRenderer.send('app:saveBeforeCloseResult', saved),
   openMediaDialog: () => ipcRenderer.invoke('dialog:openMedia'),
   openScriptFileDialog: () => ipcRenderer.invoke('dialog:openScriptFile'),
   getSystemFonts: (forceRefresh?: boolean) => ipcRenderer.invoke('system:getFonts', forceRefresh),
   openFontFileDialog: () => ipcRenderer.invoke('dialog:openFontFile'),
+  gdiCheckFonts: (families: string[]) => ipcRenderer.invoke('font:gdiCheck', families),
+  gdiGlyphs: (params: { family: string; style: number; chars: string }) =>
+    ipcRenderer.invoke('font:gdiGlyphs', params),
   probeMedia: (filePath: string) => ipcRenderer.invoke('media:probe', filePath),
+  ensurePreviewProxy: (filePath: string) => ipcRenderer.invoke('media:ensurePreviewProxy', filePath),
   detectSilence: (params: {
     filePath: string;
     sourceStart: number;

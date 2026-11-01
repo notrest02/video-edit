@@ -1,4 +1,5 @@
 import { TimelineClip } from '../types/editor';
+import { extractGdiFamily, gdiStyleOf, getGdiFace, GdiTextEngine } from './gdiFonts';
 
 /**
  * 자막 클립을 시퀀스 해상도(width x height) 투명 배경 PNG 데이터 URL로 렌더링합니다.
@@ -17,6 +18,18 @@ export function renderSubtitleClipToPngDataUrl(
   if (!ctx || !clip.text) return '';
 
   ctx.clearRect(0, 0, width, height);
+  drawSubtitleClip(ctx, clip, width, height);
+  return canvas.toDataURL('image/png');
+}
+
+/** 자막 하나를 width x height 화면 기준으로 ctx 에 그린다 (렌더 PNG / GDI 글꼴 미리보기 공용) */
+export function drawSubtitleClip(
+  ctx: CanvasRenderingContext2D,
+  clip: TimelineClip,
+  width: number,
+  height: number
+): void {
+  if (!clip.text) return;
 
   const referenceWidth = width < height ? 720 : 1280;
   const scaleRatio = Math.max(0.25, width / referenceWidth);
@@ -33,6 +46,36 @@ export function renderSubtitleClipToPngDataUrl(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
+  // Chromium 이 읽지 못하는 옛 글꼴은 Windows GDI+ 윤곽선으로 그림
+  const gdiFamily = extractGdiFamily(clip.fontFamily);
+  const gdiFace = gdiFamily ? getGdiFace(gdiFamily, gdiStyleOf(clip)) : null;
+  // 옛 글꼴에 없는 글자는 이 글꼴로 대신 그림
+  const fallbackFont = `${fontStyle} ${fontWeight} ${fontSize}px "Malgun Gothic", sans-serif`;
+  const fallbackMeasure = (ch: string) => {
+    ctx.save();
+    ctx.font = fallbackFont;
+    const w = ctx.measureText(ch).width;
+    ctx.restore();
+    return w;
+  };
+  const gdi = gdiFace
+    ? new GdiTextEngine(gdiFace, fontSize, (clip.letterSpacing ?? 0) * scaleRatio, fallbackMeasure)
+    : null;
+  const drawFallbackChars = (line: string, y: number, mode: 'fill' | 'stroke') => {
+    if (!gdi) return;
+    const chars = gdi.fallbackChars(line, centerX);
+    if (chars.length === 0) return;
+    ctx.save();
+    ctx.font = fallbackFont;
+    if ('letterSpacing' in ctx) (ctx as any).letterSpacing = '0px';
+    for (const { ch, x } of chars) {
+      if (mode === 'stroke') ctx.strokeText(ch, x, y);
+      else ctx.fillText(ch, x, y);
+    }
+    ctx.restore();
+  };
+  const measure = (t: string) => (gdi ? gdi.measure(t) : ctx.measureText(t).width);
+
   const maxBoxWidth = Math.floor(width * 0.88);
   const padX = Math.round(10 * scaleRatio);
   const padY = Math.round(4 * scaleRatio);
@@ -42,7 +85,7 @@ export function renderSubtitleClipToPngDataUrl(
   const rawParagraphs = clip.text.split(/\r?\n/);
   const lines: string[] = [];
   for (const para of rawParagraphs) {
-    const wrapped = wrapParagraphByWord(ctx, para, maxTextLineWidth);
+    const wrapped = wrapParagraphByWord(measure, para, maxTextLineWidth);
     lines.push(...wrapped);
   }
 
@@ -57,8 +100,8 @@ export function renderSubtitleClipToPngDataUrl(
 
   let maxLineWidth = 0;
   for (const line of lines) {
-    const metrics = ctx.measureText(line);
-    if (metrics.width > maxLineWidth) maxLineWidth = metrics.width;
+    const lineWidth = measure(line);
+    if (lineWidth > maxLineWidth) maxLineWidth = lineWidth;
   }
 
   const clipOpacity = clip.opacity ?? 1;
@@ -102,6 +145,7 @@ export function renderSubtitleClipToPngDataUrl(
   for (let i = 0; i < lines.length; i++) {
     const y = startY + i * lineHeight;
     const textLine = lines[i];
+    const gdiPath = gdi ? gdi.buildLinePath(textLine, centerX, y) : null;
 
     // 그림자 적용 (외곽선이 있으면 외곽선 단계에, 없으면 본문 단계에 그림자 적용)
     ctx.save();
@@ -117,7 +161,10 @@ export function renderSubtitleClipToPngDataUrl(
       ctx.miterLimit = 2;
       ctx.lineWidth = strokePx;
       ctx.strokeStyle = strokeRgba;
-      ctx.strokeText(textLine, centerX, y);
+      if (gdiPath) {
+        ctx.stroke(gdiPath);
+        drawFallbackChars(textLine, y, 'stroke');
+      } else ctx.strokeText(textLine, centerX, y);
       // 본문 칠할 때는 그림자 중복 방지
       ctx.shadowColor = 'transparent';
       ctx.shadowBlur = 0;
@@ -126,25 +173,36 @@ export function renderSubtitleClipToPngDataUrl(
     }
 
     ctx.fillStyle = fontRgba;
-    ctx.fillText(textLine, centerX, y);
+    if (gdiPath) {
+      ctx.fill(gdiPath);
+      drawFallbackChars(textLine, y, 'fill');
+      // 굵게 스타일이 없는 글꼴은 같은 색 얇은 외곽선으로 굵기 흉내
+      if (gdi?.synthBold) {
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = fontSize * 0.035;
+        ctx.strokeStyle = fontRgba;
+        ctx.stroke(gdiPath);
+      }
+    } else {
+      ctx.fillText(textLine, centerX, y);
+    }
     ctx.restore();
   }
 
   ctx.restore();
-  return canvas.toDataURL('image/png');
 }
 
 /**
  * 글자 크기에 맞춰 maxWidthPx를 초과할 때 어절(띄어쓰기) 단위로 자동 줄바꿈합니다.
  */
 function wrapParagraphByWord(
-  ctx: CanvasRenderingContext2D,
+  measure: (text: string) => number,
   paragraph: string,
   maxWidthPx: number
 ): string[] {
   const trimmed = paragraph.trim();
   if (!trimmed) return [''];
-  if (ctx.measureText(trimmed).width <= maxWidthPx) {
+  if (measure(trimmed) <= maxWidthPx) {
     return [trimmed];
   }
 
@@ -154,18 +212,18 @@ function wrapParagraphByWord(
 
   for (const word of words) {
     const candidate = currentLine ? `${currentLine} ${word}` : word;
-    if (ctx.measureText(candidate).width <= maxWidthPx) {
+    if (measure(candidate) <= maxWidthPx) {
       currentLine = candidate;
     } else {
       if (currentLine) {
         result.push(currentLine);
       }
       // 만약 띄어쓰기 없는 단일 어절 하나가 한 줄 전체 폭보다 길다면 글자 단위로 분할
-      if (ctx.measureText(word).width > maxWidthPx) {
+      if (measure(word) > maxWidthPx) {
         let charChunk = '';
         for (const ch of word) {
           const nextChunk = charChunk + ch;
-          if (ctx.measureText(nextChunk).width > maxWidthPx && charChunk) {
+          if (measure(nextChunk) > maxWidthPx && charChunk) {
             result.push(charChunk);
             charChunk = ch;
           } else {

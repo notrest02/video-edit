@@ -14,9 +14,30 @@ import {
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
+import { ensureFontsForValues } from '../utils/pcFonts';
+import { ensureGdiClipsReady } from '../utils/gdiFonts';
+import type { TimelineClip } from '../types/editor';
+
+/**
+ * 렌더 구간 [rangeStart, rangeEnd) 안으로 클립을 잘라내고 0초 기준으로 당긴다.
+ * 구간 밖 클립은 제외, 걸친 클립은 원본 시작점(sourceStart)도 함께 보정.
+ */
+function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): TimelineClip | null {
+  const s = Math.max(c.startTime, rangeStart);
+  const e = Math.min(c.startTime + c.duration, rangeEnd);
+  if (e - s < 1e-4) return null;
+  return {
+    ...c,
+    startTime: s - rangeStart,
+    duration: e - s,
+    sourceStart: c.type === 'text' ? c.sourceStart : c.sourceStart + (s - c.startTime),
+  };
+}
 
 export const TopHeader: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
+  // 렌더 범위: 전체 시퀀스 / 인~아웃 구간
+  const [renderRange, setRenderRange] = useState<'all' | 'inout'>('inout');
   const [exportProgress, setExportProgress] = useState(0);
 
   const {
@@ -42,7 +63,11 @@ export const TopHeader: React.FC = () => {
     snapAllSubtitlesToClips,
     getTotalDuration,
     setStatusMessage,
+    inPoint,
+    outPoint,
   } = useEditorStore();
+  const hasInOut = inPoint !== null || outPoint !== null;
+  const useInOutRange = hasInOut && renderRange === 'inout';
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -77,12 +102,25 @@ export const TopHeader: React.FC = () => {
       return;
     }
 
+    const fullDuration = getTotalDuration();
+    const rangeStart = useInOutRange ? Math.max(0, inPoint ?? 0) : 0;
+    const rangeEnd = useInOutRange ? Math.min(fullDuration, outPoint ?? fullDuration) : fullDuration;
+    if (rangeEnd - rangeStart < 0.05) {
+      setStatusMessage('인/아웃 구간이 너무 짧거나 클립이 없는 위치입니다.');
+      return;
+    }
+    const rangedClips = useInOutRange
+      ? (clips
+          .map((c) => clipToRange(c, rangeStart, rangeEnd))
+          .filter(Boolean) as TimelineClip[])
+      : clips;
+
     setIsExporting(true);
     setExportProgress(1);
     setStatusMessage('MP4 렌더링 준비 중...');
 
     try {
-      const videoClips = clips
+      const videoClips = rangedClips
         .filter((c) => c.type === 'video' && visibleTrackIds.has(c.trackId) && c.sourcePath)
         .map((c) => ({
           id: c.id,
@@ -94,7 +132,7 @@ export const TopHeader: React.FC = () => {
           muted: c.muted,
         }));
 
-      const audioClips = clips
+      const audioClips = rangedClips
         .filter((c) => c.type === 'audio' && activeAudioTrackIds.has(c.trackId) && c.sourcePath)
         .map((c) => ({
           id: c.id,
@@ -109,7 +147,12 @@ export const TopHeader: React.FC = () => {
       const outW = sequence.width || 1920;
       const outH = sequence.height || 1080;
 
-      const subtitleOverlays = clips
+      // 자막에 쓰인 내 PC 글꼴을 모두 불러온 뒤에 그려야 기본 글꼴로 렌더되지 않음
+      await ensureFontsForValues(rangedClips.map((c) => c.fontFamily));
+      // Windows(GDI) 렌더 글꼴은 자막에 쓰인 글자 윤곽선을 미리 받아둔다
+      await ensureGdiClipsReady(rangedClips.filter((c) => c.type === 'text'));
+
+      const subtitleOverlays = rangedClips
         .filter(
           (c) =>
             c.type === 'text' &&
@@ -129,7 +172,7 @@ export const TopHeader: React.FC = () => {
         videoClips,
         audioClips,
         subtitleOverlays,
-        totalDuration: getTotalDuration(),
+        totalDuration: rangeEnd - rangeStart,
         fps: sequence.fps || fps,
         width: outW,
         height: outH,
@@ -138,7 +181,9 @@ export const TopHeader: React.FC = () => {
       if (res.canceled) {
         setStatusMessage('내보내기가 취소되었습니다.');
       } else {
-        setStatusMessage(`MP4 내보내기 완료: ${res.outputPath}`);
+        setStatusMessage(
+          `MP4 내보내기 완료${useInOutRange ? ' (인~아웃 구간)' : ''}: ${res.outputPath}`
+        );
       }
     } catch (err: any) {
       setStatusMessage(`MP4 내보내기 실패: ${err.message}`);
@@ -274,6 +319,19 @@ export const TopHeader: React.FC = () => {
           <Magnet className="w-3 h-3" />
           클립에 자막 맞추기
         </button>
+
+        <select
+          value={hasInOut ? renderRange : 'all'}
+          onChange={(e) => setRenderRange(e.target.value as 'all' | 'inout')}
+          disabled={isExporting}
+          title="렌더 범위 (타임라인에서 I / O 키로 인·아웃 지점 지정)"
+          className="bg-[#262626] border border-[#3a3a3a] rounded px-1.5 py-1 text-[11px] text-[#dddddd] focus:outline-none"
+        >
+          <option value="all">전체</option>
+          <option value="inout" disabled={!hasInOut}>
+            인~아웃{hasInOut ? '' : ' (없음)'}
+          </option>
+        </select>
 
         <button
           onClick={handleExportMp4}

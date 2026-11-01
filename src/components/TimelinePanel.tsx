@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   MousePointer,
   Scissors,
@@ -20,11 +20,17 @@ import {
   ZoomOut,
   X,
 } from 'lucide-react';
-import { useEditorStore } from '../store/useEditorStore';
+import {
+  useEditorStore,
+  getTrackHeightPx,
+  MIN_ZOOM_PX_PER_SEC,
+  MAX_ZOOM_PX_PER_SEC,
+} from '../store/useEditorStore';
 import { TimelineClip, TimelineTrack } from '../types/editor';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { AudioWaveformCanvas } from './AudioWaveformCanvas';
 import { AudioVuMeter } from './AudioVuMeter';
+import { importDroppedFiles } from '../utils/dropImport';
 
 export const TimelinePanel: React.FC = () => {
   // 우측 타임라인(눈금자 + 트랙 레인 통합) 가로 스크롤 컨테이너
@@ -93,7 +99,14 @@ export const TimelinePanel: React.FC = () => {
     rippleCloseGaps,
     snapAllSubtitlesToClips,
     getTotalDuration,
+    inPoint,
+    outPoint,
+    setTrackHeightsByType,
   } = useEditorStore();
+  // 타임라인 본문(트랙 헤더 + 레인) 전체: 휠 조작(이동/줌/트랙 높이)을 받는 영역
+  const timelineBodyRef = useRef<HTMLDivElement | null>(null);
+  // Alt+휠 줌 시 마우스 아래 시간이 그대로 유지되도록, 줌 반영 직후 적용할 스크롤 위치
+  const pendingZoomAnchorRef = useRef<{ time: number; offsetX: number } | null>(null);
 
   const [marqueeBox, setMarqueeBox] = useState<{
     startX: number;
@@ -109,10 +122,75 @@ export const TimelinePanel: React.FC = () => {
 
   const selectedClip = clips.find((c) => c.id === selectedClipId) || null;
 
-  // 오디오 파형 확대 보기 (프리미어처럼 오디오 트랙 높이를 키워 파형을 크게 표시)
-  const [audioTrackHeight, setAudioTrackHeight] = useState<number>(84);
-  const getTrackHeight = (track: TimelineTrack) =>
-    track.type === 'audio' ? audioTrackHeight : 44;
+  // 트랙별 높이 (트랙 위에서 Ctrl+휠로 개별 조절, 하단 슬라이더는 오디오 트랙 전체 조절)
+  const getTrackHeight = (track: TimelineTrack) => getTrackHeightPx(track);
+  const firstAudioTrack = tracks.find((t) => t.type === 'audio');
+  const audioTrackHeight = firstAudioTrack ? getTrackHeightPx(firstAudioTrack) : 84;
+
+  // 휠 조작:
+  //  - 휠            : 시퀀스 좌우 이동
+  //  - Shift + 휠    : 트랙 위아래 스크롤
+  //  - Alt + 휠      : 마우스 위치 기준 확대/축소
+  //  - Ctrl + 휠     : 마우스가 올라간 트랙의 높이 조절
+  useEffect(() => {
+    const body = timelineBodyRef.current;
+    if (!body) return;
+    const onWheel = (e: WheelEvent) => {
+      const scroller = rightScrollRef.current;
+      if (!scroller) return;
+      const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      if (delta === 0) return;
+      e.preventDefault();
+
+      if (e.ctrlKey) {
+        const el = (e.target as HTMLElement | null)?.closest(
+          '[data-track-id], [data-track-header-id]'
+        ) as HTMLElement | null;
+        const trackId = el?.dataset.trackId || el?.dataset.trackHeaderId;
+        if (!trackId) return;
+        const st = useEditorStore.getState();
+        const track = st.tracks.find((t) => t.id === trackId);
+        if (!track) return;
+        const cur = getTrackHeightPx(track);
+        const step = Math.max(4, Math.round(cur * 0.12));
+        st.setTrackHeight(trackId, cur + (delta < 0 ? step : -step));
+        return;
+      }
+
+      if (e.altKey) {
+        const st = useEditorStore.getState();
+        const rect = scroller.getBoundingClientRect();
+        const offsetX = Math.max(0, Math.min(scroller.clientWidth, e.clientX - rect.left));
+        const time = (scroller.scrollLeft + offsetX) / st.zoomPxPerSec;
+        const factor = Math.pow(1.0015, -delta); // 휠 한 칸(100) ≈ 16% 확대/축소
+        const next = Math.min(
+          MAX_ZOOM_PX_PER_SEC,
+          Math.max(MIN_ZOOM_PX_PER_SEC, st.zoomPxPerSec * factor)
+        );
+        if (Math.abs(next - st.zoomPxPerSec) < 1e-6) return;
+        pendingZoomAnchorRef.current = { time, offsetX };
+        st.setZoomPxPerSec(next);
+        return;
+      }
+
+      if (e.shiftKey) {
+        scroller.scrollTop += delta;
+        return;
+      }
+
+      scroller.scrollLeft += delta;
+    };
+    body.addEventListener('wheel', onWheel, { passive: false });
+    return () => body.removeEventListener('wheel', onWheel);
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = pendingZoomAnchorRef.current;
+    const scroller = rightScrollRef.current;
+    if (!anchor || !scroller) return;
+    pendingZoomAnchorRef.current = null;
+    scroller.scrollLeft = Math.max(0, anchor.time * zoomPxPerSec - anchor.offsetX);
+  }, [zoomPxPerSec]);
 
   // 스냅 기준점(모든 클립 시작/끝 + 재생헤드)
   const snapPoints = React.useMemo(() => {
@@ -156,12 +234,38 @@ export const TimelinePanel: React.FC = () => {
     let lastClientX = e.clientX;
     let autoScrollRaf: number | null = null;
 
+    let shiftHeld = e.shiftKey;
+
+    // Shift 를 누른 채 움직이면 가장 가까운 클립 시작/끝(및 인/아웃 지점)에 인디케이터가 착 붙음
+    const snapToClipEdge = (time: number) => {
+      const st = useEditorStore.getState();
+      const tolSec = 14 / st.zoomPxPerSec; // 화면상 14px 이내
+      let best = time;
+      let bestDist = tolSec;
+      const consider = (pt: number) => {
+        const d = Math.abs(pt - time);
+        if (d <= bestDist) {
+          bestDist = d;
+          best = pt;
+        }
+      };
+      consider(0);
+      for (const c of st.clips) {
+        consider(c.startTime);
+        consider(c.startTime + c.duration);
+      }
+      if (st.inPoint !== null) consider(st.inPoint);
+      if (st.outPoint !== null) consider(st.outPoint);
+      return best;
+    };
+
     const updateTimeFromClientX = (clientX: number) => {
       const scrollerRect = scroller.getBoundingClientRect();
       // 스크롤러 내부에서의 상대 X 좌표 + 현재 가로 스크롤 오프셋(scrollLeft)
       const xInViewport = clientX - scrollerRect.left;
       const absoluteX = Math.max(0, scroller.scrollLeft + xInViewport);
-      const nextTime = absoluteX / useEditorStore.getState().zoomPxPerSec;
+      let nextTime = absoluteX / useEditorStore.getState().zoomPxPerSec;
+      if (shiftHeld) nextTime = snapToClipEdge(nextTime);
       setCurrentTime(Number(nextTime.toFixed(4)));
     };
 
@@ -192,6 +296,7 @@ export const TimelinePanel: React.FC = () => {
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       lastClientX = moveEvent.clientX;
+      shiftHeld = moveEvent.shiftKey;
       updateTimeFromClientX(moveEvent.clientX);
     };
 
@@ -612,31 +717,24 @@ export const TimelinePanel: React.FC = () => {
       return;
     }
 
-    if (window.electronAPI && e.dataTransfer.files.length > 0) {
+    if (e.dataTransfer.files.length > 0) {
+      const created = await importDroppedFiles(Array.from(e.dataTransfer.files));
       let cursor = dropTime;
-      for (const file of Array.from(e.dataTransfer.files)) {
-        const filePath = (file as any).path;
-        if (filePath) {
-          try {
-            const info = await window.electronAPI.probeMedia(filePath);
-            const created = addAssets([info]);
-            if (created[0]) {
-              addAssetToTimeline(created[0].id, {
-                targetTrackId: track.id,
-                startTime: cursor,
-              });
-              cursor += created[0].duration;
-            }
-          } catch (err) {
-            console.error('Drop probe failed:', err);
-          }
-        }
+      for (const asset of created) {
+        addAssetToTimeline(asset.id, {
+          targetTrackId: track.id,
+          startTime: cursor,
+        });
+        cursor += asset.duration;
       }
     }
   };
 
   // 눈금자 틱 간격
-  const stepSeconds = zoomPxPerSec >= 80 ? 1 : zoomPxPerSec >= 35 ? 5 : 10;
+  // 라벨끼리 최소 100px 이상 떨어지도록 간격 선택 (많이 축소해도 눈금이 겹치지 않음)
+  const TICK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
+  const stepSeconds =
+    TICK_STEPS.find((st) => st * zoomPxPerSec >= 100) || TICK_STEPS[TICK_STEPS.length - 1];
   const ticks: number[] = [];
   for (let t = 0; t <= totalDuration; t += stepSeconds) {
     ticks.push(t);
@@ -826,7 +924,7 @@ export const TimelinePanel: React.FC = () => {
         </div>
 
         {/* 본문: [좌측 210px 고정 컬럼(타임코드 + 트랙 헤더)] + [우측 통합 가로 스크롤 영역(눈금자 + 트랙 레인 + 일체형 인디케이터)] */}
-        <div className="flex-1 flex min-h-0 overflow-hidden">
+        <div ref={timelineBodyRef} className="flex-1 flex min-h-0 overflow-hidden">
           {/* A. 좌측 210px 완전 고정 컬럼 (절대 클립이나 파란 수직선이 침범하지 않음!) */}
           <div className="w-[210px] shrink-0 bg-[#1d1d1d] border-r border-[#2b2b2b] flex flex-col z-20">
             {/* 좌측 상단 타임코드 및 스냅/클립맞춤 박스 (높이 48px = 눈금자 높이와 정확히 동일!) */}
@@ -891,9 +989,10 @@ export const TimelinePanel: React.FC = () => {
                 return (
                   <div
                     key={track.id}
+                    data-track-header-id={track.id}
                     onClick={() => setSelectedTrackId(track.id)}
                     style={{ height: `${getTrackHeight(track)}px` }}
-                    title="트랙 클릭 선택 후 Delete 키를 누르면 이 트랙 레이어를 삭제할 수 있습니다"
+                    title="트랙 클릭 선택 후 Delete 키: 트랙 삭제 · Ctrl+휠: 이 트랙 높이 조절"
                     className={`shrink-0 px-2 flex items-center justify-between cursor-pointer group ${
                       selectedTrackId === track.id
                         ? 'bg-[#233246] border-l-2 border-l-[#2d8ceb]'
@@ -1024,6 +1123,21 @@ export const TimelinePanel: React.FC = () => {
                     <div className="absolute bottom-0 left-0 h-2 w-[1px] bg-[#555555]" />
                   </div>
                 ))}
+
+                {/* 인/아웃 구간 표시 (I / O 키, Ctrl+Shift+X 로 지우기) */}
+                {(inPoint !== null || outPoint !== null) && (
+                  <div
+                    style={{
+                      left: `${(inPoint ?? 0) * zoomPxPerSec}px`,
+                      width: `${Math.max(
+                        2,
+                        ((outPoint ?? contentDuration) - (inPoint ?? 0)) * zoomPxPerSec
+                      )}px`,
+                    }}
+                    className="absolute bottom-0 h-3 bg-[#d6d6d6]/35 border-x-2 border-[#e8e8e8] pointer-events-none"
+                    title="렌더 구간 (인~아웃)"
+                  />
+                )}
               </div>
 
               {/* 2) 트랙 클립 레인들 (마우스 드래그 영역 선택 지원) */}
@@ -1185,6 +1299,22 @@ export const TimelinePanel: React.FC = () => {
                 })}
               </div>
 
+              {/* 인/아웃 구간 바깥을 어둡게 (렌더 범위 시각화) */}
+              {(inPoint !== null || outPoint !== null) && (
+                <>
+                  <div
+                    style={{ left: 0, width: `${(inPoint ?? 0) * zoomPxPerSec}px` }}
+                    className="absolute top-12 bottom-0 bg-black/30 pointer-events-none z-[5]"
+                  />
+                  {outPoint !== null && (
+                    <div
+                      style={{ left: `${outPoint * zoomPxPerSec}px`, right: 0 }}
+                      className="absolute top-12 bottom-0 bg-black/30 pointer-events-none z-[5]"
+                    />
+                  )}
+                </>
+              )}
+
               {/* 스냅 가이드라인 */}
               {snapGuideTime !== null && (
                 <div
@@ -1236,6 +1366,27 @@ export const TimelinePanel: React.FC = () => {
                 <option value={12}>±12F</option>
               </select>
             </span>
+            <span>·</span>
+            <span title="I: 인 지점 / O: 아웃 지점 / Ctrl+Shift+X: 지우기">
+              인/아웃:{' '}
+              {inPoint === null && outPoint === null ? (
+                <span className="text-[#666666]">없음 (I / O 키)</span>
+              ) : (
+                <span className="font-mono text-[#e8e8e8]">
+                  {formatFullTimecode(inPoint ?? 0, fps)} ~{' '}
+                  {outPoint !== null ? formatFullTimecode(outPoint, fps) : '끝'}
+                </span>
+              )}
+            </span>
+            {(inPoint !== null || outPoint !== null) && (
+              <button
+                onClick={() => useEditorStore.getState().clearInOut()}
+                className="px-1 rounded bg-[#262626] hover:bg-[#333333] border border-[#3a3a3a] text-[10px]"
+                title="인/아웃 지우기 (Ctrl+Shift+X)"
+              >
+                지우기
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -1245,27 +1396,31 @@ export const TimelinePanel: React.FC = () => {
             <input
               type="range"
               min={44}
-              max={180}
+              max={240}
               step={4}
               value={audioTrackHeight}
-              onChange={(e) => setAudioTrackHeight(Number(e.target.value))}
+              onChange={(e) => setTrackHeightsByType('audio', Number(e.target.value))}
+              title="오디오 트랙 전체 높이 (트랙 하나만 바꾸려면 그 트랙 위에서 Ctrl+휠)"
               className="w-20 accent-[#3fb950]"
             />
             <div className="h-3 w-[1px] bg-[#333333] mx-1" />
             <ZoomOut
-              onClick={() => setZoomPxPerSec(zoomPxPerSec - 12)}
+              onClick={() => setZoomPxPerSec(zoomPxPerSec / 1.25)}
               className="w-3.5 h-3.5 cursor-pointer hover:text-white"
             />
+            {/* 로그 스케일 슬라이더: 많이 축소된 구간에서도 세밀하게 조절 가능 */}
             <input
               type="range"
-              min={15}
-              max={600}
-              value={zoomPxPerSec}
-              onChange={(e) => setZoomPxPerSec(Number(e.target.value))}
+              min={Math.log(MIN_ZOOM_PX_PER_SEC)}
+              max={Math.log(MAX_ZOOM_PX_PER_SEC)}
+              step={0.01}
+              value={Math.log(zoomPxPerSec)}
+              onChange={(e) => setZoomPxPerSec(Math.exp(Number(e.target.value)))}
+              title="타임라인 확대/축소 (Alt+휠)"
               className="w-28 accent-[#2d8ceb]"
             />
             <ZoomIn
-              onClick={() => setZoomPxPerSec(zoomPxPerSec + 12)}
+              onClick={() => setZoomPxPerSec(zoomPxPerSec * 1.25)}
               className="w-3.5 h-3.5 cursor-pointer hover:text-white"
             />
           </div>

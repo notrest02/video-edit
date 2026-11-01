@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
+import { GdiGlyphService } from './gdiGlyphHelper';
 
 const resolvedFfmpegPath = ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : '';
 const resolvedFfprobePath = ffprobeStatic?.path ? ffprobeStatic.path.replace('app.asar', 'app.asar.unpacked') : '';
@@ -33,6 +34,20 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow: BrowserWindow | null = null;
+let rendererIsDirty = false;
+let allowWindowClose = false;
+
+ipcMain.on('app:setDirty', (_event, dirty: boolean) => {
+  rendererIsDirty = Boolean(dirty);
+});
+
+// 렌더러에서 '저장' 처리 결과: 저장 성공 시에만 창을 닫는다 (저장 대화상자에서 취소하면 그대로 유지)
+ipcMain.on('app:saveBeforeCloseResult', (_event, saved: boolean) => {
+  if (saved && mainWindow) {
+    allowWindowClose = true;
+    mainWindow.close();
+  }
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -42,13 +57,38 @@ function createWindow() {
     minHeight: 740,
     backgroundColor: '#0f1117',
     title: 'Antigravity Studio - AI 비디오 편집기',
-    autoHideMenuBar: true,
+    // autoHideMenuBar 를 쓰면 Alt 키(Alt+휠 줌 등)를 뗄 때마다 메뉴바가 튀어나오므로 끄고 숨김 처리만 한다
+    autoHideMenuBar: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       webSecurity: true,
     },
+  });
+  mainWindow.setMenuBarVisibility(false);
+
+  // 창 닫기 전 저장 확인 (저장 안 된 변경이 있을 때만)
+  allowWindowClose = false;
+  mainWindow.on('close', (e) => {
+    if (allowWindowClose || !rendererIsDirty || !mainWindow) return;
+    e.preventDefault();
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'question',
+      buttons: ['저장', '저장 안 함', '취소'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      title: '저장 확인',
+      message: '저장되지 않은 변경 사항이 있습니다.',
+      detail: '창을 닫기 전에 프로젝트를 저장할까요?',
+    });
+    if (choice === 1) {
+      allowWindowClose = true;
+      mainWindow.close();
+    } else if (choice === 0) {
+      mainWindow.webContents.send('app:requestSaveBeforeClose');
+    }
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -324,6 +364,35 @@ ipcMain.handle('system:getFonts', async (_event, forceRefresh?: boolean) => {
   });
 });
 
+// 2-1. Chromium 이 읽지 못하는 옛 글꼴용: Windows GDI+ 로 글자 윤곽선 추출
+let gdiGlyphService: GdiGlyphService | null = null;
+function getGdiGlyphService() {
+  if (!gdiGlyphService) {
+    gdiGlyphService = new GdiGlyphService(path.join(app.getPath('userData'), 'gdi-glyph-helper'));
+  }
+  return gdiGlyphService;
+}
+app.on('will-quit', () => gdiGlyphService?.dispose());
+
+ipcMain.handle('font:gdiCheck', async (_event, families: string[]) => {
+  const svc = getGdiGlyphService();
+  const result: boolean[] = [];
+  for (const f of families) result.push(await svc.check(f));
+  return result;
+});
+
+ipcMain.handle(
+  'font:gdiGlyphs',
+  async (_event, params: { family: string; style: number; chars: string }) => {
+    try {
+      return await getGdiGlyphService().glyphs(params.family, params.style, params.chars);
+    } catch (err) {
+      console.warn('[font:gdiGlyphs] failed', err);
+      return null;
+    }
+  }
+);
+
 // 2-2. Open Custom Font File (.ttf, .otf, .woff, .woff2) from PC
 ipcMain.handle('dialog:openFontFile', async () => {
   if (!mainWindow) return null;
@@ -345,6 +414,78 @@ ipcMain.handle('dialog:openFontFile', async () => {
 });
 
 // 3. Probe Arbitrary File Path (e.g. Drag and Drop)
+// 3-1. 미리보기 전용 프록시 생성
+// 원본(긴 GOP H.264/HEVC)은 임의 위치 시크마다 디코딩 비용이 커서 인디케이터를 끌면 프레임이 몇 장만 보인다
+// (측정: 1080x1920 원본 천천히 2초 끌기 → 5프레임 / 프록시 → 120프레임).
+// 짧은 GOP(6) + B프레임 없음 + 긴 변 960px 로 다시 인코딩해 미리보기에만 사용한다. 렌더는 항상 원본 사용.
+const proxyJobs = new Map<string, Promise<string | null>>();
+let proxyQueue: Promise<unknown> = Promise.resolve();
+
+function proxyPathFor(filePath: string, stat: fs.Stats): string {
+  const key = `${filePath}|${stat.size}|${stat.mtimeMs}`;
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (Math.imul(31, h) + key.charCodeAt(i)) | 0;
+  const base = path.basename(filePath, path.extname(filePath)).replace(/[^\w가-힣-]+/g, '_').slice(0, 40);
+  return path.join(app.getPath('userData'), 'preview-proxies', `${base}_${(h >>> 0).toString(36)}.mp4`);
+}
+
+ipcMain.handle('media:ensurePreviewProxy', async (_event, filePath: string) => {
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch {
+    return null;
+  }
+  const out = proxyPathFor(filePath, stat);
+  if (fs.existsSync(out)) return out;
+  const existing = proxyJobs.get(out);
+  if (existing) return existing;
+
+  // 한 번에 하나씩 순서대로 생성 (편집 중 CPU 를 다 잡아먹지 않도록)
+  const job = proxyQueue.then(
+    () =>
+      new Promise<string | null>((resolve) => {
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        const tmp = out.replace(/\.mp4$/, '.part.mp4');
+        const args = [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-i', filePath,
+          '-map', '0:v:0', '-map', '0:a:0?',
+          '-vf', "scale='if(gt(iw,ih),min(960,iw),-2)':'if(gt(iw,ih),-2,min(960,ih))'",
+          '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'fastdecode',
+          '-g', '6', '-bf', '0', '-crf', '24', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '96k',
+          '-movflags', '+faststart',
+          tmp,
+        ];
+        const proc = spawn(resolvedFfmpegPath, args, { windowsHide: true });
+        let errLog = '';
+        proc.stderr.on('data', (d) => (errLog += d.toString()));
+        proc.on('close', (code) => {
+          if (code === 0 && fs.existsSync(tmp)) {
+            try {
+              fs.renameSync(tmp, out);
+              resolve(out);
+              return;
+            } catch (err) {
+              console.warn('[proxy] rename failed', err);
+            }
+          } else {
+            console.warn('[proxy] ffmpeg failed', code, errLog.slice(0, 500));
+          }
+          try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+          resolve(null);
+        });
+        proc.on('error', () => resolve(null));
+      })
+  );
+  proxyQueue = job.catch(() => null);
+  proxyJobs.set(out, job);
+  const result = await job;
+  proxyJobs.delete(out);
+  return result;
+});
+
 ipcMain.handle('media:probe', async (_event, filePath: string) => {
   return await probeMediaFile(filePath);
 });
