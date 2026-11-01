@@ -27,6 +27,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   probeMedia: (filePath: string) => ipcRenderer.invoke('media:probe', filePath),
   mmsWordStarts: (segments: Array<{ pcm: Float32Array; words: string[] }>) =>
     ipcRenderer.invoke('align:mmsWordStarts', segments),
+  modelGetStatus: () => ipcRenderer.invoke('model:getStatus'),
+  modelEnsure: () => ipcRenderer.invoke('model:ensure'),
+  modelImportDialog: () => ipcRenderer.invoke('model:importDialog'),
+  onModelStatus: (callback: (status: unknown) => void) => {
+    const handler = (_event: unknown, status: unknown) => callback(status);
+    ipcRenderer.on('model:status', handler);
+    return () => ipcRenderer.removeListener('model:status', handler);
+  },
   alignWordSpansLong: (params: { pcm: Float32Array; words: string[] }) =>
     ipcRenderer.invoke('align:wordSpansLong', params),
   ensurePreviewProxy: (filePath: string) => ipcRenderer.invoke('media:ensurePreviewProxy', filePath),

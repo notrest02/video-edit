@@ -246,6 +246,16 @@ export const LeftSidebar: React.FC = () => {
       return;
     }
 
+    // 자막 위치 정밀 맞춤 모델 필요 (없으면 먼저 받음, 받지 못하면 진행하지 않음)
+    if (window.electronAPI.modelEnsure) {
+      setStatusMessage('자막 위치 맞춤 모델 확인 중... (처음 한 번은 다운로드합니다)');
+      const st = await window.electronAPI.modelEnsure();
+      if (st.state !== 'ready') {
+        setStatusMessage('자막 위치 맞춤 모델을 받지 못해 자막을 만들지 않았습니다. 상단 안내에서 [다시 시도]해 주세요.');
+        return;
+      }
+    }
+
     setIsProcessing(true);
     try {
       const segments: WordTimestamp[] = [];
@@ -297,8 +307,11 @@ export const LeftSidebar: React.FC = () => {
           const refined = await refineCaptionsByFullAlignment(pcm, 16000, result.captions, (p, words) =>
             window.electronAPI!.alignWordSpansLong!({ pcm: p, words })
           );
+          if (!refined.available) {
+            skipped.push(`${clip.name}: 자막 위치 맞춤 모델을 사용할 수 없습니다`);
+            continue;
+          }
           finalCaptions = refined.captions;
-          if (!refined.available) notes.push('정밀 정렬 모델이 없어 자막 위치는 추정값입니다');
         }
 
         for (const cap of finalCaptions) {

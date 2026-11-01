@@ -144,6 +144,13 @@ export interface SystemFontItem {
   familyEn: string;
 }
 
+export type AlignModelStatus =
+  | { state: 'ready' }
+  | { state: 'missing' }
+  | { state: 'downloading'; attempt: number; maxAttempts: number; file: string; received: number; total: number }
+  | { state: 'verifying'; file: string }
+  | { state: 'failed'; message: string };
+
 export interface ProjectFileData {
   version: number;
   savedAt: string;
@@ -196,6 +203,10 @@ declare global {
         ext: string;
       } | null>;
       probeMedia: (filePath: string) => Promise<Omit<MediaAsset, 'id'>>;
+      modelGetStatus?: () => Promise<AlignModelStatus>;
+      modelEnsure?: () => Promise<AlignModelStatus>;
+      modelImportDialog?: () => Promise<{ ok: boolean; message: string; status?: AlignModelStatus }>;
+      onModelStatus?: (callback: (status: AlignModelStatus) => void) => () => void;
       alignWordSpansLong?: (params: {
         pcm: Float32Array;
         words: string[];

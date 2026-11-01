@@ -1325,6 +1325,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
         return;
       }
 
+      // 정밀 정렬 모델이 필요 (없으면 먼저 받음, 받지 못하면 진행하지 않음)
+      const modelStatus = await window.electronAPI?.modelEnsure?.();
+      if (window.electronAPI?.modelEnsure && modelStatus?.state !== 'ready') {
+        set({
+          statusMessage: '자막 위치 맞춤 모델을 받지 못해 자막 나누기를 진행하지 않았습니다. 상단 안내에서 [다시 시도]해 주세요.',
+        });
+        return;
+      }
       set({ statusMessage: '자막을 나눌 위치를 찾기 위해 음성을 분석하는 중...' });
       const audioLookup = await buildCaptionAudioLookup(clipsBefore, get().tracks);
       const baseOpts: ReformatOptions = {
@@ -1334,6 +1342,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
         audioLookup,
       };
       const mms = await buildMmsSplitProvider(clipsBefore, baseOpts, audioLookup);
+      if (audioLookup && !mms.available) {
+        set({ statusMessage: '자막 위치 맞춤 모델을 사용할 수 없어 자막 나누기를 진행하지 않았습니다.' });
+        return;
+      }
       // 분석하는 동안 바뀐 최신 상태 기준으로 재구성
       const { clips, tracks, fps } = get();
 
@@ -1353,9 +1365,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         captionMaxCharsPerLine: targetMaxChars,
         clips: updatedClips,
         sequences: syncActiveSequenceData(tracks, updatedClips),
-        statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)${
-          audioLookup && !mms.available ? ' · 정밀 정렬 모델이 없어 추정 방식으로 나눴습니다' : ''
-        }`,
+        statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)`,
       });
     },
 
@@ -2432,7 +2442,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
     // [STEP 2] 기존 AI 캡션들과 내 대본을 비교한 결과를 타임라인 캡션에 일괄 반영
     applyScriptCorrectionsToCaptions: async (diffs) => {
       if (diffs.length === 0) return;
-      const audioLookup = get().autoSplitOnCaptionGenerate
+      let autoSplit = get().autoSplitOnCaptionGenerate;
+      if (autoSplit && window.electronAPI?.modelEnsure) {
+        const st = await window.electronAPI.modelEnsure();
+        if (st.state !== 'ready') autoSplit = false; // 모델 없이는 나누지 않음 (오타 변환만 적용)
+      }
+      const audioLookup = autoSplit
         ? await buildCaptionAudioLookup(get().clips, get().tracks)
         : undefined;
       // 오타 변환 후 텍스트 기준으로 MMS 분할 시점 계산 (자동 분할이 켜져 있을 때만)
@@ -2480,7 +2495,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         };
       });
 
-      if (autoSplitOnCaptionGenerate) {
+      if (autoSplitOnCaptionGenerate && audioLookup) {
         nextClips = reformatSubtitleClipsByLineMode(nextClips, {
           mode: captionLineMode,
           maxCharsPerLine: captionMaxCharsPerLine,

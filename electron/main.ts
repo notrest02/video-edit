@@ -9,6 +9,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
+import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
   MMS_SAMPLE_RATE,
   alignWordSpansLong,
@@ -238,6 +239,12 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  // 정렬 모델이 없으면 앱을 켜자마자 백그라운드로 받기 시작
+  mainWindow?.webContents.once('did-finish-load', () => {
+    const dl = getModelDownloader();
+    mainWindow?.webContents.send('model:status', dl.getStatus());
+    if (!dl.isInstalled()) dl.ensure();
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -427,6 +434,57 @@ ipcMain.handle('dialog:openFontFile', async () => {
 // 모델이 없으면 available:false 를 돌려주고, 렌더러는 쉼·말 속도 기반 추정으로 대체한다.
 const ALIGN_MODEL_DIR_NAME = path.join('models', 'ko-wav2vec2');
 let alignModelPromise: Promise<{ session: any; tokenizer: AlignTokenizer } | null> | null = null;
+
+// 첫 실행 다운로드 원본 (구글 드라이브 공유 폴더). 테스트용으로 VIDEO_EDIT_MODEL_BASE_URL 이 있으면 그 주소에서 받음
+const MODEL_TEST_BASE = process.env.VIDEO_EDIT_MODEL_BASE_URL;
+const ALIGN_MODEL_FILES: ModelFileSpec[] = [
+  {
+    name: 'vocab.json',
+    size: 18163,
+    sha256: '4db1411162e9603b3b555a7dbc08807256b885ea0beb60ab110b283c338cfc85',
+    sources: MODEL_TEST_BASE ? [`${MODEL_TEST_BASE}/vocab.json`] : ['gdrive:1ZM_YU7bkkjvdKALSQ--BGiRTQtlSp7jG'],
+  },
+  {
+    name: 'model_int8.onnx',
+    size: 318483343,
+    sha256: 'cca9fadaf78d582b60165b38074f7f8c6427c0d98893400f6252561bbb673fc9',
+    sources: MODEL_TEST_BASE ? [`${MODEL_TEST_BASE}/model_int8.onnx`] : ['gdrive:1oHbcrtVLvj2ETFC4uS7UTMrZL6A6ARUl'],
+  },
+];
+let modelDownloader: ModelDownloader | null = null;
+function getModelDownloader(): ModelDownloader {
+  if (!modelDownloader) {
+    modelDownloader = new ModelDownloader(
+      path.join(app.getPath('userData'), ALIGN_MODEL_DIR_NAME),
+      ALIGN_MODEL_FILES,
+      (st: ModelStatus) => {
+        if (st.state === 'ready') alignModelPromise = null; // 새로 받은 모델을 다시 불러오도록
+        mainWindow?.webContents.send('model:status', st);
+      }
+    );
+  }
+  return modelDownloader;
+}
+
+ipcMain.handle('model:getStatus', () => getModelDownloader().getStatus());
+ipcMain.handle('model:ensure', () => getModelDownloader().ensure());
+ipcMain.handle('model:importDialog', async () => {
+  if (!mainWindow) return { ok: false, message: '창이 없습니다' };
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: '정렬 모델 파일 선택 (model_int8.onnx, vocab.json)',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: '모델 파일', extensions: ['onnx', 'json'] }],
+  });
+  if (r.canceled || r.filePaths.length === 0) return { ok: false, message: '선택 취소' };
+  const msgs: string[] = [];
+  let ok = true;
+  for (const f of r.filePaths) {
+    const res = await getModelDownloader().importFile(f);
+    ok = ok && res.ok;
+    msgs.push(res.message);
+  }
+  return { ok, message: msgs.join(' / '), status: getModelDownloader().getStatus() };
+});
 function findAlignModelDir(): string | null {
   const candidates = [
     path.join(app.getPath('userData'), ALIGN_MODEL_DIR_NAME),
@@ -441,6 +499,7 @@ function findAlignModelDir(): string | null {
 }
 function getAlignModel() {
   if (alignModelPromise) return alignModelPromise;
+  if (!getModelDownloader().isInstalled()) return null;
   const dir = findAlignModelDir();
   if (!dir) return null;
   // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -460,6 +519,8 @@ function getAlignModel() {
 ipcMain.handle(
   'align:mmsWordStarts',
   async (_event, segments: Array<{ pcm: Float32Array; words: string[] }>) => {
+    // 모델이 없으면 먼저 받음 (진행 상황은 'model:status' 로 화면에 표시)
+    await getModelDownloader().ensure();
     const modelPromise = getAlignModel();
     const model = modelPromise ? await modelPromise : null;
     if (!model) return { available: false, results: segments.map(() => null) };
@@ -491,6 +552,7 @@ ipcMain.handle(
 
 // 클립 전체(긴 음성)를 한 번에 정렬: 단어별 [시작, 끝] 초
 ipcMain.handle('align:wordSpansLong', async (_event, params: { pcm: Float32Array; words: string[] }) => {
+  await getModelDownloader().ensure();
   const modelPromise = getAlignModel();
   const model = modelPromise ? await modelPromise : null;
   if (!model) return { available: false, spans: null };

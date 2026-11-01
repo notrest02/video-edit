@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { TopHeader } from './components/TopHeader';
+import { ModelStatusBar } from './components/ModelStatusBar';
 import { LeftSidebar } from './components/LeftSidebar';
 import { PreviewPlayer } from './components/PreviewPlayer';
 import { RightInspector } from './components/RightInspector';
@@ -226,6 +227,7 @@ export const App: React.FC = () => {
     <div className="h-screen w-screen flex flex-col bg-[#111111] text-[#cccccc] overflow-hidden">
       {/* 최상단 프리미어 스타일 메뉴 바 */}
       <TopHeader />
+      <ModelStatusBar />
 
       {/* 상단 영역 (54% 높이): [좌: 텍스트/대본/캡션] | [중: 프로그램 모니터] | [우: 속성] */}
       <div className="h-[54%] flex min-h-0 border-b-[3px] border-[#0a0a0a] overflow-hidden">
