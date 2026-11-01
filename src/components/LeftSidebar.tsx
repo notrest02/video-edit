@@ -14,7 +14,7 @@ import {
   ArrowRight,
   RefreshCw,
 } from 'lucide-react';
-import { useEditorStore } from '../store/useEditorStore';
+import { useEditorStore, LOCAL_WHISPER_MODEL } from '../store/useEditorStore';
 import {
   CaptionDiffItem,
   CaptionLineMode,
@@ -23,8 +23,10 @@ import {
 } from '../utils/scriptAligner';
 import {
   transcribeWithLocalWhisper,
+  transcribeRawChunksWithLocalWhisper,
   computeVisualWaveformPeaks,
 } from '../utils/localWhisper';
+import { alignScriptToAudio, parseScriptVariants } from '../utils/scriptWaveformAligner';
 import {
   rendererWaveformCache,
   normalizeAudioPath,
@@ -92,6 +94,10 @@ export const LeftSidebar: React.FC = () => {
       setScriptText('');
     }
   }, [scriptText, setScriptText]);
+
+  // 대본+파형 정렬기에 쓸 대본 (초기 샘플 문구는 무시)
+  const activeUserScript = scriptText.includes('안티그래비티 AI 비디오 편집기') ? '' : scriptText.trim();
+  const scriptVariantCount = activeUserScript ? parseScriptVariants(activeUserScript).length : 0;
 
   // 현재 타임라인의 자막(캡션) 클립들
   const subtitleClips = clips
@@ -226,6 +232,103 @@ export const LeftSidebar: React.FC = () => {
       );
     } catch (err: any) {
       setStatusMessage(`AI 캡션 생성 오류: ${err.message}`);
+    } finally {
+      setIsProcessing(false);
+      setProgressText('');
+    }
+  };
+
+  // [권장] 대본 + 음성 파형으로 자막 생성
+  //  - 자막 글자 = 대본 그대로 (오타 교정 불필요)
+  //  - 자막 시간 = 파형 무음 구간 경계
+  //  - Whisper   = "이 문장이 대략 어디쯤"이라는 위치 단서 + 사후 검증에만 사용
+  const handleRunScriptWaveformCaption = async () => {
+    if (!window.electronAPI) return;
+    if (targetAudioClips.length === 0) {
+      setStatusMessage('먼저 시퀀스 타임라인에 TTS 음성 클립을 넣어주세요.');
+      return;
+    }
+    if (!activeUserScript || parseScriptVariants(activeUserScript).length === 0) {
+      setStatusMessage('대본이 비어 있습니다. [.txt 대본 열기]로 이 음성의 대본을 먼저 불러와 주세요.');
+      return;
+    }
+
+    setIsProcessing(true);
+    try {
+      const segments: WordTimestamp[] = [];
+      const skipped: string[] = [];
+      const notes: string[] = [];
+
+      for (let i = 0; i < targetAudioClips.length; i++) {
+        const clip = targetAudioClips[i];
+        if (!clip.sourcePath) continue;
+        const label = `[${i + 1}/${targetAudioClips.length}] '${clip.name}'`;
+
+        setProgressText(`${label} 16kHz 오디오 추출 중...`);
+        const pcm = await window.electronAPI.extractAudioFloat32({
+          filePath: clip.sourcePath,
+          sourceStart: clip.sourceStart,
+          duration: clip.duration,
+        });
+
+        const chunks = await transcribeRawChunksWithLocalWhisper(pcm, {
+          modelId: LOCAL_WHISPER_MODEL,
+          onProgress: (msg) => setProgressText(`${label} ${msg}`),
+        });
+
+        setProgressText(`${label} 대본 ↔ 파형 정렬 중...`);
+        const result = alignScriptToAudio({
+          pcm,
+          sampleRate: 16000,
+          scriptText: activeUserScript,
+          whisperChunks: chunks,
+        });
+
+        if (result.mode === 'none') {
+          skipped.push(`${clip.name}: ${result.warnings[0] ?? '대본과 일치하지 않음'}`);
+          continue;
+        }
+        if (result.mode === 'multi') {
+          notes.push(
+            `${clip.name}: 대본 버전 ${result.variantOrder.length}개 발견 (음성 순서: ${result.variantOrder
+              .map((v) => `${v.variantIndex + 1}번`)
+              .join(' → ')})`
+          );
+        }
+
+        for (const cap of result.captions) {
+          segments.push({
+            text: cap.text,
+            start: clip.startTime + cap.start,
+            end: clip.startTime + cap.end,
+            voiceEnd: clip.startTime + cap.voiceEnd,
+            needsReview: cap.needsReview,
+            alignConfidence: cap.confidence,
+          });
+        }
+      }
+
+      if (segments.length === 0) {
+        setStatusMessage(
+          `자막을 만들지 못했습니다. ${skipped.join(' / ') || '대본과 음성이 맞는지 확인해 주세요.'}`
+        );
+        return;
+      }
+
+      addRawAiCaptions(segments);
+      const reviewCount = segments.filter((s) => s.needsReview).length;
+      setStatusMessage(
+        [
+          `대본 기준 자막 ${segments.length}개를 파형에 맞춰 생성했습니다.`,
+          reviewCount > 0
+            ? `⚠ 확신이 낮은 ${reviewCount}개는 타임라인에 빨간 점선(⚠ 검토)으로 표시했습니다. 직접 옮기거나 고치면 표시가 사라집니다.`
+            : '모든 자막이 음성과 일치하는 것으로 확인되었습니다.',
+          ...notes,
+          ...(skipped.length ? [`건너뜀: ${skipped.join(' / ')}`] : []),
+        ].join(' ')
+      );
+    } catch (err: any) {
+      setStatusMessage(`대본 기준 자막 생성 오류: ${err.message}`);
     } finally {
       setIsProcessing(false);
       setProgressText('');
@@ -570,6 +673,46 @@ export const LeftSidebar: React.FC = () => {
            ===================================================================== */}
         {subTab === 'step1-ai' && (
           <div className="space-y-3.5">
+            {/* [권장] 대본 + 음성 파형으로 자막 생성 */}
+            <div className="bg-[#1d2a22] border border-[#2ea043]/60 rounded-lg p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-[#3fb950]" />
+                  대본 + 음성으로 자막 생성 (권장)
+                </span>
+                <button
+                  onClick={handleLoadScriptFile}
+                  className="px-2 py-0.5 rounded bg-[#2b2b2b] hover:bg-[#3a3a3a] border border-[#444444] text-[10px] text-[#dddddd] flex items-center gap-1"
+                >
+                  <Upload className="w-3 h-3" /> .txt 대본 열기
+                </button>
+              </div>
+              <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
+                자막 글자는 <strong>대본 그대로</strong>, 시간은 <strong>음성 파형의 쉬는 구간</strong>에 맞춥니다.
+                Whisper는 문장 위치를 찾는 단서로만 써서 받아쓰기 오타나 밀림이 자막에 들어가지 않습니다.
+                한 음성 파일에 여러 버전이 섞여 있거나 순서가 달라도 찾아냅니다.
+              </p>
+              <div
+                className={`text-[11px] rounded px-2 py-1 ${
+                  scriptVariantCount > 0
+                    ? 'bg-[#14161a] text-[#7ee787]'
+                    : 'bg-[#2a1d1d] text-[#ff9b9b]'
+                }`}
+              >
+                {scriptVariantCount > 0
+                  ? `✓ 대본 인식: 버전 ${scriptVariantCount}개 (총 ${activeUserScript.length}자) · 대상 음성 ${targetAudioClips.length}개`
+                  : '대본이 없습니다. [.txt 대본 열기]로 불러오거나 STEP 2 탭의 대본 입력창에 붙여넣어 주세요.'}
+              </div>
+              <button
+                onClick={handleRunScriptWaveformCaption}
+                disabled={isProcessing || targetAudioClips.length === 0 || scriptVariantCount === 0}
+                className="w-full py-2.5 px-3 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-45 text-white font-bold text-xs rounded-md shadow-lg flex items-center justify-center gap-2 transition"
+              >
+                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Subtitles className="w-4 h-4" />}
+                대본 기준으로 자막 생성
+              </button>
+            </div>
+
             {/* 1. 현재 선택된 오디오 클립 상태 표시 박스 */}
             <div className="bg-[#21252d] border border-[#2d8ceb]/50 rounded-lg p-3 space-y-2">
               <div className="flex items-center justify-between">
@@ -687,16 +830,8 @@ export const LeftSidebar: React.FC = () => {
 
                 {aiEngine === 'local' && (
                   <div className="flex items-center justify-between text-[11px] text-[#999999] bg-[#16181d] px-2.5 py-1.5 rounded border border-[#2c313c]">
-                    <span>로컬 모델 정확도:</span>
-                    <select
-                      value={localWhisperModel}
-                      onChange={(e) => setLocalWhisperModel(e.target.value)}
-                      className="bg-[#0e1014] border border-[#383e4c] rounded px-1.5 py-0.5 text-white text-[11px] focus:outline-none"
-                    >
-                      <option value="Xenova/whisper-tiny">Whisper Tiny (초고속)</option>
-                      <option value="Xenova/whisper-base">Whisper Base (한국어 추천)</option>
-                      <option value="Xenova/whisper-small">Whisper Small (고정밀)</option>
-                    </select>
+                    <span>로컬 모델:</span>
+                    <span className="text-white">Whisper Small</span>
                   </div>
                 )}
 

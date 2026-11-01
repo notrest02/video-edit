@@ -1111,7 +1111,9 @@ export const TimelinePanel: React.FC = () => {
                           clipStyle =
                             'bg-[#1c3014] border-[#3d6928] text-white hover:bg-[#233d1a]';
                         } else if (clip.type === 'text') {
-                          clipStyle = clip.snappedToClip
+                          clipStyle = clip.needsReview
+                            ? 'bg-[#7a1f2b] border-[#ff5c73] border-dashed text-white'
+                            : clip.snappedToClip
                             ? 'bg-[#b35e19] border-[#f5a623] text-white'
                             : 'bg-[#8c4b27] border-[#c47041] text-white';
                         }
@@ -1144,6 +1146,14 @@ export const TimelinePanel: React.FC = () => {
                               <span className="truncate drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]">
                                 {clip.type === 'text' ? clip.text || clip.name : clip.name}
                               </span>
+                              {clip.needsReview && clip.type === 'text' && (
+                                <span
+                                  className="text-[9px] bg-black/40 text-[#ff8a9a] px-1 rounded shrink-0"
+                                  title={`자동 정렬 확신도 낮음 (일치도 ${Math.round((clip.alignConfidence ?? 0) * 100)}%) - 위치를 확인해 주세요`}
+                                >
+                                  ⚠ 검토
+                                </span>
+                              )}
                               {clip.snappedToClip && clip.type === 'text' && (
                                 <span className="text-[9px] bg-black/40 text-[#f5a623] px-1 rounded shrink-0">
                                   🧲

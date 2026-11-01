@@ -179,7 +179,14 @@ interface EditorState {
   ) => void;
   applyAlignedSubtitles: (items: AlignedSubtitleItem[], autoSnapToCuts: boolean) => void;
   addRawAiCaptions: (
-    segments: Array<{ text: string; start: number; end: number; voiceEnd?: number }>
+    segments: Array<{
+      text: string;
+      start: number;
+      end: number;
+      voiceEnd?: number;
+      needsReview?: boolean;
+      alignConfidence?: number;
+    }>
   ) => void;
   applyScriptCorrectionsToCaptions: (
     diffs: Array<{ clipId: string; beforeText: string; afterText: string }>
@@ -214,6 +221,13 @@ export function createDefaultTracks(): TimelineTrack[] {
 }
 
 const DEFAULT_SAMPLE_SCRIPT = '';
+
+/**
+ * 앱에서 쓰는 로컬 Whisper 모델은 하나로 고정한다.
+ * 2026-10-31 실제 외주 프로젝트 11개(음성 46개)로 대본+파형 정렬을 검증한 모델이 Small이라서
+ * Tiny/Base 선택지는 없앴다.
+ */
+export const LOCAL_WHISPER_MODEL = 'Xenova/whisper-small';
 
 /**
  * 새로 올라오거나 이동/트림된 클립(activeClipIds)과 같은 트랙에서 시간이 겹치는 기존 클립을
@@ -384,7 +398,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       '좌측 하단에서 [+ 새 시퀀스]를 만들거나, 미디어를 바로 타임라인으로 드래그하면 영상 규격에 맞는 시퀀스가 자동 생성됩니다.',
 
     aiEngine: 'local',
-    localWhisperModel: 'Xenova/whisper-base',
+    localWhisperModel: LOCAL_WHISPER_MODEL,
     openAiApiKey: localStorage.getItem('agy_openai_key') || '',
     geminiApiKey: localStorage.getItem('agy_gemini_key') || '',
     geminiModel: 'gemini-3.8-flash',
@@ -1579,9 +1593,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
         const nextClips = state.clips.map((c) => {
           if (c.id === clipId) {
+            // 사용자가 검토 표시된 자막의 글자/위치를 직접 고치면 검토 완료로 보고 표시를 지운다
+            const reviewed =
+              c.needsReview &&
+              (patch.text !== undefined || patch.startTime !== undefined || patch.duration !== undefined);
             return {
               ...c,
               ...patch,
+              ...(reviewed ? { needsReview: false } : {}),
               name:
                 patch.text !== undefined
                   ? patch.text.slice(0, 18) || '자막'
@@ -1649,6 +1668,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
               ? 0
               : Number(Math.max(0, c.sourceStart + deltaSourceStart).toFixed(4)),
           snappedToClip: snapped ?? c.snappedToClip,
+          // 검토 표시된 자막을 사용자가 직접 옮기거나 길이를 바꾸면 검토 완료로 본다
+          ...(c.needsReview && (deltaStart !== 0 || deltaDuration !== 0) ? { needsReview: false } : {}),
         });
       }
 
@@ -2167,6 +2188,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
           muted: false,
           text: seg.text,
           originalSttText: seg.text,
+          ...(seg.needsReview ? { needsReview: true } : {}),
+          ...(seg.alignConfidence != null ? { alignConfidence: seg.alignConfidence } : {}),
           fontSize: 40,
           fontColor: '#ffffff',
           backgroundColor: '#000000',
@@ -2553,7 +2576,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         isQuickSplitMergeMode: data.isQuickSplitMergeMode ?? false,
         autoSyncSubtitleStyle: data.autoSyncSubtitleStyle ?? false,
         aiEngine: data.aiEngine || 'local',
-        localWhisperModel: data.localWhisperModel || 'Xenova/whisper-small',
+        // 예전 프로젝트에 Tiny/Base가 저장돼 있어도 검증된 Small 하나만 사용
+        localWhisperModel: LOCAL_WHISPER_MODEL,
         past: [],
         future: [],
         statusMessage:

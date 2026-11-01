@@ -101,6 +101,8 @@ export interface TimelineClip {
   positionX?: number;         // 수평 위치 5 ~ 95 (%)
   positionY?: number;         // 수직 위치 5 ~ 95 (%)
   snappedToClip?: boolean;    // 클립 경계에 스냅되었는지 표시
+  needsReview?: boolean;      // 대본+파형 정렬기가 확신하지 못한 자막 (타임라인에 검토 표시)
+  alignConfidence?: number;   // 0~1, 해당 구간 Whisper 텍스트와 대본 일치도
 }
 
 export interface WordTimestamp {
@@ -108,6 +110,8 @@ export interface WordTimestamp {
   start: number; // 타임라인 절대 시간 (초)
   end: number;   // 타임라인 절대 시간 (초)
   voiceEnd?: number; // 무음 연장 전 실제 음성 발화가 끝나는 타임라인 절대 시간 (초)
+  needsReview?: boolean;
+  alignConfidence?: number;
 }
 
 export interface AlignedSubtitleItem {

@@ -370,7 +370,7 @@ export async function transcribeWithLocalWhisper(
   } = {}
 ): Promise<WordTimestamp[]> {
   const {
-    modelId = 'Xenova/whisper-base',
+    modelId = 'Xenova/whisper-small',
     language = 'korean',
     maxCharsPerLine = 15,
     onProgress,
@@ -505,6 +505,47 @@ export async function transcribeWithLocalWhisper(
     onProgress?.('오디오 발화 구간 감지 및 초벌 캡션 구간 생성 중...');
     return extractSpeechEnvelopeTimestamps(audioData, clipTimelineStart, '');
   }
+}
+
+/**
+ * 대본+파형 정렬기(scriptWaveformAligner)용: Whisper 청크를 가공 없이 그대로 돌려줍니다.
+ * 여기서 나온 시간은 "이 문장이 대략 어디쯤"이라는 위치 단서로만 쓰이고,
+ * 자막의 실제 시간은 파형 무음 구간에서, 자막 글자는 대본에서 가져옵니다.
+ */
+export async function transcribeRawChunksWithLocalWhisper(
+  audioData: Float32Array,
+  options: { modelId?: string; onProgress?: (msg: string) => void } = {}
+): Promise<Array<{ start: number; end: number | null; text: string }>> {
+  const { modelId = 'Xenova/whisper-small', onProgress } = options;
+  onProgress?.(`로컬 AI 음성인식 모델(${modelId}) 준비 중...`);
+  const { pipeline, env } = await import('@huggingface/transformers');
+  env.allowLocalModels = false;
+
+  if (!cachedPipeline || cachedModelId !== modelId) {
+    cachedPipeline = await pipeline('automatic-speech-recognition', modelId, {
+      progress_callback: (info: any) => {
+        if (info.status === 'progress' && typeof info.progress === 'number') {
+          onProgress?.(`AI 음성인식 모델 다운로드 중: ${Math.round(info.progress)}% (${info.file || ''})`);
+        }
+      },
+    });
+    cachedModelId = modelId;
+  }
+
+  onProgress?.('음성에서 문장 위치 단서를 찾는 중 (Whisper)...');
+  const output = await cachedPipeline(audioData, {
+    language: 'korean',
+    task: 'transcribe',
+    return_timestamps: true,
+    chunk_length_s: 30,
+    stride_length_s: 4,
+  });
+
+  return (output?.chunks || []).map((c: any) => ({
+    start: Array.isArray(c.timestamp) && typeof c.timestamp[0] === 'number' ? c.timestamp[0] : 0,
+    end: Array.isArray(c.timestamp) && typeof c.timestamp[1] === 'number' ? c.timestamp[1] : null,
+    text: String(c.text || ''),
+  }));
 }
 
 /**
