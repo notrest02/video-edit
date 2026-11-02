@@ -12,12 +12,32 @@
     "node_modules/ffmpeg-static/**/*",
     "node_modules/ffprobe-static/**/*",
     "node_modules/fluent-ffmpeg/**/*",
-    "package.json"
+    "package.json",
+    "node_modules/onnxruntime-node/package.json",
+    "node_modules/onnxruntime-node/dist/**/*",
+    "node_modules/onnxruntime-node/bin/napi-v3/win32/x64/**/*",
+    "node_modules/onnxruntime-common/**/*",
+    "!node_modules/@huggingface/**",
+    "!node_modules/onnxruntime-web/**",
+    "!node_modules/lucide-react/**",
+    "!node_modules/react/**",
+    "!node_modules/react-dom/**",
+    "!node_modules/scheduler/**",
+    "!node_modules/zustand/**",
+    "!node_modules/sharp/**",
+    "!node_modules/@img/**",
+    "!node_modules/onnxruntime-node/bin/napi-v3/darwin/**",
+    "!node_modules/onnxruntime-node/bin/napi-v3/linux/**",
+    "!node_modules/onnxruntime-node/bin/napi-v3/win32/arm64/**",
+    "!node_modules/ffprobe-static/bin/darwin/**",
+    "!node_modules/ffprobe-static/bin/linux/**",
+    "!node_modules/ffprobe-static/bin/win32/ia32/**"
   ],
   "asar": true,
   "asarUnpack": [
     "**/node_modules/ffmpeg-static/**",
-    "**/node_modules/ffprobe-static/**"
+    "**/node_modules/ffprobe-static/**",
+    "**/node_modules/onnxruntime-node/**"
   ],
   "win": {
     "icon": "build/icon.ico",
@@ -29,15 +49,21 @@
     "target": [
       {
         "target": "nsis",
-        "arch": ["x64"]
+        "arch": [
+          "x64"
+        ]
       },
       {
         "target": "portable",
-        "arch": ["x64"]
+        "arch": [
+          "x64"
+        ]
       },
       {
         "target": "zip",
-        "arch": ["x64"]
+        "arch": [
+          "x64"
+        ]
       }
     ],
     "executableName": "AntigravityVideoEditor"

@@ -7,6 +7,8 @@ node_modules/
 dist/
 dist-electron/
 release/
+release-build/
+release-installer/
 dist-package/
 
 # Environment Variables
