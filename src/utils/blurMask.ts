@@ -37,6 +37,45 @@ export function maskPointsAt(mask: BlurMask, t: number): MaskPoint[] {
   return mask.points;
 }
 
+/**
+ * 블러 범위 넓히기/줄이기: 다각형 각 변을 d px 만큼 바깥(+)/안쪽(-)으로 평행 이동 (출력 px 기준)
+ * 사각형이면 가로·세로 모두 정확히 d px 씩 넓어짐. 너무 줄여 뒤집히지 않게 짧은 변의 45%까지만 줄임
+ */
+export function expandPoints(points: MaskPoint[], d: number, width: number, height: number): MaskPoint[] {
+  if (!d || points.length < 3) return points;
+  const P = points.map(([x, y]) => [x * width, y * height]);
+  const n = P.length;
+  // 도는 방향 (넓이 부호) → 바깥쪽 법선 방향 결정
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const [a, b] = [P[i], P[(i + 1) % n]];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  const sgn = area >= 0 ? 1 : -1;
+  if (d < 0) {
+    const minEdge = Math.min(...P.map((a, i) => Math.hypot(P[(i + 1) % n][0] - a[0], P[(i + 1) % n][1] - a[1])));
+    d = Math.max(d, -minEdge * 0.45);
+  }
+  const normal = (a: number[], b: number[]) => {
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const L = Math.hypot(dx, dy) || 1;
+    return [(dy / L) * sgn, (-dx / L) * sgn];
+  };
+  return P.map((p, i) => {
+    const n1 = normal(P[(i - 1 + n) % n], p);
+    const n2 = normal(p, P[(i + 1) % n]);
+    const dot = n1[0] * n2[0] + n1[1] * n2[1];
+    const k = d / Math.max(0.2, 1 + dot);
+    return [Math.min(1.2, Math.max(-0.2, (p[0] + (n1[0] + n2[0]) * k) / width)), Math.min(1.2, Math.max(-0.2, (p[1] + (n1[1] + n2[1]) * k) / height))] as MaskPoint;
+  });
+}
+
+/** 실제로 흐리게 되는 영역 (꼭짓점 + 블러 범위) */
+export function blurPointsAt(mask: BlurMask, t: number, width: number, height: number): MaskPoint[] {
+  return expandPoints(maskPointsAt(mask, t), mask.expand || 0, width, height);
+}
+
 /** 미리보기용: 부드러운 가장자리를 가진 다각형을 CSS mask-image 로 (SVG 데이터 URL) */
 export function maskSvgDataUrl(points: MaskPoint[], width: number, height: number, feather: number): string {
   const pts = points.map(([x, y]) => `${(x * width).toFixed(1)},${(y * height).toFixed(1)}`).join(' ');

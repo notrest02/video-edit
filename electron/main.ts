@@ -12,6 +12,7 @@ import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
 import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
+import { analyzeText } from './textDetector';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
@@ -322,6 +323,11 @@ ipcMain.handle(
     analyzeMedia(resolvedFfmpegPath, params.media, params.product, (msg) => e.sender.send('autoEdit:progress', msg))
 );
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
+
+// 자동 마스크: 원본에 박힌 글자 찾기 (로컬 모델, 원본별 저장)
+ipcMain.handle('textMask:analyze', async (e, p: { path: string; width: number; height: number }) =>
+  analyzeText(resolvedFfmpegPath, p.path, p.width, p.height, (msg) => e.sender.send('textMask:progress', msg))
+);
 
 // 폴더 고르기 (광고 구간별 내보내기 저장 위치 등)
 ipcMain.handle('dialog:chooseFolder', async (_e, title?: string) => {
@@ -1023,7 +1029,7 @@ ipcMain.handle(
         volume: number;
         muted: boolean;
         /** 블러 마스크: 흑백 PNG(흰색=흐리게, 출력 크기) + 블러 강도 */
-        masks?: Array<{ png: string; blur: number; frames?: string[] }>;
+        masks?: Array<{ png: string; blur: number; frames?: string[]; from?: number; to?: number }>;
         /** 모션: 위치(px), 크기(%), 회전(도), 불투명도(0~1), 키프레임 */
         scale?: number;
         posX?: number;
@@ -1167,7 +1173,12 @@ ipcMain.handle(
           filterParts.push(`${clipLabel}split=2[mo_${tag}][mb_${tag}]`);
           filterParts.push(`[mb_${tag}]gblur=sigma=${Math.max(0.5, mk.blur).toFixed(2)}[mbb_${tag}]`);
           filterParts.push(`[mbb_${tag}]${maskSrc}alphamerge[ma_${tag}]`);
-          filterParts.push(`[mo_${tag}][ma_${tag}]overlay=format=auto[mm_${tag}]`);
+          // 보이는 구간이 있으면 그 동안만 (장면마다 바뀌는 자막)
+          const en =
+            mk.from !== undefined || mk.to !== undefined
+              ? `:enable='between(t,${(clip.startTime + (mk.from ?? 0)).toFixed(4)},${(clip.startTime + (mk.to ?? clip.duration)).toFixed(4)})'`
+              : '';
+          filterParts.push(`[mo_${tag}][ma_${tag}]overlay=format=auto${en}[mm_${tag}]`);
           clipLabel = `[mm_${tag}]`;
         }
         // 모션 (위치/크기/회전/불투명도, 키프레임 포함). 미리보기와 같은 계산식(ffExpr)

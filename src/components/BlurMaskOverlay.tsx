@@ -8,7 +8,7 @@
 import React, { useRef, useState } from 'react';
 import { useEditorStore } from '../store/useEditorStore';
 import type { BlurMask, MaskPoint, TimelineClip } from '../types/editor';
-import { maskPointsAt, maskSvgDataUrl } from '../utils/blurMask';
+import { blurPointsAt, maskPointsAt, maskSvgDataUrl } from '../utils/blurMask';
 
 const key = (mi: number, k: number) => `${mi}:${k}`;
 
@@ -26,6 +26,8 @@ export const BlurMaskOverlay: React.FC<{
   const currentTime = useEditorStore((s) => s.currentTime);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
   const updateClip = useEditorStore((s) => s.updateClip);
+  const selectedMaskId = useEditorStore((s) => s.selectedMaskId);
+  const setSelectedMaskId = useEditorStore((s) => s.setSelectedMaskId);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const masks = clip?.blurMasks || [];
@@ -99,6 +101,7 @@ export const BlurMaskOverlay: React.FC<{
   const onPointDown = (e: React.PointerEvent, mi: number, k: number) => {
     e.stopPropagation();
     e.preventDefault();
+    setSelectedMaskId(masks[mi].id);
     let next = new Set(sel);
     if (e.ctrlKey || e.metaKey) {
       next.has(key(mi, k)) ? next.delete(key(mi, k)) : next.add(key(mi, k));
@@ -112,6 +115,7 @@ export const BlurMaskOverlay: React.FC<{
   const onBodyDown = (e: React.PointerEvent, mi: number) => {
     e.stopPropagation();
     e.preventDefault();
+    setSelectedMaskId(masks[mi].id);
     const all = new Set([0, 1, 2, 3].map((k) => key(mi, k)));
     const next = [...all].every((x) => sel.has(x)) ? sel : e.ctrlKey || e.metaKey ? new Set([...sel, ...all]) : all;
     setSel(next);
@@ -138,7 +142,7 @@ export const BlurMaskOverlay: React.FC<{
       const [lx, hx, ly, hy] = [Math.min(x0, x1), Math.max(x0, x1), Math.min(y0, y1), Math.max(y0, y1)];
       const picked = new Set(additive ? sel : []);
       masks.forEach((m, mi) =>
-        maskPointsAt(m, t).forEach(([x, y], k) => {
+        ((m.from !== undefined && t < m.from) || (m.to !== undefined && t >= m.to) ? [] : maskPointsAt(m, t)).forEach(([x, y], k) => {
           if (x >= lx && x <= hx && y >= ly && y <= hy) picked.add(key(mi, k));
         })
       );
@@ -151,7 +155,7 @@ export const BlurMaskOverlay: React.FC<{
 
   return (
     <>
-      {masks.map((m) => (
+      {masks.filter((m) => (m.from === undefined || t >= m.from) && (m.to === undefined || t < m.to)).map((m) => (
         <div
           key={m.id}
           className="absolute inset-0 z-[5] pointer-events-none"
@@ -159,8 +163,8 @@ export const BlurMaskOverlay: React.FC<{
             transform: layerTransform,
             backdropFilter: `blur(${(m.blur * scale).toFixed(2)}px)`,
             WebkitBackdropFilter: `blur(${(m.blur * scale).toFixed(2)}px)`,
-            WebkitMaskImage: maskSvgDataUrl(maskPointsAt(m, t), width, height, m.feather),
-            maskImage: maskSvgDataUrl(maskPointsAt(m, t), width, height, m.feather),
+            WebkitMaskImage: maskSvgDataUrl(blurPointsAt(m, t, width, height), width, height, m.feather),
+            maskImage: maskSvgDataUrl(blurPointsAt(m, t, width, height), width, height, m.feather),
             WebkitMaskSize: '100% 100%',
             maskSize: '100% 100%',
           }}
@@ -176,15 +180,27 @@ export const BlurMaskOverlay: React.FC<{
           onPointerDown={onEmptyDown}
         >
           {masks.map((m, mi) => {
+            if ((m.from !== undefined && t < m.from) || (m.to !== undefined && t >= m.to)) return null; // 지금 안 보이는 마스크는 손잡이도 숨김
             const pts = maskPointsAt(m, t);
             const r = width * 0.018;
             return (
               <g key={m.id}>
+                {!!m.expand && (
+                  // 실제 흐려지는 영역 (블러 범위 적용) — 점선
+                  <polygon
+                    points={blurPointsAt(m, t, width, height).map(([x, y]) => `${x * width},${y * height}`).join(' ')}
+                    fill="none"
+                    stroke={m.id === selectedMaskId ? '#e5a038' : '#2d8ceb'}
+                    strokeDasharray={`${width * 0.012} ${width * 0.008}`}
+                    strokeWidth={width * 0.003}
+                    style={{ pointerEvents: 'none' }}
+                  />
+                )}
                 <polygon
                   points={pts.map(([x, y]) => `${x * width},${y * height}`).join(' ')}
-                  fill="rgba(45,140,235,0.12)"
-                  stroke="#2d8ceb"
-                  strokeWidth={width * 0.003}
+                  fill={m.id === selectedMaskId ? 'rgba(229,160,56,0.18)' : 'rgba(45,140,235,0.12)'}
+                  stroke={m.id === selectedMaskId ? '#e5a038' : '#2d8ceb'}
+                  strokeWidth={width * (m.id === selectedMaskId ? 0.006 : 0.003)}
                   style={{ cursor: 'move' }}
                   onPointerDown={(e) => onBodyDown(e, mi)}
                 />

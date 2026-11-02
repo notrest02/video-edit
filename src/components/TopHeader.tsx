@@ -1,4 +1,4 @@
-import { maskPngDataUrl, maskPointsAt } from '../utils/blurMask';
+import { blurPointsAt, maskPngDataUrl } from '../utils/blurMask';
 import { hasTextMotionKeyframes, resolveTextAt, shiftKeyframes } from '../utils/keyframes';
 import React, { useEffect, useState } from 'react';
 import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
@@ -21,9 +21,15 @@ function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): Tim
     ...c,
     // 앞을 잘라낸 만큼 키프레임 시각도 당김 (클립 안 시각 기준)
     keyframes: shiftKeyframes(c.keyframes, s - c.startTime),
-    blurMasks: c.blurMasks?.map((m) =>
-      m.keyframes?.length ? { ...m, keyframes: m.keyframes.map((f) => ({ ...f, t: f.t - (s - c.startTime) })) } : m
-    ),
+    blurMasks: c.blurMasks?.map((m) => {
+      const cut = s - c.startTime;
+      return {
+        ...m,
+        keyframes: m.keyframes?.map((f) => ({ ...f, t: f.t - cut })),
+        from: m.from !== undefined ? m.from - cut : undefined,
+        to: m.to !== undefined ? m.to - cut : undefined,
+      };
+    }),
     startTime: s - rangeStart,
     duration: e - s,
     sourceStart:
@@ -127,10 +133,12 @@ export const TopHeader: React.FC = () => {
         return {
           ...v,
           masks: (c?.blurMasks || []).map((m) => ({
-            png: maskPngDataUrl(maskPointsAt(m, 0), outW, outH, m.feather),
+            png: maskPngDataUrl(blurPointsAt(m, 0, outW, outH), outW, outH, m.feather),
             blur: m.blur,
+            from: m.from,
+            to: m.to,
             frames: m.keyframes?.length
-              ? Array.from({ length: Math.max(1, Math.ceil((c?.duration || 0) * f)) }, (_, k) => maskPngDataUrl(maskPointsAt(m, k / f), outW, outH, m.feather))
+              ? Array.from({ length: Math.max(1, Math.ceil((c?.duration || 0) * f)) }, (_, k) => maskPngDataUrl(blurPointsAt(m, k / f, outW, outH), outW, outH, m.feather))
               : undefined,
           })),
         };
@@ -229,11 +237,13 @@ export const TopHeader: React.FC = () => {
           opacity: c.opacity,
           keyframes: c.keyframes,
           masks: (c.blurMasks || []).map((m) => ({
-            png: maskPngDataUrl(maskPointsAt(m, 0), sequence.width || 1920, sequence.height || 1080, m.feather),
+            png: maskPngDataUrl(blurPointsAt(m, 0, sequence.width || 1920, sequence.height || 1080), sequence.width || 1920, sequence.height || 1080, m.feather),
             blur: m.blur,
+            from: m.from,
+            to: m.to,
             frames: m.keyframes?.length
               ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, k) =>
-                  maskPngDataUrl(maskPointsAt(m, k / (sequence.fps || fps)), sequence.width || 1920, sequence.height || 1080, m.feather)
+                  maskPngDataUrl(blurPointsAt(m, k / (sequence.fps || fps), sequence.width || 1920, sequence.height || 1080), sequence.width || 1920, sequence.height || 1080, m.feather)
                 )
               : undefined,
           })),

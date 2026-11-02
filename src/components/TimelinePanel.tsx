@@ -63,6 +63,7 @@ export const TimelinePanel: React.FC = () => {
     activeTool,
     selectedClipId,
     selectedClipIds,
+    selectedMaskId,
     selectedTrackId,
     snapThresholdFrames,
     setCurrentTime,
@@ -1262,6 +1263,30 @@ export const TimelinePanel: React.FC = () => {
                                 </span>
                               )}
                             </div>
+
+                            {clip.type === 'video' && !!clip.blurMasks?.length && (
+                              <div className="absolute left-0 right-0 bottom-[1px] h-[9px] pointer-events-none z-[5]" title="블러 마스크 구간">
+                                {(() => {
+                                  // 겹치는 구간은 줄을 나눠(최대 3줄) 그림
+                                  const lanes: number[] = [];
+                                  return clip.blurMasks!.map((m) => {
+                                    const f = Math.max(0, m.from ?? 0);
+                                    const e = Math.min(clip.duration, m.to ?? clip.duration);
+                                    let lane = lanes.findIndex((end) => end <= f + 1e-4);
+                                    if (lane < 0) lane = lanes.length;
+                                    lanes[lane] = e;
+                                    if (lane > 2) lane = 2;
+                                    return (
+                                      <div
+                                        key={m.id}
+                                        className={`absolute h-[3px] rounded-[1px] ${m.id === selectedMaskId ? 'bg-[#e5a038]' : 'bg-[#79b8ff]/80'}`}
+                                        style={{ left: `${(f / clip.duration) * 100}%`, width: `${Math.max(0.5, ((e - f) / clip.duration) * 100)}%`, bottom: `${lane * 3}px` }}
+                                      />
+                                    );
+                                  });
+                                })()}
+                              </div>
+                            )}
 
                             {clip.type === 'audio' && (
                               <AudioWaveformCanvas

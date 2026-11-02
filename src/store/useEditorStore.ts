@@ -55,6 +55,9 @@ interface EditorState {
   /** 블러 마스크 복사본 (다른 클립에 붙여넣기용) */
   maskClipboard: import('../types/editor').BlurMask[] | null;
   setMaskClipboard: (m: import('../types/editor').BlurMask[] | null) => void;
+  /** 미리보기/목록에서 고른 블러 마스크 */
+  selectedMaskId: string | null;
+  setSelectedMaskId: (id: string | null) => void;
   selectedTrackId: string | null;
   selectedBinItem: { type: 'sequence' | 'asset'; id: string } | null;
   currentTime: number;
@@ -630,6 +633,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
     selectedClipId: null,
     selectedClipIds: [],
     maskClipboard: null,
+    selectedMaskId: null,
+    setSelectedMaskId: (selectedMaskId) => set({ selectedMaskId }),
     setMaskClipboard: (maskClipboard) => set({ maskClipboard }),
     selectedTrackId: null,
     selectedBinItem: null,

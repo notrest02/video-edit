@@ -80,7 +80,25 @@ export type BlurMask = {
   points: MaskPoint[];
   blur: number;
   feather: number;
+  /** 블러 범위: 가장자리를 바깥(+)/안쪽(-)으로 옮기는 거리 (출력 px). 손잡이(꼭짓점)는 그대로 */
+  expand?: number;
   keyframes?: Array<{ t: number; points: MaskPoint[]; ease?: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold' }>;
+  /** 보이는 구간 (클립 안 초). 없으면 클립 전체 — 장면마다 바뀌는 자막 가리기 */
+  from?: number;
+  to?: number;
+  /** 자동 마스크로 만든 것 (찾은 글자 덩어리 id). 다시 적용하면 바뀜 */
+  auto?: string;
+};
+
+/** 자동 마스크: 원본에서 찾은 글자 덩어리 (원본 좌표 0~1, 원본 초) */
+export type AutoTextTrack = {
+  id: string;
+  text: string;
+  conf: number;
+  hasHan: boolean;
+  start: number;
+  end: number;
+  samples: Array<{ t: number; box: [number, number, number, number] }>;
 };
 
 export interface MediaAsset {
@@ -278,6 +296,8 @@ declare global {
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
+      textMaskAnalyze?: (params: { path: string; width: number; height: number }) => Promise<{ tracks: AutoTextTrack[]; cached: boolean }>;
+      onTextMaskProgress?: (callback: (msg: string) => void) => () => void;
       getSystemFonts: (forceRefresh?: boolean) => Promise<SystemFontItem[]>;
       openFontFileDialog: () => Promise<{
         familyName: string;
