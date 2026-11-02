@@ -21,7 +21,19 @@ import {
 
 export const PreviewPlayer: React.FC = () => {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+  // 컷 전환 때 검은 화면이 보이지 않게 <video> 두 개를 번갈아 씀:
+  // 화면에 보이는 쪽(front)이 지금 클립을 재생하는 동안, 안 보이는 쪽이 다음 클립을 미리 불러와 첫 프레임에 맞춰 둠
+  const videoARef = useRef<HTMLVideoElement | null>(null);
+  const videoBRef = useRef<HTMLVideoElement | null>(null);
+  const frontIdxRef = useRef(0);
+  const [frontIdx, setFrontIdx] = useState(0);
+  const preparedRef = useRef<{ idx: number; clipId: string } | null>(null);
+  const videoEls = () => [videoARef.current, videoBRef.current];
+  const videoRef = {
+    get current() {
+      return videoEls()[frontIdxRef.current];
+    },
+  };
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const subtitleInputRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const lastCursorPosRef = useRef<Record<string, number>>({});
@@ -51,7 +63,8 @@ export const PreviewPlayer: React.FC = () => {
   };
   useEffect(() => {
     const pairs: Array<[HTMLMediaElement | null, React.MutableRefObject<number | null>]> = [
-      [videoRef.current, pendingVideoSeekRef],
+      [videoARef.current, pendingVideoSeekRef],
+      [videoBRef.current, pendingVideoSeekRef],
       [audioRef.current, pendingAudioSeekRef],
     ];
     const cleanups: Array<() => void> = [];
@@ -351,14 +364,24 @@ export const PreviewPlayer: React.FC = () => {
   // 비디오 동기화
   // 비디오 요소(V1/V2/V3) 동기화
   useEffect(() => {
-    const videoEl = videoRef.current;
-    if (!videoEl) return;
+    if (!videoRef.current) return;
 
     if (!activeVideoClip || !activeVideoClip.sourcePath) {
-      if (!videoEl.paused) videoEl.pause();
+      videoEls().forEach((el) => el && !el.paused && el.pause());
       lastVideoClipIdRef.current = null;
       return;
     }
+
+    // 다음 클립으로 넘어왔고 뒤쪽 <video> 에 미리 준비돼 있으면 그쪽을 바로 앞으로 (검은 화면 없이 전환)
+    if (lastVideoClipIdRef.current !== activeVideoClip.id && preparedRef.current?.clipId === activeVideoClip.id) {
+      const prevFront = videoRef.current;
+      frontIdxRef.current = preparedRef.current.idx;
+      preparedRef.current = null;
+      setFrontIdx(frontIdxRef.current);
+      if (prevFront && !prevFront.paused) prevFront.pause();
+    }
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
 
     // 미리보기용 프록시가 준비돼 있으면 그것을 사용 (렌더는 항상 원본)
     const previewPath = previewProxyMap[activeVideoClip.sourcePath] || activeVideoClip.sourcePath;
@@ -394,7 +417,8 @@ export const PreviewPlayer: React.FC = () => {
 
     if (isClipChanged) {
       pendingVideoSeekRef.current = null;
-      videoEl.currentTime = Math.max(0, targetMediaTime);
+      // 미리 맞춰 둔 위치와 거의 같으면 다시 찾지 않음 (다시 찾는 동안 화면이 멈추거나 비지 않게)
+      if (timeDiff > 0.05) videoEl.currentTime = Math.max(0, targetMediaTime);
       lastVideoClipIdRef.current = activeVideoClip.id;
       lastVideoSeekWallRef.current = now;
     } else if (!isPlaying && timeDiff > 0.02) {
@@ -415,6 +439,31 @@ export const PreviewPlayer: React.FC = () => {
       }
     }
   }, [activeVideoClip, currentTime, isPlaying, activeAudioClip, clips, previewProxyMap]);
+
+  // 다음 영상 클립 미리 준비: 1.5초 안에 시작하는 다음 클립을 뒤쪽 <video> 에 불러와 첫 프레임에 맞춰 둠
+  useEffect(() => {
+    const back = videoEls()[1 - frontIdxRef.current];
+    if (!back) return;
+    const from = activeVideoClip ? activeVideoClip.startTime + activeVideoClip.duration - 0.02 : currentTime;
+    let next: (typeof clips)[number] | undefined;
+    for (const c of clips) {
+      if (c.type !== 'video' || !c.sourcePath || !visibleTrackIds.has(c.trackId) || c.id === activeVideoClip?.id) continue;
+      if (c.startTime < from || c.startTime - currentTime > 1.5) continue;
+      if (!next || c.startTime < next.startTime) next = c;
+    }
+    if (!next || preparedRef.current?.clipId === next.id) return;
+    const previewPath = previewProxyMap[next.sourcePath!] || next.sourcePath!;
+    if (back.dataset.srcPath !== previewPath) {
+      back.dataset.srcPath = previewPath;
+      back.src = `media://local?path=${encodeURIComponent(previewPath)}`;
+    }
+    if (!back.paused) back.pause();
+    back.muted = true;
+    back.playbackRate = clipSpeed(next);
+    back.currentTime = Math.max(0, next.sourceStart);
+    preparedRef.current = { idx: 1 - frontIdxRef.current, clipId: next.id };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeVideoClip, currentTime, clips, previewProxyMap]);
 
   // 분리된 오디오(A1/A2/A3) 동기화
   useEffect(() => {
@@ -609,17 +658,22 @@ export const PreviewPlayer: React.FC = () => {
           }}
           className="relative max-w-full max-h-full h-full bg-black border border-[#2a2a2a] shadow-2xl flex items-center justify-center overflow-hidden"
         >
-          <video
-            ref={videoRef}
-            preload="auto"
-            style={{
-              transform: `scale(${(activeVideoClip?.scale ?? 100) / 100})`,
-            }}
-            className={`w-full h-full transition-transform duration-75 ${
-              sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
-            } ${activeVideoClip ? 'block' : 'hidden'}`}
-            playsInline
-          />
+          {[videoARef, videoBRef].map((ref, idx) => (
+            <video
+              key={idx}
+              ref={ref}
+              preload="auto"
+              style={{
+                transform: `scale(${(activeVideoClip?.scale ?? 100) / 100})`,
+                // 안 보이는 쪽도 그려 둬야(투명) 앞으로 올 때 첫 프레임이 바로 보임
+                opacity: activeVideoClip && idx === frontIdx ? 1 : 0,
+              }}
+              className={`absolute inset-0 w-full h-full transition-transform duration-75 ${
+                sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
+              }`}
+              playsInline
+            />
+          ))}
           <audio ref={audioRef} preload="auto" />
           <canvas
             ref={gdiOverlayRef}

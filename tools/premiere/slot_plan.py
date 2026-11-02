@@ -315,6 +315,27 @@ def cmd_used(a):
     print(out, f"후킹 {len(res['hook_used'])}개, 다른 광고 {len(res['used_elsewhere'])}개")
 
 
+def write_app_plan(seq, plan, paths, duration, seq_cuts, out):
+    """앱 '자동 편집 계획 불러오기'용 파일: <시퀀스>_app.json (+ 음성 <시퀀스>_voice.wav).
+    지금은 정답표의 편집자 음성 배치(무음 제거된 TTS)를 wav 한 개로 만들어 함께 넣는다 — 계획 시각이 이 음성 기준이라서.
+    (실제 기능에서는 앱 타임라인에 이미 있는 음성을 기준으로 계획을 만든다)"""
+    from build_truth import voice_clips, render_voice
+    wav = os.path.abspath(os.path.join(out, f'{seq}_voice.wav'))
+    if not os.path.exists(wav):
+        clips, _ = voice_clips(seq_cuts)
+        render_voice(clips, duration, wav)
+    app = {
+        'format': 'auto-edit-plan/v1',
+        'sequence': seq,
+        'duration': round(float(duration), 3),
+        'voice': {'path': wav, 'start': 0.0},
+        'clips': [{'path': os.path.abspath(paths[p['file']]), 'file': p['file'], 'start': p['start'], 'end': p['end'],
+                   'srcIn': p['srcIn'], 'speed': p['speed'], 'shot': p.get('shot'), 'text': p.get('text', ''),
+                   'hook': p.get('kind') == 'hook'} for p in plan],
+    }
+    json.dump(app, open(os.path.join(out, f'{seq}_app.json'), 'w', encoding='utf8'), ensure_ascii=False, indent=1)
+
+
 def cmd_apply(a):
     from flow_plan import review_sheet, preview
     from shot_match_eval import frame_list
@@ -338,6 +359,7 @@ def cmd_apply(a):
         p['sentence'] = k  # 검토 이미지에 슬롯마다 대사 표시
     out = os.path.join('eval_data/plans', a.tag)
     os.makedirs(out, exist_ok=True)
+    write_app_plan(a.seq, plan, paths, sl['duration'], next(s for s in cuts['sequences'] if s['name'] == a.seq), out)
     json.dump({'sequence': a.seq, 'tag': a.tag, 'plan': plan, 'warnings': warns},
               open(os.path.join(out, f'{a.seq}.json'), 'w', encoding='utf8'), ensure_ascii=False, indent=1)
     review_sheet(plan, sources, os.path.join(out, f'{a.seq}_review.jpg'), f'{a.seq} 슬롯 배정 [{a.tag}]')

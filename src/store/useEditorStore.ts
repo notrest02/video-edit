@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   AlignedSubtitleItem,
+  AutoEditPlan,
   EditorTool,
   MediaAsset,
   ProjectFileData,
@@ -202,6 +203,8 @@ interface EditorState {
     diffs: Array<{ clipId: string; beforeText: string; afterText: string }>
   ) => Promise<void>;
   snapAllSubtitlesToClips: (customThresholdFrames?: number) => SnapResultSummary;
+  /** 자동 편집 계획을 지금 시퀀스의 빈 영상/음성 트랙에 올림 (되돌리기 가능). 결과 메시지를 돌려줌 */
+  importAutoEditPlan: (plan: AutoEditPlan) => Promise<string>;
   undo: () => void;
   redo: () => void;
   getTotalDuration: () => number;
@@ -607,7 +610,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     localWhisperModel: LOCAL_WHISPER_MODEL,
     scriptText: DEFAULT_SAMPLE_SCRIPT,
     captionLineMode: 'single-line',
-    captionMaxCharsPerLine: 18,
+    captionMaxCharsPerLine: 13,
     autoSplitOnCaptionGenerate: false,
     isQuickSplitMergeMode: true,
     autoSyncSubtitleStyle: false,
@@ -2736,6 +2739,115 @@ export const useEditorStore = create<EditorState>((set, get) => {
       });
     },
 
+    importAutoEditPlan: async (plan) => {
+      const fail = (msg: string) => {
+        set({ statusMessage: msg });
+        return msg;
+      };
+      if (!plan || plan.format !== 'auto-edit-plan/v1' || !Array.isArray(plan.clips) || plan.clips.length === 0) {
+        return fail('자동 편집 계획 파일 형식이 아닙니다 (auto-edit-plan/v1).');
+      }
+      if (!get().activeSequenceId) return fail('먼저 시퀀스를 만들거나 열어 주세요.');
+      const api = window.electronAPI;
+
+      // 1) 계획에 나온 원본/음성 파일을 프로젝트 미디어에 등록 (이미 있으면 그대로 사용)
+      const key = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+      const byPath = new Map(get().assets.map((a) => [key(a.path), a]));
+      const needed = Array.from(new Set([...plan.clips.map((c) => c.path), ...(plan.voice ? [plan.voice.path] : [])]));
+      const missing = needed.filter((p) => !byPath.has(key(p)));
+      if (missing.length > 0) {
+        if (!api?.probeMedia) return fail('미디어 분석 기능을 쓸 수 없습니다 (데스크톱 앱에서 실행해 주세요).');
+        set({ statusMessage: `자동 편집: 미디어 ${missing.length}개 분석 중...` });
+        const probed: Array<Omit<MediaAsset, 'id'>> = [];
+        for (const p of missing) {
+          try {
+            probed.push(await api.probeMedia(p));
+          } catch (err) {
+            return fail(`미디어를 열 수 없습니다: ${p}`);
+          }
+        }
+        for (const a of get().addAssets(probed)) byPath.set(key(a.path), a);
+      }
+
+      pushHistory();
+      const { clips } = get();
+      let { tracks } = get();
+      const end = plan.duration || Math.max(...plan.clips.map((c) => c.end));
+      const isFree = (trackId: string) =>
+        !clips.some((c) => c.trackId === trackId && c.startTime < end - 1e-3 && c.startTime + c.duration > 1e-3);
+      // 2) 비어 있는 트랙을 고르고, 없으면 새 트랙 (기존 클립은 건드리지 않음)
+      const pickTrack = (type: 'video' | 'audio'): TimelineTrack => {
+        const free = tracks.filter((t) => t.type === type && !t.locked).find((t) => isFree(t.id));
+        if (free) return free;
+        const same = tracks.filter((t) => t.type === type);
+        const prefix = type === 'video' ? 'V' : 'A';
+        const nt: TimelineTrack = {
+          id: `track-${prefix.toLowerCase()}${Date.now()}${Math.random().toString(36).slice(2, 5)}`,
+          code: `${prefix}${same.length + 1}`,
+          name: `${type === 'video' ? '비디오' : '오디오'} ${same.length + 1}`,
+          type,
+          muted: false,
+          solo: false,
+          visible: true,
+          locked: false,
+        };
+        const text = tracks.filter((t) => t.type === 'text');
+        const video = tracks.filter((t) => t.type === 'video');
+        const audio = tracks.filter((t) => t.type === 'audio');
+        tracks = type === 'video' ? [...text, nt, ...video, ...audio] : [...text, ...video, ...audio, nt];
+        return nt;
+      };
+      const vTrack = pickTrack('video');
+      const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const added: TimelineClip[] = [];
+      if (plan.voice) {
+        const asset = byPath.get(key(plan.voice.path));
+        if (asset) {
+          const aTrack = pickTrack('audio');
+          added.push({
+            id: `clip_a_${uid()}`,
+            trackId: aTrack.id,
+            type: 'audio',
+            name: asset.name,
+            startTime: Number((plan.voice.start || 0).toFixed(4)),
+            duration: Number(asset.duration.toFixed(4)),
+            sourceStart: 0,
+            sourcePath: asset.path,
+            assetId: asset.id,
+            volume: 1,
+            muted: false,
+          });
+        }
+      }
+      // 3) 영상 클립 (원본 소리는 넣지 않음: B롤)
+      for (const c of plan.clips) {
+        const asset = byPath.get(key(c.path));
+        if (!asset) continue;
+        added.push({
+          id: `clip_v_${uid()}`,
+          trackId: vTrack.id,
+          type: 'video',
+          name: `${asset.name} [V]`,
+          startTime: Number(c.start.toFixed(4)),
+          duration: Number((c.end - c.start).toFixed(4)),
+          sourceStart: Number(c.srcIn.toFixed(4)),
+          sourcePath: asset.path,
+          assetId: asset.id,
+          volume: 1,
+          muted: false,
+          speed: c.speed && Math.abs(c.speed - 1) > 1e-3 ? Number(c.speed.toFixed(3)) : undefined,
+        });
+      }
+      const nextClips = [...clips, ...added];
+      const videoCount = added.filter((c) => c.type === 'video').length;
+      const msg =
+        `자동 편집 계획 불러오기 완료: ${vTrack.code} 트랙에 영상 클립 ${videoCount}개` +
+        (plan.voice ? ' + 음성 1개' : '') +
+        ' 배치. 자막 생성 후 [클립에 자막 맞추기]로 자막을 영상 컷에 맞추세요.';
+      set({ tracks, clips: nextClips, sequences: syncActiveSequenceData(tracks, nextClips), statusMessage: msg });
+      return msg;
+    },
+
     snapAllSubtitlesToClips: (customThresholdFrames) => {
       const { clips, tracks, snapThresholdFrames, fps } = get();
       const threshold = customThresholdFrames ?? snapThresholdFrames;
@@ -3041,7 +3153,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         selectedBinItem: null,
         scriptText: data.scriptText || '',
         captionLineMode: data.captionLineMode || 'preserve',
-        captionMaxCharsPerLine: data.captionMaxCharsPerLine || 18,
+        captionMaxCharsPerLine: data.captionMaxCharsPerLine || 13,
         autoSplitOnCaptionGenerate: data.autoSplitOnCaptionGenerate ?? true,
         isQuickSplitMergeMode: data.isQuickSplitMergeMode ?? false,
         autoSyncSubtitleStyle: data.autoSyncSubtitleStyle ?? false,

@@ -298,6 +298,19 @@ ipcMain.handle('dialog:openScriptFile', async () => {
   };
 });
 
+// 자동 편집 계획 파일(.json) 열기 — tools/premiere/slot_plan.py 가 만든 <시퀀스>_app.json
+ipcMain.handle('dialog:openAutoEditPlan', async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '자동 편집 계획 파일 불러오기',
+    properties: ['openFile'],
+    filters: [{ name: '자동 편집 계획', extensions: ['json'] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const content = await fs.promises.readFile(result.filePaths[0], 'utf-8');
+  return { name: path.basename(result.filePaths[0]), content };
+});
+
 // 2-1. Get Installed PC Fonts (Windows System.Drawing.Text.InstalledFontCollection)
 let cachedSystemFonts: Array<{ label: string; value: string; familyKo: string; familyEn: string }> | null = null;
 

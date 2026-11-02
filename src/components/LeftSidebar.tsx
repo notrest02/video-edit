@@ -12,6 +12,7 @@ import {
   Mic,
   ArrowRight,
   RefreshCw,
+  Clapperboard,
 } from 'lucide-react';
 import { useEditorStore, LOCAL_WHISPER_MODEL } from '../store/useEditorStore';
 import {
@@ -26,7 +27,6 @@ import {
 } from '../utils/localWhisper';
 import { refineCaptionsByFullAlignment } from '../utils/captionBoundaryRefiner';
 import { clipAudioKey } from '../utils/forcedAligner';
-import { alignScriptToAudio, parseScriptVariants } from '../utils/scriptWaveformAligner';
 import {
   rendererWaveformCache,
   normalizeAudioPath,
@@ -65,7 +65,7 @@ export const LeftSidebar: React.FC = () => {
     setCaptionMaxCharsPerLine,
     setAutoSplitOnCaptionGenerate,
     reformatAllCaptionsLineLayout,
-    applyScriptLinesDirectly,
+    importAutoEditPlan,
     replaceClipWithSegments,
     addRawAiCaptions,
     applyScriptCorrectionsToCaptions,
@@ -81,8 +81,6 @@ export const LeftSidebar: React.FC = () => {
   }, [scriptText, setScriptText]);
 
   // 대본+파형 정렬기에 쓸 대본 (초기 샘플 문구는 무시)
-  const activeUserScript = scriptText.includes('안티그래비티 AI 비디오 편집기') ? '' : scriptText.trim();
-  const scriptVariantCount = activeUserScript ? parseScriptVariants(activeUserScript).length : 0;
 
   // 현재 타임라인의 자막(캡션) 클립들
   const subtitleClips = clips
@@ -227,124 +225,6 @@ export const LeftSidebar: React.FC = () => {
     }
   };
 
-  // [권장] 대본 + 음성 파형으로 자막 생성
-  //  - 자막 글자 = 대본 그대로 (오타 교정 불필요)
-  //  - 자막 시간 = 파형 무음 구간 경계
-  //  - Whisper   = "이 문장이 대략 어디쯤"이라는 위치 단서 + 사후 검증에만 사용
-  const handleRunScriptWaveformCaption = async () => {
-    if (!window.electronAPI) return;
-    if (targetAudioClips.length === 0) {
-      setStatusMessage('먼저 시퀀스 타임라인에 TTS 음성 클립을 넣어주세요.');
-      return;
-    }
-    if (!activeUserScript || parseScriptVariants(activeUserScript).length === 0) {
-      setStatusMessage('대본이 비어 있습니다. [.txt 대본 열기]로 이 음성의 대본을 먼저 불러와 주세요.');
-      return;
-    }
-
-    // 자막 위치 정밀 맞춤 모델 필요 (없으면 먼저 받음, 받지 못하면 진행하지 않음)
-    if (!(await ensureAlignModel())) return;
-
-    setIsProcessing(true);
-    try {
-      const segments: WordTimestamp[] = [];
-      const skipped: string[] = [];
-      const notes: string[] = [];
-
-      for (let i = 0; i < targetAudioClips.length; i++) {
-        const clip = targetAudioClips[i];
-        if (!clip.sourcePath) continue;
-        const label = `[${i + 1}/${targetAudioClips.length}] '${clip.name}'`;
-
-        setProgressText(`${label} 16kHz 오디오 추출 중...`);
-        const pcm = await window.electronAPI.extractAudioFloat32({
-          filePath: clip.sourcePath,
-          sourceStart: clip.sourceStart,
-          duration: clip.duration,
-        });
-
-        const chunks = await transcribeRawChunksWithLocalWhisper(pcm, {
-          modelId: LOCAL_WHISPER_MODEL,
-          onProgress: (msg) => setProgressText(`${label} ${msg}`),
-        });
-
-        setProgressText(`${label} 대본 ↔ 파형 정렬 중...`);
-        const result = alignScriptToAudio({
-          pcm,
-          sampleRate: 16000,
-          scriptText: activeUserScript,
-          whisperChunks: chunks,
-        });
-
-        if (result.mode === 'none') {
-          skipped.push(`${clip.name}: ${result.warnings[0] ?? '대본과 일치하지 않음'}`);
-          continue;
-        }
-        if (result.mode === 'multi') {
-          notes.push(
-            `${clip.name}: 대본 버전 ${result.variantOrder.length}개 발견 (음성 순서: ${result.variantOrder
-              .map((v) => `${v.variantIndex + 1}번`)
-              .join(' → ')})`
-          );
-        }
-
-        // 대본 전체 글자를 음성 전체에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
-        // (대본 정렬기가 쉼을 잘못 골랐거나, 쉼 없이 이어 말한 구간의 문장 경계까지 바로잡음)
-        let finalCaptions = result.captions;
-        if (window.electronAPI.alignWordSpans) {
-          setProgressText(`${label} 자막 위치 정밀 보정 중...`);
-          const refined = await refineCaptionsByFullAlignment(
-            pcm,
-            16000,
-            result.captions,
-            alignCaptionsToClip(clipAudioKey(clip.sourcePath, clip.sourceStart, clip.duration))
-          );
-          if (!refined.available) {
-            skipped.push(`${clip.name}: 자막 위치 맞춤 모델을 사용할 수 없습니다`);
-            continue;
-          }
-          finalCaptions = refined.captions;
-        }
-
-        for (const cap of finalCaptions) {
-          segments.push({
-            text: cap.text,
-            start: clip.startTime + cap.start,
-            end: clip.startTime + cap.end,
-            voiceEnd: clip.startTime + cap.voiceEnd,
-            needsReview: cap.needsReview,
-            alignConfidence: cap.confidence,
-          });
-        }
-      }
-
-      if (segments.length === 0) {
-        setStatusMessage(
-          `자막을 만들지 못했습니다. ${skipped.join(' / ') || '대본과 음성이 맞는지 확인해 주세요.'}`
-        );
-        return;
-      }
-
-      addRawAiCaptions(segments);
-      const reviewCount = segments.filter((s) => s.needsReview).length;
-      setStatusMessage(
-        [
-          `대본 기준 자막 ${segments.length}개를 파형에 맞춰 생성했습니다.`,
-          reviewCount > 0
-            ? `⚠ 확신이 낮은 ${reviewCount}개는 타임라인에 빨간 점선(⚠ 검토)으로 표시했습니다. 직접 옮기거나 고치면 표시가 사라집니다.`
-            : '모든 자막이 음성과 일치하는 것으로 확인되었습니다.',
-          ...notes,
-          ...(skipped.length ? [`건너뜀: ${skipped.join(' / ')}`] : []),
-        ].join(' ')
-      );
-    } catch (err: any) {
-      setStatusMessage(`대본 기준 자막 생성 오류: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-      setProgressText('');
-    }
-  };
-
   // 대본 텍스트 파일 불러오기
   const handleLoadScriptFile = async () => {
     if (!window.electronAPI) return;
@@ -353,24 +233,6 @@ export const LeftSidebar: React.FC = () => {
       setScriptText(res.content);
       setStatusMessage(`'${res.name}' 대본을 불러왔습니다.`);
     }
-  };
-
-  // [STEP 2 - 방안 1] 내 대본의 줄바꿈(Enter) 한 줄 한 줄을 그대로 자막 클립 1개씩으로 매칭 및 오타 변환 실행!
-  const handleRunStep2ApplyScriptLinesDirectly = () => {
-    if (subtitleClips.length === 0) {
-      setStatusMessage(
-        '먼저 [1. AI 캡션 생성]에서 오디오 파일로 AI 초벌 자막을 생성해 주세요!'
-      );
-      setSubTab('step1-ai');
-      return;
-    }
-    if (!scriptText.trim()) {
-      setStatusMessage('비교할 내 대본을 입력해 주세요.');
-      return;
-    }
-
-    const diffs = applyScriptLinesDirectly(scriptText);
-    setDiffReport(diffs);
   };
 
   // [STEP 2 - 보조] 통짜 대본을 붙여넣었을 때 대본 텍스트창 자체에 먼저 자동 줄바꿈을 넣어주어 사용자가 Enter로 다듬을 수 있게 함
@@ -665,46 +527,6 @@ export const LeftSidebar: React.FC = () => {
            ===================================================================== */}
         {subTab === 'step1-ai' && (
           <div className="space-y-3.5">
-            {/* [권장] 대본 + 음성 파형으로 자막 생성 */}
-            <div className="bg-[#1d2a22] border border-[#2ea043]/60 rounded-lg p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-[#3fb950]" />
-                  대본 + 음성으로 자막 생성 (권장)
-                </span>
-                <button
-                  onClick={handleLoadScriptFile}
-                  className="px-2 py-0.5 rounded bg-[#2b2b2b] hover:bg-[#3a3a3a] border border-[#444444] text-[10px] text-[#dddddd] flex items-center gap-1"
-                >
-                  <Upload className="w-3 h-3" /> .txt 대본 열기
-                </button>
-              </div>
-              <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
-                자막 글자는 <strong>대본 그대로</strong>, 시간은 <strong>음성 파형의 쉬는 구간</strong>에 맞춥니다.
-                Whisper는 문장 위치를 찾는 단서로만 써서 받아쓰기 오타나 밀림이 자막에 들어가지 않습니다.
-                한 음성 파일에 여러 버전이 섞여 있거나 순서가 달라도 찾아냅니다.
-              </p>
-              <div
-                className={`text-[11px] rounded px-2 py-1 ${
-                  scriptVariantCount > 0
-                    ? 'bg-[#14161a] text-[#7ee787]'
-                    : 'bg-[#2a1d1d] text-[#ff9b9b]'
-                }`}
-              >
-                {scriptVariantCount > 0
-                  ? `✓ 대본 인식: 버전 ${scriptVariantCount}개 (총 ${activeUserScript.length}자) · 대상 음성 ${targetAudioClips.length}개`
-                  : '대본이 없습니다. [.txt 대본 열기]로 불러오거나 STEP 2 탭의 대본 입력창에 붙여넣어 주세요.'}
-              </div>
-              <button
-                onClick={handleRunScriptWaveformCaption}
-                disabled={isProcessing || targetAudioClips.length === 0 || scriptVariantCount === 0}
-                className="w-full py-2.5 px-3 bg-[#238636] hover:bg-[#2ea043] disabled:opacity-45 text-white font-bold text-xs rounded-md shadow-lg flex items-center justify-center gap-2 transition"
-              >
-                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Subtitles className="w-4 h-4" />}
-                대본 기준으로 자막 생성
-              </button>
-            </div>
-
             {/* 1. 현재 선택된 오디오 클립 상태 표시 박스 */}
             <div className="bg-[#21252d] border border-[#2d8ceb]/50 rounded-lg p-3 space-y-2">
               <div className="flex items-center justify-between">
@@ -853,7 +675,7 @@ export const LeftSidebar: React.FC = () => {
 
               <div className="flex items-center justify-between gap-1">
                 <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
-                  대본 입력창에서 <strong>내가 줄바꿈(Enter)한 한 줄 = 캡션 1개</strong>로 100% 똑같이 나누거나, 기존 캡션 오타만 교정할 수 있습니다.
+                  STEP 1에서 음성으로 만든 캡션의 <strong>구간은 그대로 두고</strong>, 글자만 내 대본과 비교해 오타를 고칩니다.
                 </p>
                 <button
                   onClick={handlePreformatScriptTextLines}
@@ -868,27 +690,17 @@ export const LeftSidebar: React.FC = () => {
                 rows={6}
                 value={scriptText}
                 onChange={(e) => setScriptText(e.target.value)}
-                placeholder="여기에 정확한 원본 대본을 붙여넣으세요. 원하는 호흡 위치에서 Enter로 줄바꿈해 두면 아래 버튼으로 그 줄바꿈 그대로 자막이 생성됩니다!"
+                placeholder="여기에 정확한 원본 대본을 붙여넣으세요. 아래 버튼을 누르면 기존 캡션의 오타가 대본 글자로 바뀝니다."
                 className="w-full bg-[#111318] border border-[#333947] focus:border-[#2ea043] rounded p-2.5 text-xs text-white placeholder-[#666666] focus:outline-none leading-relaxed select-text"
               />
 
-              <div className="space-y-1.5">
-                <button
-                  onClick={handleRunStep2ApplyScriptLinesDirectly}
-                  className="w-full py-2.5 px-3 bg-[#2ea043] hover:bg-[#268c39] text-white font-bold text-xs rounded-md shadow flex items-center justify-center gap-1.5 transition"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  [방안 1] 내 대본의 줄바꿈(Enter) 그대로 캡션 나누기 & 오타 변환
-                </button>
-
-                <button
-                  onClick={handleRunStep2CompareAndConvert}
-                  className="w-full py-1.5 px-3 bg-[#242933] hover:bg-[#2e3542] border border-[#3b4454] text-[#cccccc] hover:text-white font-medium text-[11px] rounded flex items-center justify-center gap-1.5 transition"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  기존 AI 캡션 구간 유지하며 오타만 비교/변환
-                </button>
-              </div>
+              <button
+                onClick={handleRunStep2CompareAndConvert}
+                className="w-full py-2.5 px-3 bg-[#2ea043] hover:bg-[#268c39] text-white font-bold text-xs rounded-md shadow flex items-center justify-center gap-1.5 transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                기존 AI 캡션 구간 유지하며 오타만 비교/변환
+              </button>
             </div>
 
             {/* 대본 변환 후에도 언제든 한줄/두줄로 다시 구성 가능 */}
@@ -960,6 +772,34 @@ export const LeftSidebar: React.FC = () => {
            ===================================================================== */}
         {subTab === 'step3-manage' && (
           <div className="space-y-3.5">
+            {/* 자동 편집 계획 불러오기 (시험): 영상 클립을 빈 트랙에 배치 */}
+            <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs">
+              <div className="font-semibold text-white flex items-center gap-1.5">
+                <Clapperboard className="w-4 h-4 text-[#2d8ceb]" />
+                자동 편집 계획 불러오기 (시험)
+              </div>
+              <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
+                계획 파일(.json)의 영상 클립과 음성을 지금 시퀀스의 빈 트랙에 올립니다. 기존 클립은 그대로이며
+                Ctrl+Z로 되돌릴 수 있습니다.
+              </p>
+              <button
+                onClick={async () => {
+                  const f = await window.electronAPI?.openAutoEditPlanDialog?.();
+                  if (!f) return;
+                  try {
+                    await importAutoEditPlan(JSON.parse(f.content));
+                  } catch {
+                    useEditorStore.getState().setStatusMessage(`계획 파일을 읽지 못했습니다: ${f.name}`);
+                  }
+                }}
+                disabled={isProcessing}
+                className="w-full py-2 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white font-semibold rounded flex items-center justify-center gap-1.5 transition"
+              >
+                <Clapperboard className="w-3.5 h-3.5" />
+                계획 파일 열기
+              </button>
+            </div>
+
             {/* 무음 구간 자동 컷 편집 */}
             <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2.5 text-xs">
               <div className="font-semibold text-white flex items-center gap-1.5">

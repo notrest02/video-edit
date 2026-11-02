@@ -25,6 +25,29 @@ export interface SequenceItem {
   outPoint?: number | null; // 시퀀스 아웃 지점 (초)
 }
 
+/**
+ * 자동 편집 계획 (format 'auto-edit-plan/v1'): 음성 기준 타임라인 위에 원본 영상 구간을 어디에 놓을지.
+ * 지금은 tools/premiere/slot_plan.py 가 만들고, 이후 앱 안 API 자동 배치가 같은 형식을 만든다.
+ */
+export interface AutoEditPlan {
+  format: 'auto-edit-plan/v1';
+  sequence?: string;
+  duration: number;
+  /** 계획 시각의 기준 음성 (없으면 이미 타임라인에 있는 음성을 기준으로 만든 계획) */
+  voice?: { path: string; start: number };
+  clips: Array<{
+    path: string;
+    file?: string;
+    start: number; // 타임라인 시작 (초)
+    end: number; // 타임라인 끝 (초)
+    srcIn: number; // 원본 시작 (초)
+    speed: number; // 재생 속도 (원본 사용 길이 = (end - start) × speed)
+    shot?: string | null;
+    text?: string;
+    hook?: boolean;
+  }>;
+}
+
 export interface MediaAsset {
   id: string;
   name: string;
@@ -194,6 +217,7 @@ declare global {
       reportSaveBeforeClose?: (saved: boolean) => void;
       openMediaDialog: () => Promise<Array<Omit<MediaAsset, 'id'>>>;
       openScriptFileDialog: () => Promise<{ name: string; content: string } | null>;
+      openAutoEditPlanDialog?: () => Promise<{ name: string; content: string } | null>;
       getSystemFonts: (forceRefresh?: boolean) => Promise<SystemFontItem[]>;
       openFontFileDialog: () => Promise<{
         familyName: string;

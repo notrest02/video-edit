@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   reportSaveBeforeClose: (saved: boolean) => ipcRenderer.send('app:saveBeforeCloseResult', saved),
   openMediaDialog: () => ipcRenderer.invoke('dialog:openMedia'),
   openScriptFileDialog: () => ipcRenderer.invoke('dialog:openScriptFile'),
+  openAutoEditPlanDialog: () => ipcRenderer.invoke('dialog:openAutoEditPlan'),
   getSystemFonts: (forceRefresh?: boolean) => ipcRenderer.invoke('system:getFonts', forceRefresh),
   openFontFileDialog: () => ipcRenderer.invoke('dialog:openFontFile'),
   gdiCheckFonts: (families: string[]) => ipcRenderer.invoke('font:gdiCheck', families),
