@@ -50,7 +50,9 @@ def shot_len_cap(project):
     return float(min(4.0, max(2.4, d[int(len(d) * 0.75)] + 0.5)))
 
 
-CAPTION_MAX_CHARS = 18  # 앱 기본값 (useEditorStore captionMaxCharsPerLine)
+FPS = 30
+CUT_LEAD_FRAMES = 3  # 컷을 말 시작보다 앞당기는 프레임 수
+CAPTION_MAX_CHARS = 13  # 사용자 작업 기준 (편집자 자막: 띄어쓰기 빼고 최대 13자)
 
 
 def app_captions(truth_path, seq_name, max_chars=CAPTION_MAX_CHARS):
@@ -119,11 +121,15 @@ def make_slots(seq, caps, hi=4.0):
         j = prev[j]
     times = [0.0] + [pts[0][0]] + [pts[k][0] for k in reversed(idx)]
     ws = [w for w in seq['words'] if w['start'] is not None]
+    # 컷은 말(=자막 전환)보다 3프레임 앞 (편집자 완성본: 컷·자막 모두 말보다 0.04~0.16초 앞).
+    # 앱의 '클립에 자막 맞추기'가 근처 자막 경계를 이 컷으로 당겨 붙임
+    lead = lambda t: t if t <= 0 or t >= total - 1e-6 else max(0.0, round((round(t * FPS) - CUT_LEAD_FRAMES) / FPS, 4))
     slots = []
     for k, (a, b) in enumerate(zip(times, times[1:])):
         text = ' '.join(w['text'] for w in ws if a - 0.02 <= w['start'] < b - 0.02)
-        slots.append({'slot': k, 'start': round(a, 2), 'end': round(b, 2), 'dur': round(b - a, 2), 'text': text,
-                      'hook': k == 0})
+        la, lb = lead(a), lead(b)
+        slots.append({'slot': k, 'start': round(la, 3), 'end': round(lb, 3), 'dur': round(lb - la, 3), 'text': text,
+                      'hook': k == 0, 'captionStart': round(a, 3)})
     return slots
 
 
@@ -157,9 +163,10 @@ def load_shots(project):
 
 
 def hook_pieces(s, hs, shots, caps=()):
-    """후킹: 광고주 지정 구간(from~to) 안의 샷만 순서대로. 한 샷으로 모자라면 나누되
-    나누는 시점은 자막이 바뀌는 시점만 (자막과 영상 전환을 맞춤). 너무 느려지는(0.6배 미만) 조합은 피하고,
-    조각 수는 적을수록, 지정 시작점에 가까울수록 좋음. 짧은 샷(예: 0.6초 섬광)은 건너뛸 수 있음"""
+    """후킹: 광고주 지정 구간(from~to) 안의 샷만 순서대로. 한 샷으로 모자라면 나눈다.
+    후킹 안에서는 자막과 상관없이 나눌 수 있음 (사용자 2026-11-02 '(가)': 편집자도 햇빛가리개02 후킹을 자막 전환이
+    아닌 1.1초에서 나눔). 자막이 바뀌는 시점이면 조금 더 선호. 조각은 1초 이상.
+    느려지는 정도(길이 가중), 조각 수, 지정 시작 샷을 건너뛰는 것(광고주 의도와 어긋남)에 감점"""
     from itertools import combinations
     f, t0, to = hs['file'], hs['from'], hs.get('to', hs['from'] + 30)
     seg = sorted((x for x in shots.values() if x['file'] == f and x['end'] > t0 and x['start'] < to), key=lambda x: x['start'])
@@ -172,17 +179,23 @@ def hook_pieces(s, hs, shots, caps=()):
     if src and src[0][2] - src[0][1] < 0.5 and len(src) > 1:  # 지정 시각이 샷 끝자락이면 다음 샷부터
         src = src[1:]
     S, E = s['start'], s['end']
-    inner = [c for c in caps if S + 0.8 <= c <= E - 0.8]
+    capset = [c for c in caps if S + 1.0 <= c <= E - 1.0]
+    grid = sorted(set([round(x, 3) for x in np.arange(S + 1.0, E - 1.0 + 1e-6, 0.1)] + capset))
     best = None
-    for m in range(1, min(3, len(inner) + 1, len(src)) + 1):
-        for cut in combinations(inner, m - 1):
+    for m in range(1, min(3, len(src)) + 1):
+        for cut in combinations(grid, m - 1):
             edges = [S, *cut, E]
+            if any(b - a < 1.0 - 1e-6 for a, b in zip(edges, edges[1:])):
+                continue
             for pick in combinations(range(len(src)), m):
-                sps = []
+                sps, pen = [], 0.0
                 for k, j in enumerate(pick):
                     dur = edges[k + 1] - edges[k]
-                    sps.append(min(2.0, (src[j][2] - src[j][1] - 0.1) / dur))
-                pen = sum(max(0.0, 0.6 - x) * 10 for x in sps) + 0.5 * (m - 1) + 0.3 * pick[0]
+                    sp = min(2.0, (src[j][2] - src[j][1] - 0.1) / dur)
+                    sps.append(sp)
+                    pen += dur * (max(0.0, 0.6 - sp) * 10 + max(0.0, 0.8 - sp) * 2)
+                pen += 0.5 * (m - 1) + 1.0 * pick[0]
+                pen -= 0.2 * sum(1 for c in cut if any(abs(c - x) < 0.02 for x in capset))
                 if best is None or pen < best[0]:
                     best = (pen, edges, pick, sps)
     if best is None:
@@ -197,6 +210,10 @@ def hook_pieces(s, hs, shots, caps=()):
                         srcIn=round(a0 + (0.05 if a0 <= x['start'] + 0.01 else 0), 3),
                         srcOut=round(a0 + dur * sp, 3), speed=round(float(sp), 2), kind='hook'))
     return out
+
+
+def overlap(f, t0, t1, avoid):
+    return sum(max(0.0, min(t1, b) - max(t0, a)) for ff, a, b in avoid if ff == f)
 
 
 EDGE = 0.05  # 샷 경계에서 띄우는 여유 (30fps 1.5프레임). 경계 시각은 0.01초로 반올림돼 있음

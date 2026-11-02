@@ -9,6 +9,12 @@ export interface SnapSubtitlesOptions {
   closeMicroGaps: boolean;
   /** 클립과 자막이 많이 겹칠 때 클립의 첫/끝 경계에 강제 정렬할지 여부 */
   alignClipdominantSubtitles: boolean;
+  /**
+   * 영상 컷 우선 (기본 true): 범위 안에 영상 클립 경계가 있으면 그것에만 맞추고, 없을 때만 음성 클립 경계를 씀.
+   * 무음 제거로 잘게 나뉜 음성(TTS) 조각 경계로 자막이 끌려가지 않게 함. 이때 '많이 겹치면 클립 경계에 강제 정렬'은
+   * 끔 (자막이 말보다 최대 2배 범위만큼 일찍/늦게 나오는 것을 막음) — 영상이 기준, 자막은 가까운 컷에만 붙음
+   */
+  preferVideoCuts?: boolean;
 }
 
 /**
@@ -24,6 +30,7 @@ export function snapSubtitleClipsToMediaCuts(
     fps = 30,
     closeMicroGaps = true,
     alignClipdominantSubtitles = true,
+    preferVideoCuts = true,
   } = options;
 
   const frameSec = 1 / Math.max(1, fps);
@@ -61,6 +68,33 @@ export function snapSubtitleClipsToMediaCuts(
   }
 
   const sortedBoundaries = Array.from(cutBoundaries).sort((a, b) => a - b);
+  const videoBoundaries = Array.from(
+    new Set(
+      mediaClips
+        .filter((c) => c.type === 'video')
+        .flatMap((c) => [Number(c.startTime.toFixed(5)), Number((c.startTime + c.duration).toFixed(5))])
+    )
+  ).sort((a, b) => a - b);
+  /** t 에서 가장 가까운 경계 (영상 컷 우선이면 범위 안 영상 경계 먼저) */
+  const nearest = (t: number): { b: number | null; diff: number } => {
+    const pick = (list: number[]) => {
+      let b: number | null = null;
+      let diff = Infinity;
+      for (const x of list) {
+        const d = Math.abs(t - x);
+        if (d < diff) {
+          diff = d;
+          b = x;
+        }
+      }
+      return { b, diff };
+    };
+    if (preferVideoCuts && videoBoundaries.length > 0) {
+      const v = pick(videoBoundaries);
+      if (v.diff <= maxSnapSec) return v;
+    }
+    return pick(sortedBoundaries);
+  };
 
   let snappedCount = 0;
   let snappedStartCount = 0;
@@ -77,15 +111,9 @@ export function snapSubtitleClipsToMediaCuts(
     let endSnapped = false;
 
     // 1. 가장 가까운 컷 경계선 찾기 (시작점)
-    let closestStartBoundary: number | null = null;
-    let minStartDiff = Infinity;
-    for (const b of sortedBoundaries) {
-      const diff = Math.abs(newStart - b);
-      if (diff < minStartDiff) {
-        minStartDiff = diff;
-        closestStartBoundary = b;
-      }
-    }
+    const ns = nearest(newStart);
+    const closestStartBoundary = ns.b;
+    const minStartDiff = ns.diff;
 
     if (closestStartBoundary !== null && minStartDiff <= maxSnapSec) {
       if (Math.abs(newStart - closestStartBoundary) > 0.0001) {
@@ -96,15 +124,9 @@ export function snapSubtitleClipsToMediaCuts(
     }
 
     // 2. 가장 가까운 컷 경계선 찾기 (끝점)
-    let closestEndBoundary: number | null = null;
-    let minEndDiff = Infinity;
-    for (const b of sortedBoundaries) {
-      const diff = Math.abs(newEnd - b);
-      if (diff < minEndDiff) {
-        minEndDiff = diff;
-        closestEndBoundary = b;
-      }
-    }
+    const ne = nearest(newEnd);
+    const closestEndBoundary = ne.b;
+    const minEndDiff = ne.diff;
 
     if (closestEndBoundary !== null && minEndDiff <= maxSnapSec && closestEndBoundary > newStart + frameSec) {
       if (Math.abs(newEnd - closestEndBoundary) > 0.0001) {
@@ -115,7 +137,7 @@ export function snapSubtitleClipsToMediaCuts(
     }
 
     // 3. 만약 특정 단일 미디어 클립과 자막이 75% 이상 겹치는데 시작/끝이 미세하게(최대 thresholdFrames * 2) 어긋나 있다면 해당 클립에 강제 일치
-    if (alignClipdominantSubtitles) {
+    if (alignClipdominantSubtitles && !preferVideoCuts) {
       const extendedSnapSec = maxSnapSec * 2;
       for (const interval of clipIntervals) {
         const overlapStart = Math.max(newStart, interval.start);

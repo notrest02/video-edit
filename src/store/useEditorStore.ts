@@ -20,6 +20,7 @@ import {
   reformatSubtitleClipsByLineMode,
   type CaptionSplitRequest,
   sanitizeSubtitleClipsNonOverlapping,
+  splitWordsByPauses,
 } from '../utils/scriptAligner';
 
 interface HistorySnapshot {
@@ -470,13 +471,29 @@ async function buildAlignedSplitProvider(
   }
   if (byClip.size === 0) return { available: true };
 
-  const map = new Map<string, number[]>();
+  const map = new Map<string, number[] | { lines: string[]; times: number[] }>();
   for (const [key, entry] of byClip) {
     const res = await api.alignWordSpans({ key, pcm: entry.pcm, ranges: entry.ranges }).catch(() => null);
     if (!res || !res.available) return { available: false };
     res.results.forEach((spans, i) => {
       if (!spans) return;
       const { r, offset, wordOffset } = entry.meta[i];
+      // 1) 문장 전체 어절의 정렬 시각으로 말 쉼을 구해 한 줄 경계를 다시 고름 (편집자 방식: 쉬는 곳에서 자막 전환)
+      const sw = r.pieces.flatMap(wordsOf);
+      const sp = sw.map((_, k) => spans[wordOffset + k] ?? null);
+      const gaps = sw.map((_, k) => {
+        const a = sp[k - 1];
+        const b = sp[k];
+        return k > 0 && a && b ? b[0] - a[1] : null;
+      });
+      const breaks = splitWordsByPauses(sw, gaps, opts.maxCharsPerLine);
+      if (breaks.every((k) => sp[k])) {
+        const cuts = [0, ...breaks, sw.length];
+        const lines = cuts.slice(0, -1).map((a, j) => sw.slice(a, cuts[j + 1]).join(' '));
+        map.set(keyOf(r), { lines, times: breaks.map((k) => offset + (sp[k] as [number, number])[0]) });
+        return;
+      }
+      // 2) 시각을 모르는 어절이 경계에 걸리면 기존 방식 (글자 기준 조각, 첫 단어 시작 시점)
       const bounds: number[] = [];
       let wi = wordOffset;
       let ok = true;

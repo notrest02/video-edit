@@ -909,6 +909,84 @@ export function splitSentenceIntoNaturalChunks(
 }
 
 /**
+ * 말 쉼(강제 정렬 단어 시각) + 말끝 + 길이로 자막 한 줄 경계를 고릅니다.
+ * 근거: 편집자 완성본 자막 12개 — 편집자 경계의 79%가 0.15초 이상 쉬는 곳(경계 아닌 곳은 15%).
+ * 글자 수만 보던 splitSentenceIntoNaturalChunks 대비 편집자와의 경계 일치(F1) 0.72 → 0.85 (처음 보는 9개 기준).
+ * 파이썬 시험판: tools/premiere/caption_split.py (같은 규칙/값 — 바꿀 때 함께 바꿀 것)
+ *
+ * @param words 어절 배열 (띄어쓰기 단위)
+ * @param gaps gaps[k] = k번째 어절 앞의 쉼(초). 모르면 null (k=0 은 무시)
+ * @param maxCharsPerLine 앱 설정값. 사용자 기준 13자는 띄어쓰기 빼고 센 값이라, 한 줄 한도는 띄어쓰기 포함 +3자
+ * @returns 끊는 어절 번호 (k = k번째 어절 앞에서 새 줄)
+ */
+export function splitWordsByPauses(
+  words: string[],
+  gaps: Array<number | null>,
+  maxCharsPerLine = 13
+): number[] {
+  const n = words.length;
+  if (n <= 1) return [];
+  const maxLen = maxCharsPerLine + 3;
+  const idealLo = Math.max(4, Math.round(maxCharsPerLine * 0.6));
+  const P = { lineCost: 1.0, wGap: 8.0, g0: 0.1, clause: 1.0, end: 1.5, short: 2.0, over: 6.0, noun: 1.0 };
+  const strip = (s: string) => s.replace(/^["'“‘「『]+/, '').replace(/["'”’」』.,?!~]+$/, '');
+  const MOD1 = /^(이|그|저|새|헌|한|두|세|네|전|현|다|더|안|못|잘|꼭|막|좀|늘|참)$/;
+  const ADV = /^(절대|너무|아주|정말|진짜|완전|전혀|결코|훨씬|가장|제일)$/;
+  const BOUND =
+    /^(것|것까지|것도|것은|것이|것을|거|거까지|거예요|걸|건|게|때|때도|때는|때부터|수|수도|수밖에|줄|듯|데|편|중|후|뿐|터|바|지|만큼|요|때문에)$/;
+  const AUX =
+    /^(봐|봐요|봤어|봤어요|보세요|보여|보여요|보이는|보이나|보이고|보이더라고요|있어요|있습니다|있어|있고|있는|있던|있더라고요|계세요|싶어요|싶어|되니|되니까|돼요|됩니다|됐어요)$/;
+  const CLAUSE =
+    /(으니|니|면서도|면서|으며|해서|아서|어서|져서|니까|때문에|거든요|거든|길래|느라|지만|는데|은데|던데|더라도|아도|어도|해도|다면|으면|려면|하면|도록|라며|라고|더니|고|서|며|면)$/;
+  const END = /[.?!]["'”’]*$|요$|다$/;
+  const PHRASE_END =
+    /(은|는|이|가|을|를|에|에서|의|도|만|로|으로|와|과|랑|이랑|고|서|면|니|데|요|다|까|게|며|나|죠|야|께|한테|처럼|부터|까지|보다|하고|해|줘|어|아|던|든|던데|이고)$/;
+
+  // 작은따옴표 안('오염 방지 테이프')에서는 끊지 않음
+  const quoteOpen: boolean[] = [false];
+  for (let k = 0; k < n; k++) {
+    const q = (words[k].match(/['‘’]/g) || []).length % 2 === 1;
+    quoteOpen.push(q ? !quoteOpen[k] : quoteOpen[k]);
+  }
+
+  const boundaryScore = (k: number): number => {
+    const prev = words[k - 1];
+    const ps = strip(prev);
+    const cs = strip(words[k]);
+    if (MOD1.test(prev) || ADV.test(ps)) return -9;
+    if (BOUND.test(cs) || (AUX.test(cs) && /(고|어|아|여|해|워|와|까|나|도|면|야)$/.test(ps))) return -9;
+    if (quoteOpen[k]) return -9;
+    const g = gaps[k] ?? 0.15;
+    let s = P.wGap * (Math.min(g, 0.4) - P.g0);
+    if (CLAUSE.test(ps) || /,$/.test(prev)) s += P.clause;
+    if (END.test(prev)) s += P.end;
+    if (!PHRASE_END.test(ps) && !/[,.?!]/.test(prev) && g < 0.15) s -= P.noun; // 명사 묶음 쪼개기 방지
+    return s;
+  };
+
+  const best = new Array<number>(n + 1).fill(Infinity);
+  const back = new Array<number>(n + 1).fill(0);
+  best[0] = 0;
+  for (let j = 1; j <= n; j++) {
+    for (let i = j - 1; i >= 0; i--) {
+      const L = getVisualCharLength(words.slice(i, j).join(' '));
+      if (L > maxLen + 4 && j - i > 1) break;
+      let c = P.lineCost;
+      if (L > maxLen) c += P.over * (L - maxLen);
+      if (L < idealLo) c += (P.short * (idealLo - L)) / idealLo;
+      if (i > 0) c -= boundaryScore(i);
+      if (best[i] + c < best[j]) {
+        best[j] = best[i] + c;
+        back[j] = i;
+      }
+    }
+  }
+  const breaks: number[] = [];
+  for (let j = n; j > 0; j = back[j]) if (back[j] > 0) breaks.push(back[j]);
+  return breaks.reverse();
+}
+
+/**
  * 기존 타임라인의 자막 캡션 클립들을 사용자가 선택한 줄 표시 방식
  * ('single-line': 무조건 1줄씩 별도 클립으로 분할 / 'double-line': 한 화면에 최대 2줄 이내로 줄바꿈 및 분할)
  * 으로 재구성하여 새로운 자막 클립 배열을 반환합니다.
@@ -943,7 +1021,13 @@ export function reformatSubtitleClipsByLineMode(
      * 자막(문장) 하나를 pieces 로 나눌 때 2번째 조각부터의 시작 시점(타임라인 초)을 직접 돌려주는 함수.
      * 강제 정렬 결과를 넣는 용도. null 이면 audioLookup 방식으로 대체.
      */
-    splitTimesProvider?: (req: CaptionSplitRequest) => number[] | null | undefined;
+    /**
+     * number[] = 2번째 조각부터의 시작 시점. 또는 { lines, times }: 말 쉼을 보고 한 줄 단위로 다시 나눈 결과
+     * (lines = 한 줄 자막들, times = 2번째 줄부터의 시작 시점). 두 줄 모드면 두 줄씩 묶어 씀.
+     */
+    splitTimesProvider?: (
+      req: CaptionSplitRequest
+    ) => number[] | { lines: string[]; times: number[] } | null | undefined;
   }
 ): { updatedClips: TimelineClip[]; beforeCount: number; afterCount: number } {
   const { mode, maxCharsPerLine = 13, fps = 30, audioLookup, splitTimesProvider } = options;
@@ -1055,7 +1139,7 @@ export function reformatSubtitleClipsByLineMode(
       maxCharsPerLine
     );
 
-    const finalPieces: string[] = [];
+    let finalPieces: string[] = [];
     if (mode === 'single-line') {
       finalPieces.push(...naturalChunks);
     } else {
@@ -1151,15 +1235,37 @@ export function reformatSubtitleClipsByLineMode(
     // 2) 실제 음성 PCM 의 쉼 + 말 속도 추정
     // 3) (아래 기존 방식) 글자 비율 + 표시용 파형 스냅
     let boundariesAbs: number[] | null = null;
-    const provided = splitTimesProvider
+    let provided = splitTimesProvider
       ? splitTimesProvider({ start: clipStart, end: clipEnd, voiceEnd: effectiveVoiceEnd, pieces: finalPieces })
       : null;
+    if (provided && !Array.isArray(provided)) {
+      // 말 쉼 기준으로 다시 나눈 한 줄 자막들 → 줄 표시 방식에 맞춰 조각과 시작 시점 구성
+      const { lines, times } = provided;
+      if (lines.length >= 1 && times.length === lines.length - 1) {
+        if (mode === 'single-line') {
+          finalPieces = lines;
+          provided = times;
+        } else {
+          const pieces: string[] = [];
+          const ts: number[] = [];
+          for (let i = 0; i < lines.length; i += 2) {
+            pieces.push(i + 1 < lines.length ? `${lines[i]}\n${lines[i + 1]}` : lines[i]);
+            if (i > 0) ts.push(times[i - 1]);
+          }
+          finalPieces = pieces;
+          provided = ts;
+        }
+      } else {
+        provided = null;
+      }
+    }
+    const providedTimes = Array.isArray(provided) ? provided : null;
     if (
-      provided &&
-      provided.length === finalPieces.length - 1 &&
-      provided.every((t, i) => t > (i ? provided[i - 1] : clipStart) && t < clipEnd)
+      providedTimes &&
+      providedTimes.length === finalPieces.length - 1 &&
+      providedTimes.every((t, i) => t > (i ? providedTimes[i - 1] : clipStart) && t < clipEnd)
     ) {
-      boundariesAbs = provided;
+      boundariesAbs = providedTimes;
     } else {
       const audio = audioLookup ? audioLookup(clipStart, clipEnd) : null;
       if (audio) {
