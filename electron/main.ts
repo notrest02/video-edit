@@ -1021,6 +1021,8 @@ ipcMain.handle(
         speed?: number;
         volume: number;
         muted: boolean;
+        /** 블러 마스크: 흑백 PNG(흰색=흐리게, 출력 크기) + 블러 강도 */
+        masks?: Array<{ png: string; blur: number }>;
       }>;
       audioClips: Array<{
         id: string;
@@ -1123,9 +1125,26 @@ ipcMain.handle(
         filterParts.push(
           `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
         );
+        // 블러 마스크: 클립 화면을 흐리게 한 복사본을 마스크 모양(흰 곳)만 원래 화면 위에 덮음
+        let clipLabel = vScaled;
+        for (let j = 0; j < (clip.masks || []).length; j++) {
+          const mk = clip.masks![j];
+          const b64 = mk.png.replace(/^data:image\/png;base64,/, '');
+          const maskPath = path.join(tempDir, `mask_${i}_${j}.png`);
+          await fs.promises.writeFile(maskPath, Buffer.from(b64, 'base64'));
+          inputArgs.push('-loop', '1', '-framerate', String(fps), '-t', (clip.startTime + clip.duration + 1).toFixed(3), '-i', maskPath);
+          const mIdx = inputIdx++;
+          const tag = `${i}_${j}`;
+          filterParts.push(`${clipLabel}split=2[mo_${tag}][mb_${tag}]`);
+          filterParts.push(`[mb_${tag}]gblur=sigma=${Math.max(0.5, mk.blur).toFixed(2)}[mbb_${tag}]`);
+          filterParts.push(`[${mIdx}:v]format=gray,scale=${width}:${height}[mk_${tag}]`);
+          filterParts.push(`[mbb_${tag}][mk_${tag}]alphamerge[ma_${tag}]`);
+          filterParts.push(`[mo_${tag}][ma_${tag}]overlay=format=auto[mm_${tag}]`);
+          clipLabel = `[mm_${tag}]`;
+        }
         const endT = (clip.startTime + clip.duration).toFixed(4);
         filterParts.push(
-          `${currentVideoLabel}${vScaled}overlay=x=0:y=0:enable='between(t,${clip.startTime.toFixed(4)},${endT})':eof_action=pass${vOut}`
+          `${currentVideoLabel}${clipLabel}overlay=x=0:y=0:enable='between(t,${clip.startTime.toFixed(4)},${endT})':eof_action=pass${vOut}`
         );
         currentVideoLabel = vOut;
 

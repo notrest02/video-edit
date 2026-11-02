@@ -11,6 +11,7 @@ import { useEditorStore, clipSpeed } from '../store/useEditorStore';
 import { matchAction } from '../utils/shortcuts';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
+import { BlurMaskOverlay } from './BlurMaskOverlay';
 import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
 import {
   ensureGdiTextReady,
@@ -75,6 +76,22 @@ export const PreviewPlayer: React.FC = () => {
   const lastVideoSeekWallRef = useRef<number>(0);
   const lastAudioSeekWallRef = useRef<number>(0);
   const [canvasWidth, setCanvasWidth] = useState<number>(360);
+  // 화면 위 자막 도구 막대: 화면을 가려서 접었다 펼 수 있게 (마지막 상태 기억)
+  const [subBarOpen, setSubBarOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('agy_subbar_open') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  const toggleSubBar = (open: boolean) => {
+    setSubBarOpen(open);
+    try {
+      localStorage.setItem('agy_subbar_open', open ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  };
 
   // 스크럽(인디케이터 드래그) 중 시크 요청 합치기:
   // 이전 시크가 끝나기 전에 새 시크를 계속 걸면 디코더가 매번 취소돼 프레임이 건너뛰어 보인다.
@@ -639,7 +656,16 @@ export const PreviewPlayer: React.FC = () => {
         }`}
       >
         {/* 상단 플로팅 화면 자막 즉시 제어 바 (보여지는 창 기준 나누기/합치기/이동) */}
-        {allSubtitleClips.length > 0 && (
+        {allSubtitleClips.length > 0 && !subBarOpen && (
+          <button
+            onClick={() => toggleSubBar(true)}
+            className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 bg-[#12161f]/80 border border-[#388bfd]/40 px-2.5 py-0.5 rounded-full text-[10px] text-[#79b8ff] hover:text-white"
+            title="자막 도구 막대 펼치기"
+          >
+            자막 도구 ▾
+          </button>
+        )}
+        {allSubtitleClips.length > 0 && subBarOpen && (
           <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 bg-[#12161f]/90 backdrop-blur border border-[#388bfd]/40 px-2.5 py-1 rounded-full shadow-lg text-[10px]">
             <button
               onClick={() => jumpToAdjacentSubtitle(-1)}
@@ -691,6 +717,13 @@ export const PreviewPlayer: React.FC = () => {
                 </button>
               </>
             )}
+            <button
+              onClick={() => toggleSubBar(false)}
+              className="ml-0.5 px-1.5 py-0.5 rounded bg-[#21262d] hover:bg-[#30363d] text-[#999999] hover:text-white"
+              title="자막 도구 막대 접기 (화면을 가릴 때)"
+            >
+              ▴
+            </button>
           </div>
         )}
 
@@ -727,6 +760,7 @@ export const PreviewPlayer: React.FC = () => {
             .map((c) => (
               <ExtraAudio key={c.trackId} clip={c} currentTime={currentTime} isPlaying={isPlaying} />
             ))}
+          <BlurMaskOverlay clip={activeVideoClip} width={sequence.width || 1080} height={sequence.height || 1920} canvasWidth={canvasWidth} />
           <canvas
             ref={gdiOverlayRef}
             style={{ width: '100%', height: '100%' }}

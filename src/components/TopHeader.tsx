@@ -1,3 +1,4 @@
+import { maskPngDataUrl, maskPointsAt } from '../utils/blurMask';
 import React, { useEffect, useState } from 'react';
 import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
 import { ShortcutSettingsModal } from './ShortcutSettingsModal';
@@ -99,8 +100,13 @@ export const TopHeader: React.FC = () => {
       .filter((c) => c.type === 'text' && visibleTrackIds.has(c.trackId) && c.text && c.text.trim().length > 0)
       .map((c) => ({ id: c.id, startTime: c.startTime, endTime: c.startTime + c.duration, pngDataUrl: renderSubtitleClipToPngDataUrl(c, outW, outH) }))
       .filter((s) => s.pngDataUrl.length > 0);
+    const withMasks = (vc: ReturnType<typeof pick>) =>
+      vc.map((v) => {
+        const c = ranged.find((x) => x.id === v.id);
+        return { ...v, masks: (c?.blurMasks || []).map((m) => ({ png: maskPngDataUrl(maskPointsAt(m, 0), outW, outH, m.feather), blur: m.blur })) };
+      });
     return window.electronAPI!.exportVideo({
-      videoClips: pick('video', (c) => visibleTrackIds.has(c.trackId)),
+      videoClips: withMasks(pick('video', (c) => visibleTrackIds.has(c.trackId))),
       audioClips: pick('audio', (c) => activeAudioTrackIds.has(c.trackId)),
       subtitleOverlays,
       totalDuration: rangeEnd - rangeStart,
@@ -186,6 +192,10 @@ export const TopHeader: React.FC = () => {
           speed: c.speed && c.speed > 0 ? c.speed : 1,
           volume: c.volume,
           muted: c.muted,
+          masks: (c.blurMasks || []).map((m) => ({
+            png: maskPngDataUrl(maskPointsAt(m, 0), sequence.width || 1920, sequence.height || 1080, m.feather),
+            blur: m.blur,
+          })),
         }));
 
       const audioClips = rangedClips

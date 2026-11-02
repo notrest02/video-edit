@@ -72,6 +72,17 @@ export interface AutoEditPlan {
   }>;
 }
 
+/** 마스크 꼭짓점 (출력 화면 기준 0~1) */
+export type MaskPoint = [number, number];
+/** 블러 마스크: 네 꼭짓점 사각형, 블러 강도(출력 px), 가장자리 부드럽게(px), 키프레임(클립 안 시각 → 꼭짓점) */
+export type BlurMask = {
+  id: string;
+  points: MaskPoint[];
+  blur: number;
+  feather: number;
+  keyframes?: Array<{ t: number; points: MaskPoint[] }>;
+};
+
 export interface MediaAsset {
   id: string;
   name: string;
@@ -111,6 +122,7 @@ export interface TimelineClip {
   muted: boolean;
   scale?: number;        // 비디오 클립 크기 비율 (기본 100%)
   speed?: number;        // 재생 속도 (1 = 100%). 타임라인 길이 = 원본 사용 길이 ÷ 속도
+  blurMasks?: BlurMask[]; // 영상 클립: 원본에 박힌 글자 등을 흐리게 가리는 마스크
 
   // 자막/텍스트 클립 전용 속성
   text?: string;

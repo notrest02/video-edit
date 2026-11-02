@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { BlurMaskPanel } from './BlurMaskPanel';
 import {
   Type,
   Volume2,
@@ -1096,6 +1097,9 @@ export const RightInspector: React.FC = () => {
               />
             </div>
           )}
+
+          {/* 블러 마스크 (원본에 박힌 글자 가리기) */}
+          {selectedClip.type === 'video' && <BlurMaskPanel clip={selectedClip} />}
 
           {/* 오디오 / 비디오 볼륨 제어 */}
           {(selectedClip.type === 'audio' || selectedClip.type === 'video') && (
