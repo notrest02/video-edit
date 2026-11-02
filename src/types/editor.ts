@@ -23,12 +23,25 @@ export interface SequenceItem {
   currentTime: number;
   inPoint?: number | null;  // 시퀀스 인 지점 (초)
   outPoint?: number | null; // 시퀀스 아웃 지점 (초)
+  /** 대본의 후킹 지정 ("3초: 2번 0~3초" → 첫 3초를 2번 영상 0~3초로). AI 자동 배치에 미리 채움 */
+  autoEditHook?: { sec: number; fileNo: number; from: number; to: number; note: string } | null;
 }
 
 /**
  * 자동 편집 계획 (format 'auto-edit-plan/v1'): 음성 기준 타임라인 위에 원본 영상 구간을 어디에 놓을지.
  * 지금은 tools/premiere/slot_plan.py 가 만들고, 이후 앱 안 API 자동 배치가 같은 형식을 만든다.
  */
+export type AutoEditShot = { id: string; file: string; path: string; start: number; end: number; dur: number };
+export type AutoEditShotDesc = {
+  id: string;
+  desc: string;
+  place: string;
+  motion: 'high' | 'low';
+  parts: Array<{ from: number; to: number; desc: string }>;
+  note: string;
+};
+export type AutoEditSlot = { slot: number; start: number; end: number; dur: number; text: string; hook: boolean; captionStart: number };
+
 export interface AutoEditPlan {
   format: 'auto-edit-plan/v1';
   sequence?: string;
@@ -218,6 +231,24 @@ declare global {
       openMediaDialog: () => Promise<Array<Omit<MediaAsset, 'id'>>>;
       openScriptFileDialog: () => Promise<{ name: string; content: string } | null>;
       openAutoEditPlanDialog?: () => Promise<{ name: string; content: string } | null>;
+      openMediaFolderDialog?: () => Promise<{ dir: string; folderName: string; files: string[] } | null>;
+      claudeKeyStatus?: () => Promise<{ hasKey: boolean }>;
+      claudeSaveKey?: (key: string) => Promise<{ ok: boolean; message: string }>;
+      claudeTestKey?: () => Promise<{ ok: boolean; message: string }>;
+      claudeClearKey?: () => Promise<{ hasKey: boolean }>;
+      autoEditAnalyze?: (params: {
+        media: Array<{ path: string; duration: number }>;
+        product: string;
+      }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; usage: { input: number; output: number }; analyzedFiles: number }>;
+      autoEditAssign?: (params: {
+        product: string;
+        shots: AutoEditShot[];
+        descs: AutoEditShotDesc[];
+        slots: AutoEditSlot[];
+        hookUsed: Array<{ shot: string; from: number; to: number }>;
+        usedElsewhere: Array<{ shot: string; from: number; to: number }>;
+      }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
+      onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
       getSystemFonts: (forceRefresh?: boolean) => Promise<SystemFontItem[]>;
       openFontFileDialog: () => Promise<{
         familyName: string;

@@ -408,6 +408,110 @@ export interface CaptionDiffItem {
   afterText: string;  // 내 대본과 비교해 변환된 캡션
   similarity: number;
   isChanged: boolean;
+  /** 대본에 버전이 여러 개일 때: 이 캡션이 몇 번째 버전(대본 파일 순서, 0부터)의 대사인지 */
+  variant?: number;
+}
+
+/** 대본 버전 하나: 후킹 지정("3초: 2번 0~3초" = 첫 3초를 2번 영상 0~3초로) + 대사 */
+export type ScriptBlock = {
+  hook: { sec: number; fileNo: number; from: number; to: number; note: string } | null;
+  text: string;
+};
+
+// "3초: 2번 0~3초", "3초 : 1번 영상 1~6초 빠르게" — 대사가 아니라 후킹 지정
+const HOOK_LINE = /^\s*(\d+(?:\.\d+)?)\s*초\s*[:：]\s*(\d+)\s*번(?:\s*영상)?\s*(\d+(?:\.\d+)?)\s*[~\-]\s*(\d+(?:\.\d+)?)\s*초?(.*)$/;
+const SCRIPT_META = /https?:\/\//;
+
+/**
+ * 대본 텍스트 → 버전 목록. 빈 줄이나 후킹 지정 줄이 버전 경계. 링크/메모 줄은 버림.
+ * 후킹 줄이 하나도 없고 빈 줄도 없으면 버전 1개.
+ */
+export function parseScriptBlocks(raw: string): ScriptBlock[] {
+  const lines = raw.split(/\r?\n/);
+  const blocks: ScriptBlock[] = [];
+  let hook: ScriptBlock['hook'] = null;
+  let cur: string[] = [];
+  const flush = () => {
+    if (cur.length) blocks.push({ hook, text: cur.join(' ') });
+    cur = [];
+    hook = null;
+  };
+  for (const line of lines) {
+    const m = line.match(HOOK_LINE);
+    if (m) {
+      flush();
+      hook = { sec: Number(m[1]), fileNo: Number(m[2]), from: Number(m[3]), to: Number(m[4]), note: m[5].trim() };
+      continue;
+    }
+    if (!line.trim()) {
+      if (cur.length) flush();
+      continue;
+    }
+    if (SCRIPT_META.test(line)) continue; // 링크 줄만 버림 ('3번 빨아도…' 같은 대사는 지우지 않음)
+    cur.push(line.trim());
+  }
+  flush();
+  return blocks;
+}
+
+/**
+ * [STEP 2 핵심 알고리즘]
+ * 이미 생성된 AI 자막 캡션들과 사용자가 제공한 대본을 비교해, 캡션 타임스탬프는 유지하고 오타만 대본 글자로 변환.
+ * 대본에 여러 버전(광고 여러 개)이 들어 있으면 음성 속 순서가 대본 파일 순서와 달라도 맞게 짝지음:
+ *   가능한 버전 순서/조합(음성에 일부 버전만 있어도 됨)을 모두 시도해 캡션 글자와 가장 잘 맞는 것을 고른다.
+ * 후킹 지정 줄("3초: 2번 0~3초")은 대사에서 빼고, 각 캡션이 어느 버전인지 variant 로 알려 준다.
+ */
+export function compareAndCorrectCaptionsWithScript(
+  subtitleClips: TimelineClip[],
+  rawScript: string
+): CaptionDiffItem[] {
+  const blocks = parseScriptBlocks(rawScript);
+  if (blocks.length <= 1) {
+    return compareCaptionsSequential(subtitleClips, blocks[0]?.text ?? rawScript).diffs.map((d) => ({
+      ...d,
+      variant: blocks.length ? 0 : undefined,
+    }));
+  }
+  const n = blocks.length;
+  // 순서 있는 부분집합 (버전 6개까지: 최대 1956가지)
+  const orders: number[][] = [];
+  const rec = (cur: number[]) => {
+    if (cur.length) orders.push([...cur]);
+    if (cur.length >= n) return;
+    for (let k = 0; k < n; k++) if (!cur.includes(k)) rec([...cur, k]);
+  };
+  if (n <= 6) rec([]);
+  else orders.push(blocks.map((_, k) => k));
+  const totalSubChars = Math.max(1, subtitleClips.reduce((a, c) => a + (c.text || '').replace(/\s+/g, '').length, 0));
+  let best: { score: number; order: number[]; res: ReturnType<typeof compareCaptionsSequential> } | null = null;
+  for (const order of orders) {
+    const text = order.map((k) => blocks[k].text).join(' ');
+    const scriptChars = text.replace(/\s+/g, '').length;
+    if (scriptChars < totalSubChars * 0.6 || scriptChars > totalSubChars * 1.6) continue; // 길이가 너무 다르면 건너뜀
+    const res = compareCaptionsSequential(subtitleClips, text, false);
+    let w = 0;
+    let acc = 0;
+    for (const d of res.diffs) {
+      const len = Math.max(1, d.beforeText.replace(/\s+/g, '').length);
+      acc += d.similarity * len;
+      w += len;
+    }
+    const lenFit = 1 - Math.min(1, Math.abs(scriptChars - totalSubChars) / totalSubChars);
+    const score = acc / Math.max(1, w) + 0.1 * lenFit;
+    if (!best || score > best.score) best = { score, order, res };
+  }
+  if (!best) {
+    return compareCaptionsSequential(subtitleClips, blocks.map((b) => b.text).join(' '), false).diffs;
+  }
+  // 각 캡션이 어느 버전 대사를 썼는지 (토큰 범위 → 버전)
+  const owner: number[] = [];
+  for (const k of best.order) for (const _ of blocks[k].text.trim().split(/\s+/).filter(Boolean)) owner.push(k);
+  const b = best;
+  return b.res.diffs.map((d, i) => {
+    const [t0, t1] = b.res.ranges[i] ?? [0, 0];
+    const mid = Math.min(owner.length - 1, Math.max(0, Math.floor((t0 + Math.max(t0, t1 - 1)) / 2)));
+    return { ...d, variant: owner.length ? owner[mid] : undefined };
+  });
 }
 
 /**
@@ -416,12 +520,14 @@ export interface CaptionDiffItem {
  * 각 AI 캡션의 타임스탬프는 그대로 유지하면서 오타를 내 대본의 정확한 글자로 변환하고
  * Before(기존 AI 캡션) -> After(대본 교정본) 비교 리포트를 반환합니다.
  */
-export function compareAndCorrectCaptionsWithScript(
+function compareCaptionsSequential(
   subtitleClips: TimelineClip[],
-  rawScript: string
-): CaptionDiffItem[] {
+  rawScript: string,
+  allowLineMatch = true
+): { diffs: CaptionDiffItem[]; ranges: Array<[number, number]> } {
+  const ranges: Array<[number, number]> = [];
   const sortedSubs = [...subtitleClips].sort((a, b) => a.startTime - b.startTime);
-  if (sortedSubs.length === 0 || !rawScript.trim()) return [];
+  if (sortedSubs.length === 0 || !rawScript.trim()) return { diffs: [], ranges };
 
   const explicitLines = rawScript
     .split(/\r?\n/)
@@ -429,8 +535,8 @@ export function compareAndCorrectCaptionsWithScript(
     .filter((l) => l.length > 0);
 
   // 케이스 1: 사용자의 대본 줄 수와 기존 AI 캡션 개수가 같을 때 -> 1:1 직접 매칭 비교
-  if (explicitLines.length === sortedSubs.length) {
-    return sortedSubs.map((sub, idx) => {
+  if (allowLineMatch && explicitLines.length === sortedSubs.length) {
+    const diffs = sortedSubs.map((sub, idx) => {
       const before = (sub.text || '').trim();
       const after = explicitLines[idx];
       const sim = computePhoneticSimilarity(before, after);
@@ -445,6 +551,7 @@ export function compareAndCorrectCaptionsWithScript(
         isChanged: before !== after,
       };
     });
+    return { diffs, ranges: diffs.map(() => [0, 0] as [number, number]) };
   }
 
   // 케이스 2: 대본의 전체 어절(Words) 시퀀스를 기존 AI 캡션들의 발음/글자 길이에 맞춰 DP/Lookahead로 매칭 분할
@@ -454,7 +561,7 @@ export function compareAndCorrectCaptionsWithScript(
     .split(/\s+/)
     .filter(Boolean);
 
-  if (scriptTokens.length === 0) return [];
+  if (scriptTokens.length === 0) return { diffs: [], ranges };
 
   const totalScriptChars = scriptTokens.reduce((acc, w) => acc + w.length, 0);
   const subCharLengths = sortedSubs.map((s) =>
@@ -471,6 +578,7 @@ export function compareAndCorrectCaptionsWithScript(
     const isLastSub = i === sortedSubs.length - 1;
 
     if (tokenCursor >= scriptTokens.length) {
+      ranges.push([scriptTokens.length, scriptTokens.length]);
       results.push({
         clipId: sub.id,
         index: i + 1,
@@ -485,6 +593,7 @@ export function compareAndCorrectCaptionsWithScript(
     }
 
     if (isLastSub) {
+      ranges.push([tokenCursor, scriptTokens.length]);
       const after = scriptTokens.slice(tokenCursor).join(' ');
       const sim = computePhoneticSimilarity(before, after);
       results.push({
@@ -553,6 +662,7 @@ export function compareAndCorrectCaptionsWithScript(
       bestEndToken = safeEnd;
     }
 
+    ranges.push([tokenCursor, bestEndToken]);
     const matchedScriptText = scriptTokens.slice(tokenCursor, bestEndToken).join(' ');
     const finalSim = computePhoneticSimilarity(before, matchedScriptText);
 
@@ -570,7 +680,7 @@ export function compareAndCorrectCaptionsWithScript(
     tokenCursor = bestEndToken;
   }
 
-  return results;
+  return { diffs: results, ranges };
 }
 
 export type CaptionLineMode = 'single-line' | 'double-line';

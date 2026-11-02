@@ -20,6 +20,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openMediaDialog: () => ipcRenderer.invoke('dialog:openMedia'),
   openScriptFileDialog: () => ipcRenderer.invoke('dialog:openScriptFile'),
   openAutoEditPlanDialog: () => ipcRenderer.invoke('dialog:openAutoEditPlan'),
+  openMediaFolderDialog: () => ipcRenderer.invoke('dialog:openMediaFolder'),
+  claudeKeyStatus: () => ipcRenderer.invoke('claude:keyStatus'),
+  claudeSaveKey: (key: string) => ipcRenderer.invoke('claude:saveKey', key),
+  claudeTestKey: () => ipcRenderer.invoke('claude:testKey'),
+  claudeClearKey: () => ipcRenderer.invoke('claude:clearKey'),
+  autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
+  autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
+  onAutoEditProgress: (callback: (msg: string) => void) => {
+    const handler = (_event: unknown, msg: string) => callback(msg);
+    ipcRenderer.on('autoEdit:progress', handler);
+    return () => ipcRenderer.removeListener('autoEdit:progress', handler);
+  },
   getSystemFonts: (forceRefresh?: boolean) => ipcRenderer.invoke('system:getFonts', forceRefresh),
   openFontFileDialog: () => ipcRenderer.invoke('dialog:openFontFile'),
   gdiCheckFonts: (families: string[]) => ipcRenderer.invoke('font:gdiCheck', families),

@@ -15,9 +15,11 @@ import {
   Clapperboard,
 } from 'lucide-react';
 import { useEditorStore, LOCAL_WHISPER_MODEL } from '../store/useEditorStore';
+import { AutoEditCard } from './AutoEditCard';
 import {
   CaptionDiffItem,
   compareAndCorrectCaptionsWithScript,
+  parseScriptBlocks,
   splitSentenceIntoNaturalChunks,
 } from '../utils/scriptAligner';
 import {
@@ -66,6 +68,7 @@ export const LeftSidebar: React.FC = () => {
     setAutoSplitOnCaptionGenerate,
     reformatAllCaptionsLineLayout,
     importAutoEditPlan,
+    splitVariantsIntoSequences,
     replaceClipWithSegments,
     addRawAiCaptions,
     applyScriptCorrectionsToCaptions,
@@ -235,6 +238,10 @@ export const LeftSidebar: React.FC = () => {
     }
   };
 
+  const [variantRuns, setVariantRuns] = useState<
+    Array<{ variant: number; start: number; end: number; hook: ReturnType<typeof parseScriptBlocks>[number]['hook'] }>
+  >([]);
+
   // [STEP 2 - 보조] 통짜 대본을 붙여넣었을 때 대본 텍스트창 자체에 먼저 자동 줄바꿈을 넣어주어 사용자가 Enter로 다듬을 수 있게 함
   const handlePreformatScriptTextLines = () => {
     if (!scriptText.trim()) return;
@@ -263,6 +270,21 @@ export const LeftSidebar: React.FC = () => {
 
     const diffs = compareAndCorrectCaptionsWithScript(subtitleClips, scriptText);
     setDiffReport(diffs);
+    // 대본에 버전이 여러 개면, 음성 속 버전 구간(시간)을 기억 → [버전별 시퀀스 만들기]
+    const blocks = parseScriptBlocks(scriptText);
+    const runs: Array<{ variant: number; start: number; end: number; hook: (typeof blocks)[number]['hook'] }> = [];
+    if (blocks.length > 1) {
+      const audioEnd = Math.max(...clips.filter((c) => c.type === 'audio').map((c) => c.startTime + c.duration), 0);
+      for (const d of [...diffs].sort((a, b) => a.startTime - b.startTime)) {
+        if (d.variant === undefined) continue;
+        const last = runs[runs.length - 1];
+        if (last && last.variant === d.variant) continue;
+        if (last) last.end = d.startTime;
+        if (runs.some((r) => r.variant === d.variant)) continue; // 같은 버전이 다시 나오면(드묾) 첫 구간만
+        runs.push({ variant: d.variant, start: runs.length ? d.startTime : 0, end: audioEnd, hook: blocks[d.variant]?.hook ?? null });
+      }
+    }
+    setVariantRuns(runs.length > 1 ? runs : []);
     applyScriptCorrectionsToCaptions(
       diffs.map((d) => ({
         clipId: d.clipId,
@@ -701,6 +723,22 @@ export const LeftSidebar: React.FC = () => {
                 <RefreshCw className="w-3.5 h-3.5" />
                 기존 AI 캡션 구간 유지하며 오타만 비교/변환
               </button>
+              {variantRuns.length > 1 && (
+                <div className="bg-[#14161a] border border-[#2e3440] rounded p-2 space-y-1.5">
+                  <div className="text-[11px] text-[#aaaaaa]">
+                    음성에서 대본 {variantRuns.length}개를 찾았습니다 (음성 순서):{' '}
+                    {variantRuns
+                      .map((r) => `대본${r.variant + 1} ${formatFullTimecode(r.start, fps).slice(3)}~${formatFullTimecode(r.end, fps).slice(3)}${r.hook ? ` · 후킹 ${r.hook.fileNo}번 ${r.hook.from}~${r.hook.to}초` : ''}`)
+                      .join(' / ')}
+                  </div>
+                  <button
+                    onClick={() => splitVariantsIntoSequences(variantRuns)}
+                    className="w-full py-1.5 px-3 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white font-semibold text-[11px] rounded transition"
+                  >
+                    버전별 시퀀스 만들기 ({variantRuns.length}개)
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* 대본 변환 후에도 언제든 한줄/두줄로 다시 구성 가능 */}
@@ -772,6 +810,8 @@ export const LeftSidebar: React.FC = () => {
            ===================================================================== */}
         {subTab === 'step3-manage' && (
           <div className="space-y-3.5">
+            <AutoEditCard />
+
             {/* 자동 편집 계획 불러오기 (시험): 영상 클립을 빈 트랙에 배치 */}
             <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs">
               <div className="font-semibold text-white flex items-center gap-1.5">

@@ -1,0 +1,232 @@
+/**
+ * STEP 3 'AI 자동 배치' 카드: Claude API 키, 폴더에서 영상 가져오기, 후킹 지정(선택), 실행
+ */
+import React, { useEffect, useState } from 'react';
+import { Clapperboard, FolderOpen, KeyRound, Loader2, Wand2 } from 'lucide-react';
+import { useEditorStore } from '../store/useEditorStore';
+import type { MediaAsset } from '../types/editor';
+
+const box = 'bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs';
+const input =
+  'w-full bg-[#111318] border border-[#333947] focus:border-[#2d8ceb] rounded px-2 py-1.5 text-xs text-white placeholder-[#666666] focus:outline-none';
+const btn = 'py-1.5 px-2.5 rounded text-[11px] font-semibold transition disabled:opacity-45';
+
+/** 폴더 안 파일 중 완성본(렌더)으로 보이는 것: 폴더 이름이 들어가거나 _01/_02, 수정/최종/final */
+function looksLikeRender(file: string, folderName: string) {
+  const base = file.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '');
+  const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase();
+  return norm(base).includes(norm(folderName)) || /(^|[_\s-])0\d$|_?수정|최종|final/i.test(base);
+}
+
+export const AutoEditCard: React.FC = () => {
+  const { assets, addAssets, runAutoEdit, setStatusMessage } = useEditorStore();
+  const api = window.electronAPI;
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [keyInput, setKeyInput] = useState('');
+  const [keyMsg, setKeyMsg] = useState('');
+  const [product, setProduct] = useState('');
+  const [useHook, setUseHook] = useState(false);
+  const [hookAssetId, setHookAssetId] = useState('');
+  const [hookFrom, setHookFrom] = useState('0');
+  const [hookTo, setHookTo] = useState('3');
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [folder, setFolder] = useState<{ name: string; files: Array<{ path: string; checked: boolean }> } | null>(null);
+
+  const videos = assets.filter((a: MediaAsset) => a.type === 'video');
+  const activeSequenceId = useEditorStore((s) => s.activeSequenceId);
+  const seqHook = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.autoEditHook ?? null);
+
+  useEffect(() => {
+    api?.claudeKeyStatus?.().then((s) => setHasKey(s.hasKey));
+  }, [api]);
+
+  // 시퀀스에 대본의 후킹 지정("3초: 2번 0~3초")이 있으면 미리 채움. 'n번' = 이름이 n으로 시작하는 영상(예: 2.mp4), 없으면 미디어 n번째
+  useEffect(() => {
+    if (!seqHook) return;
+    const byName = videos.find((v) => new RegExp(`^${seqHook.fileNo}(\\D|$)`).test(v.name));
+    const asset = byName || videos[seqHook.fileNo - 1];
+    setUseHook(true);
+    setHookAssetId(asset?.id ?? '');
+    setHookFrom(String(seqHook.from));
+    setHookTo(String(seqHook.to));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSequenceId, seqHook, videos.length]);
+
+  const saveKey = async () => {
+    if (!keyInput.trim() || !api?.claudeSaveKey) return;
+    setKeyMsg('확인 중...');
+    const r = await api.claudeSaveKey(keyInput);
+    setKeyMsg(r.message);
+    if (r.ok) {
+      setHasKey(true);
+      setKeyInput('');
+    }
+  };
+
+  const pickFolder = async () => {
+    const r = await api?.openMediaFolderDialog?.();
+    if (!r) return;
+    const have = new Set(assets.map((a) => a.path.replace(/\\/g, '/').toLowerCase()));
+    setFolder({
+      name: r.folderName,
+      files: r.files
+        .filter((p) => !have.has(p.replace(/\\/g, '/').toLowerCase()))
+        .map((p) => ({ path: p, checked: !looksLikeRender(p, r.folderName) })),
+    });
+  };
+
+  const importFolder = async () => {
+    if (!folder || !api?.probeMedia) return;
+    const chosen = folder.files.filter((f) => f.checked);
+    const probed = [];
+    for (const f of chosen) {
+      try {
+        probed.push(await api.probeMedia(f.path));
+      } catch {
+        // 분석 못 하는 파일은 건너뜀
+      }
+    }
+    if (probed.length) addAssets(probed);
+    setStatusMessage(`폴더 '${folder.name}'에서 영상 ${probed.length}개를 미디어에 올렸습니다.`);
+    setFolder(null);
+  };
+
+  const run = async () => {
+    setBusy(true);
+    setProgress('시작...');
+    const hook =
+      useHook && hookAssetId
+        ? { assetId: hookAssetId, from: Number(hookFrom) || 0, to: Number(hookTo) || (Number(hookFrom) || 0) + 3 }
+        : null;
+    const msg = await runAutoEdit({ product, hook, onProgress: setProgress });
+    setProgress(msg);
+    setBusy(false);
+  };
+
+  return (
+    <div className={box}>
+      <div className="font-semibold text-white flex items-center gap-1.5">
+        <Wand2 className="w-4 h-4 text-[#2d8ceb]" />
+        AI 자동 배치 (원본 영상 → 컷)
+      </div>
+      <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
+        준비: 무음 제거한 음성을 타임라인에 두고 STEP 1 자막 생성 + STEP 2 오타 변환까지 마친 뒤 실행하세요. 미디어에 올린
+        원본 영상으로 자막이 바뀌는 곳마다 장면을 골라 빈 영상 트랙에 놓고, 자막을 컷에 맞춥니다.
+      </p>
+
+      {/* API 키 */}
+      <div className="space-y-1 border-t border-[#2e2e2e] pt-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#cccccc] flex items-center gap-1">
+            <KeyRound className="w-3 h-3" /> Claude API 키
+          </span>
+          <span className={hasKey ? 'text-[#7ee787]' : 'text-[#ff9b9b]'}>
+            {hasKey === null ? '' : hasKey ? '저장됨' : '없음'}
+          </span>
+        </div>
+        <div className="flex gap-1">
+          <input
+            type="password"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            placeholder={hasKey ? '새 키로 바꾸려면 입력' : 'sk-ant-...'}
+            className={input}
+          />
+          <button onClick={saveKey} disabled={!keyInput.trim()} className={`${btn} bg-[#2d8ceb] text-white shrink-0`}>
+            저장
+          </button>
+          {hasKey && (
+            <button
+              onClick={async () => {
+                await api?.claudeClearKey?.();
+                setHasKey(false);
+                setKeyMsg('키를 지웠습니다.');
+              }}
+              className={`${btn} bg-[#2b2b2b] text-[#dddddd] shrink-0`}
+            >
+              삭제
+            </button>
+          )}
+        </div>
+        {keyMsg && <div className="text-[10px] text-[#aaaaaa]">{keyMsg}</div>}
+      </div>
+
+      {/* 원본 영상 */}
+      <div className="space-y-1 border-t border-[#2e2e2e] pt-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#cccccc]">원본 영상 (미디어): {videos.length}개</span>
+          <button onClick={pickFolder} className={`${btn} bg-[#2b2b2b] text-[#dddddd] flex items-center gap-1`}>
+            <FolderOpen className="w-3 h-3" /> 폴더에서 가져오기
+          </button>
+        </div>
+        {folder && (
+          <div className="bg-[#14161a] border border-[#2e3440] rounded p-2 space-y-1">
+            <div className="text-[10px] text-[#aaaaaa]">
+              '{folder.name}' 영상 — 완성본으로 보이는 파일은 체크를 풀어 두었습니다
+            </div>
+            <div className="max-h-28 overflow-y-auto space-y-0.5">
+              {folder.files.length === 0 && <div className="text-[10px] text-[#777777]">새로 올릴 영상이 없습니다.</div>}
+              {folder.files.map((f, i) => (
+                <label key={f.path} className="flex items-center gap-1.5 text-[11px] text-[#dddddd] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={f.checked}
+                    onChange={(e) =>
+                      setFolder({ ...folder, files: folder.files.map((x, j) => (j === i ? { ...x, checked: e.target.checked } : x)) })
+                    }
+                    className="accent-[#2d8ceb]"
+                  />
+                  <span className="truncate">{f.path.replace(/^.*[\\/]/, '')}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              <button onClick={importFolder} className={`${btn} bg-[#2d8ceb] text-white flex-1`}>
+                체크한 영상 미디어에 올리기
+              </button>
+              <button onClick={() => setFolder(null)} className={`${btn} bg-[#2b2b2b] text-[#dddddd]`}>
+                취소
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 제품 / 후킹 */}
+      <div className="space-y-1.5 border-t border-[#2e2e2e] pt-2">
+        <input value={product} onChange={(e) => setProduct(e.target.value)} placeholder="제품 설명 (선택, 예: 욕실 흡착 슬리퍼 걸이)" className={input} />
+        <label className="flex items-center gap-1.5 text-[11px] text-[#cccccc] cursor-pointer">
+          <input type="checkbox" checked={useHook} onChange={(e) => setUseHook(e.target.checked)} className="accent-[#2d8ceb]" />
+          후킹 장면 지정 (광고주 지정, 안 하면 AI가 고름)
+        </label>
+        {useHook && (
+          <div className="flex gap-1 items-center">
+            <select value={hookAssetId} onChange={(e) => setHookAssetId(e.target.value)} className={`${input} flex-1`}>
+              <option value="">영상 선택</option>
+              {videos.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                </option>
+              ))}
+            </select>
+            <input value={hookFrom} onChange={(e) => setHookFrom(e.target.value)} className={`${input} w-12`} title="시작 초" />
+            <span className="text-[#777777]">~</span>
+            <input value={hookTo} onChange={(e) => setHookTo(e.target.value)} className={`${input} w-12`} title="끝 초" />
+            <span className="text-[10px] text-[#777777]">초</span>
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={run}
+        disabled={busy || !hasKey || videos.length === 0}
+        className="w-full py-2 bg-[#2d8ceb] hover:bg-[#1e78d6] disabled:opacity-45 text-white font-semibold rounded flex items-center justify-center gap-1.5 transition"
+      >
+        {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clapperboard className="w-3.5 h-3.5" />}
+        AI 자동 배치 실행
+      </button>
+      {progress && <div className="text-[10px] text-[#aaaaaa] leading-relaxed">{progress}</div>}
+    </div>
+  );
+};

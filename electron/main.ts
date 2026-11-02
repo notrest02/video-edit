@@ -9,6 +9,9 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
+import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
+import { analyzeMedia } from './sceneAnalyzer';
+import { assignShots } from './autoEditAssign';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
   computeEmission,
@@ -296,6 +299,39 @@ ipcMain.handle('dialog:openScriptFile', async () => {
     name: path.basename(result.filePaths[0]),
     content,
   };
+});
+
+// ---------- Claude API 키 (암호화 저장, 화면 쪽으로는 키를 보내지 않음) ----------
+ipcMain.handle('claude:keyStatus', () => ({ hasKey: hasClaudeKey() }));
+ipcMain.handle('claude:saveKey', async (_e, key: string) => {
+  const t = await testClaudeKey(key);
+  if (t.ok) saveClaudeKey(key);
+  return t;
+});
+ipcMain.handle('claude:testKey', () => testClaudeKey());
+ipcMain.handle('claude:clearKey', () => {
+  clearClaudeKey();
+  return { hasKey: false };
+});
+
+// ---------- AI 자동 배치 ----------
+ipcMain.handle(
+  'autoEdit:analyze',
+  async (e, params: { media: Array<{ path: string; duration: number }>; product: string }) =>
+    analyzeMedia(resolvedFfmpegPath, params.media, params.product, (msg) => e.sender.send('autoEdit:progress', msg))
+);
+ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
+
+// 폴더에서 영상 가져오기: 폴더를 고르면 영상 파일 경로 목록
+ipcMain.handle('dialog:openMediaFolder', async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, { title: '원본 영상 폴더 선택', properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const dir = result.filePaths[0];
+  const files = (await fs.promises.readdir(dir))
+    .filter((f) => /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(f))
+    .map((f) => path.join(dir, f));
+  return { dir, folderName: path.basename(dir), files };
 });
 
 // 자동 편집 계획 파일(.json) 열기 — tools/premiere/slot_plan.py 가 만든 <시퀀스>_app.json

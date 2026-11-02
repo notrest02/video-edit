@@ -13,6 +13,7 @@ import {
   TrackType,
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
+import { buildSlotsFromCaptions, fitAssignment, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
 import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
@@ -205,6 +206,22 @@ interface EditorState {
   snapAllSubtitlesToClips: (customThresholdFrames?: number) => SnapResultSummary;
   /** 자동 편집 계획을 지금 시퀀스의 빈 영상/음성 트랙에 올림 (되돌리기 가능). 결과 메시지를 돌려줌 */
   importAutoEditPlan: (plan: AutoEditPlan) => Promise<string>;
+  /**
+   * 한 음성에 대본 여러 버전이 들어 있을 때: 오타 변환으로 알아낸 버전 구간마다 새 시퀀스를 만들어
+   * 그 구간의 음성/자막(그리고 다른 클립)을 0초부터 옮겨 담음. 후킹 지정도 시퀀스에 기억. 지금 시퀀스는 그대로.
+   */
+  splitVariantsIntoSequences: (
+    ranges: Array<{ variant: number; start: number; end: number; hook: SequenceItem['autoEditHook'] }>
+  ) => string;
+  /**
+   * AI 자동 배치: 미디어의 영상들을 분석(캐시)하고, 타임라인 자막 경계로 컷 자리를 만들어 Claude 가 장면을 고른 뒤
+   * 빈 영상 트랙에 배치 + 클립에 자막 맞추기. hook = 광고주 지정 후킹(미디어 영상 + 원본 초), 없으면 AI 가 고름
+   */
+  runAutoEdit: (opts: {
+    product: string;
+    hook: { assetId: string; from: number; to: number } | null;
+    onProgress?: (msg: string) => void;
+  }) => Promise<string>;
   undo: () => void;
   redo: () => void;
   getTotalDuration: () => number;
@@ -2846,6 +2863,114 @@ export const useEditorStore = create<EditorState>((set, get) => {
         ' 배치. 자막 생성 후 [클립에 자막 맞추기]로 자막을 영상 컷에 맞추세요.';
       set({ tracks, clips: nextClips, sequences: syncActiveSequenceData(tracks, nextClips), statusMessage: msg });
       return msg;
+    },
+
+    splitVariantsIntoSequences: (ranges) => {
+      const st = get();
+      if (!st.activeSequenceId || ranges.length === 0) return '나눌 버전이 없습니다.';
+      const saved = syncActiveSequenceData(st.tracks, st.clips, undefined, st.currentTime);
+      const src = saved.find((s) => s.id === st.activeSequenceId);
+      if (!src) return '지금 시퀀스를 찾지 못했습니다.';
+      const frame = 1 / Math.max(1, st.fps);
+      const base = src.name.replace(/[_\s-]*0?\d+$/, '') || src.name;
+      const made: SequenceItem[] = ranges.map((r) => {
+        const clips: TimelineClip[] = [];
+        for (const c of src.clips) {
+          const a = Math.max(c.startTime, r.start);
+          const b = Math.min(c.startTime + c.duration, r.end);
+          if (b - a < frame) continue;
+          const cut = a - c.startTime;
+          clips.push({
+            ...JSON.parse(JSON.stringify(c)),
+            id: `${c.id}_v${r.variant + 1}_${Math.random().toString(36).slice(2, 6)}`,
+            startTime: Number((a - r.start).toFixed(4)),
+            duration: Number((b - a).toFixed(4)),
+            sourceStart: Number((c.sourceStart + (c.type === 'text' ? 0 : cut * (c.speed ?? 1))).toFixed(4)),
+            voiceEndTime: c.voiceEndTime !== undefined ? Number((Math.min(c.voiceEndTime, r.end) - r.start).toFixed(4)) : undefined,
+          });
+        }
+        return {
+          ...JSON.parse(JSON.stringify({ ...src, clips: [] })),
+          id: `seq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: `${base}_${String(r.variant + 1).padStart(2, '0')}`,
+          clips,
+          currentTime: 0,
+          inPoint: null,
+          outPoint: null,
+          autoEditHook: r.hook ?? null,
+        } as SequenceItem;
+      });
+      set({ sequences: [...saved, ...made], openSequenceIds: [...st.openSequenceIds, ...made.map((m) => m.id)], isDirty: true });
+      const msg = `대본 버전별 시퀀스 ${made.length}개를 만들었습니다: ${made.map((m) => m.name).join(', ')} (프로젝트 패널에서 열어 확인하세요)`;
+      set({ statusMessage: msg });
+      return msg;
+    },
+
+    runAutoEdit: async ({ product, hook, onProgress }) => {
+      const say = (m: string) => {
+        set({ statusMessage: m });
+        onProgress?.(m);
+      };
+      const api = window.electronAPI;
+      if (!api?.autoEditAnalyze || !api.autoEditAssign) return '데스크톱 앱에서만 쓸 수 있습니다.';
+      const st = get();
+      if (!st.activeSequenceId) return '먼저 시퀀스를 만들거나 열어 주세요.';
+      if (!(await api.claudeKeyStatus?.())?.hasKey) return 'Claude API 키를 먼저 입력해 주세요.';
+      const caps = st.clips.filter((c) => c.type === 'text' && (c.text || '').trim()).sort((a, b) => a.startTime - b.startTime);
+      if (caps.length === 0) return '자막이 없습니다. 음성으로 자막 생성(STEP 1)과 오타 변환(STEP 2)을 먼저 해 주세요.';
+      const audio = st.clips.filter((c) => c.type === 'audio');
+      const total = Math.max(
+        ...audio.map((c) => c.startTime + c.duration),
+        caps[caps.length - 1].startTime + caps[caps.length - 1].duration
+      );
+      const media = st.assets.filter((a) => a.type === 'video');
+      if (media.length === 0) return '미디어에 원본 영상이 없습니다. 영상을 미디어에 올려 주세요.';
+      const usage = { input: 0, output: 0 };
+      try {
+        // 1) 원본 영상 분석 (이미 분석한 파일은 캐시)
+        say(`원본 영상 ${media.length}개 확인 중...`);
+        const off = api.onAutoEditProgress?.((m) => say(m));
+        const an = await api.autoEditAnalyze({ media: media.map((m) => ({ path: m.path, duration: m.duration })), product });
+        off?.();
+        usage.input += an.usage.input;
+        usage.output += an.usage.output;
+        // 2) 자막 경계로 컷 자리
+        const slots = buildSlotsFromCaptions(caps, total, { hi: shotLenCap(an.shots), fps: st.fps });
+        const hookAsset = hook ? st.assets.find((a) => a.id === hook.assetId) : undefined;
+        const hookSpec = hookAsset && hook ? { path: hookAsset.path, from: hook.from, to: hook.to } : null;
+        if (!hookSpec) slots[0].hook = false; // 후킹 지정이 없으면 첫 컷도 AI 가 고름
+        // 다른 시퀀스(같은 원본으로 만든 다른 광고)에서 쓴 구간 → 되도록 피함
+        const otherClips = st.sequences.filter((s) => s.id !== st.activeSequenceId).flatMap((s) => s.clips || []);
+        const used = usedRangesFromClips(otherClips, an.shots);
+        const capTimes = caps.map((c) => c.startTime);
+        const hookOnly = hookSpec ? fitAssignment(slots.slice(0, 1), [], an.shots, hookSpec, used.ranges, capTimes) : null;
+        const hookUsed = (hookOnly?.clips || []).map((c) => ({
+          shot: c.shot || '',
+          from: +c.srcIn.toFixed(2),
+          to: +(c.srcIn + (c.end - c.start) * c.speed).toFixed(2),
+        }));
+        // 3) Claude 가 컷마다 장면 고르기
+        say(`AI가 컷 ${slots.filter((s) => !s.hook).length}개에 장면을 고르는 중...`);
+        const res = await api.autoEditAssign({ product, shots: an.shots, descs: an.descs, slots, hookUsed, usedElsewhere: used.byShot });
+        usage.input += res.usage.input;
+        usage.output += res.usage.output;
+        // 4) 원본 구간/속도 맞추기 → 타임라인 배치 → 자막을 컷에 맞추기
+        const fitted = fitAssignment(slots, res.assign, an.shots, hookSpec, used.ranges, capTimes);
+        await get().importAutoEditPlan({ format: 'auto-edit-plan/v1', duration: total, clips: fitted.clips });
+        const snap = get().snapAllSubtitlesToClips();
+        // Haiku 5.5 단가: 입력 $0.10 / 출력 $0.50 (100만 토큰당)
+        const cost = (usage.input * 0.1 + usage.output * 0.5) / 1e6;
+        const msg =
+          `AI 자동 배치 완료: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
+          `(새로 분석한 영상 ${an.analyzedFiles}개, 사용량 약 $${cost.toFixed(3)})` +
+          (fitted.warnings.length ? ` · 참고: ${fitted.warnings.slice(0, 3).join(' / ')}` : '');
+        say(msg);
+        return msg;
+      } catch (err) {
+        const msg = `AI 자동 배치 실패: ${(err as Error).message}`;
+        say(msg);
+        return msg;
+      }
     },
 
     snapAllSubtitlesToClips: (customThresholdFrames) => {
