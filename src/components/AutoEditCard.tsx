@@ -36,6 +36,25 @@ export const AutoEditCard: React.FC = () => {
   const videos = assets.filter((a: MediaAsset) => a.type === 'video');
   const activeSequenceId = useEditorStore((s) => s.activeSequenceId);
   const seqHook = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.autoEditHook ?? null);
+  const segs = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.adSegments) || [];
+  const setAdSegments = useEditorStore((s) => s.setAdSegments);
+  const multi = segs.length > 1;
+
+  // 재생헤드 위치에서 광고 구간 나누기 (구간이 없으면 시퀀스 전체를 둘로)
+  const splitAtPlayhead = () => {
+    const st = useEditorStore.getState();
+    const t = st.currentTime;
+    const total = st.getTotalDuration();
+    const base = (st.sequence?.name || 'ad').replace(/[_\s-]*0?\d+$/, '') || 'ad';
+    const cur = segs.length ? segs : [{ id: `seg_${Date.now()}`, name: `${base}_01`, start: 0, end: total, hook: null }];
+    const k = cur.findIndex((g) => t > g.start + 0.5 && t < g.end - 0.5);
+    if (k < 0) {
+      setStatusMessage('재생헤드를 광고 구간 안쪽(경계에서 0.5초 이상 떨어진 곳)에 두고 누르세요.');
+      return;
+    }
+    const next = [...cur.slice(0, k), { ...cur[k], end: t }, { ...cur[k], id: `seg_${Date.now()}_b`, start: t, hook: null }, ...cur.slice(k + 1)];
+    setAdSegments(next.map((g, i) => ({ ...g, name: `${base}_${String(i + 1).padStart(2, '0')}` })));
+  };
 
   useEffect(() => {
     api?.claudeKeyStatus?.().then((s) => setHasKey(s.hasKey));
@@ -193,9 +212,39 @@ export const AutoEditCard: React.FC = () => {
         )}
       </div>
 
+      {/* 광고 구간 */}
+      <div className="space-y-1 border-t border-[#2e2e2e] pt-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#cccccc]">광고 구간: {multi ? `${segs.length}개` : '시퀀스 전체 = 광고 1개'}</span>
+          <span className="flex gap-1">
+            <button onClick={splitAtPlayhead} className={`${btn} bg-[#2b2b2b] text-[#dddddd]`} title="재생헤드 위치에서 광고를 나눔">
+              재생헤드에서 나누기
+            </button>
+            {multi && (
+              <button onClick={() => setAdSegments(null)} className={`${btn} bg-[#2b2b2b] text-[#dddddd]`}>
+                구간 지우기
+              </button>
+            )}
+          </span>
+        </div>
+        {multi && (
+          <div className="bg-[#14161a] border border-[#2e3440] rounded p-1.5 space-y-0.5 max-h-24 overflow-y-auto">
+            {segs.map((g) => (
+              <div key={g.id} className="text-[10px] text-[#cccccc] flex justify-between gap-2">
+                <span className="truncate">{g.name}</span>
+                <span className="text-[#888888] shrink-0">
+                  {g.start.toFixed(1)}~{g.end.toFixed(1)}초 · {g.hook ? `후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : '후킹 AI 선택'}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* 제품 / 후킹 */}
       <div className="space-y-1.5 border-t border-[#2e2e2e] pt-2">
         <input value={product} onChange={(e) => setProduct(e.target.value)} placeholder="제품 설명 (선택, 예: 욕실 흡착 슬리퍼 걸이)" className={input} />
+        {!multi && (<>
         <label className="flex items-center gap-1.5 text-[11px] text-[#cccccc] cursor-pointer">
           <input type="checkbox" checked={useHook} onChange={(e) => setUseHook(e.target.checked)} className="accent-[#2d8ceb]" />
           후킹 장면 지정 (광고주 지정, 안 하면 AI가 고름)
@@ -216,6 +265,7 @@ export const AutoEditCard: React.FC = () => {
             <span className="text-[10px] text-[#777777]">초</span>
           </div>
         )}
+        </>)}
       </div>
 
       <button

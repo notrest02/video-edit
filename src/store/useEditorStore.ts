@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   AlignedSubtitleItem,
+  AdSegment,
   AutoEditPlan,
   EditorTool,
   MediaAsset,
@@ -206,12 +207,14 @@ interface EditorState {
   snapAllSubtitlesToClips: (customThresholdFrames?: number) => SnapResultSummary;
   /** 자동 편집 계획을 지금 시퀀스의 빈 영상/음성 트랙에 올림 (되돌리기 가능). 결과 메시지를 돌려줌 */
   importAutoEditPlan: (plan: AutoEditPlan) => Promise<string>;
+  /** 지금 시퀀스의 광고 구간 저장 (null = 지움 → 시퀀스 전체가 광고 1개) */
+  setAdSegments: (segs: AdSegment[] | null) => void;
   /**
    * 한 음성에 대본 여러 버전이 들어 있을 때: 오타 변환으로 알아낸 버전 구간마다 새 시퀀스를 만들어
    * 그 구간의 음성/자막(그리고 다른 클립)을 0초부터 옮겨 담음. 후킹 지정도 시퀀스에 기억. 지금 시퀀스는 그대로.
    */
   splitVariantsIntoSequences: (
-    ranges: Array<{ variant: number; start: number; end: number; hook: SequenceItem['autoEditHook'] }>
+    ranges: Array<{ variant: number; start: number; end: number; hook: SequenceItem['autoEditHook']; name?: string }>
   ) => string;
   /**
    * AI 자동 배치: 미디어의 영상들을 분석(캐시)하고, 타임라인 자막 경계로 컷 자리를 만들어 Claude 가 장면을 고른 뒤
@@ -2865,6 +2868,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
       return msg;
     },
 
+    setAdSegments: (segs) => {
+      const { activeSequenceId, sequences } = get();
+      if (!activeSequenceId) return;
+      const clean = segs && segs.length ? [...segs].sort((a, b) => a.start - b.start) : undefined;
+      set({
+        sequences: sequences.map((s) => (s.id === activeSequenceId ? { ...s, adSegments: clean } : s)),
+        isDirty: true,
+      });
+    },
+
     splitVariantsIntoSequences: (ranges) => {
       const st = get();
       if (!st.activeSequenceId || ranges.length === 0) return '나눌 버전이 없습니다.';
@@ -2892,7 +2905,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         return {
           ...JSON.parse(JSON.stringify({ ...src, clips: [] })),
           id: `seq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          name: `${base}_${String(r.variant + 1).padStart(2, '0')}`,
+          name: r.name || `${base}_${String(r.variant + 1).padStart(2, '0')}`,
           clips,
           currentTime: 0,
           inPoint: null,
@@ -2925,6 +2938,19 @@ export const useEditorStore = create<EditorState>((set, get) => {
       );
       const media = st.assets.filter((a) => a.type === 'video');
       if (media.length === 0) return '미디어에 원본 영상이 없습니다. 영상을 미디어에 올려 주세요.';
+      // 광고 구간: 저장된 구간이 있으면 구간별로, 없으면 시퀀스 전체가 광고 1개 (UI 의 후킹 지정 사용)
+      const savedSegs = st.sequences.find((s) => s.id === st.activeSequenceId)?.adSegments || [];
+      const resolveHook = (h: AdSegment['hook']) => {
+        if (!h) return null;
+        const byName = media.find((v) => new RegExp(`^${h.fileNo}(\\D|$)`).test(v.name));
+        const a = byName || media[h.fileNo - 1];
+        return a ? { path: a.path, from: h.from, to: h.to } : null;
+      };
+      const hookAssetOne = hook ? st.assets.find((a) => a.id === hook.assetId) : undefined;
+      const segs: Array<{ name: string; start: number; end: number; hook: { path: string; from: number; to: number } | null }> =
+        savedSegs.length > 1
+          ? savedSegs.map((g) => ({ name: g.name, start: g.start, end: g.end, hook: resolveHook(g.hook) }))
+          : [{ name: '', start: 0, end: total, hook: hookAssetOne && hook ? { path: hookAssetOne.path, from: hook.from, to: hook.to } : null }];
       const usage = { input: 0, output: 0 };
       try {
         // 1) 원본 영상 분석 (이미 분석한 파일은 캐시)
@@ -2934,34 +2960,64 @@ export const useEditorStore = create<EditorState>((set, get) => {
         off?.();
         usage.input += an.usage.input;
         usage.output += an.usage.output;
-        // 2) 자막 경계로 컷 자리
-        const slots = buildSlotsFromCaptions(caps, total, { hi: shotLenCap(an.shots), fps: st.fps });
-        const hookAsset = hook ? st.assets.find((a) => a.id === hook.assetId) : undefined;
-        const hookSpec = hookAsset && hook ? { path: hookAsset.path, from: hook.from, to: hook.to } : null;
-        if (!hookSpec) slots[0].hook = false; // 후킹 지정이 없으면 첫 컷도 AI 가 고름
-        // 다른 시퀀스(같은 원본으로 만든 다른 광고)에서 쓴 구간 → 되도록 피함
+        // 2) 광고 구간마다: 자막 경계로 컷 자리 → Claude 배정 → 원본 구간/속도 맞추기
+        //   규칙: 경계에서 반드시 컷(구간마다 따로 계산), 구간 첫 컷 = 그 광고 후킹, 같은 장면 재사용 금지는 광고 안에서만,
+        //   다른 광고(다른 시퀀스 + 앞 구간)에서 쓴 장면은 되도록 피함 — 단 후킹(광고주 지정)은 겹쳐도 됨
+        const hi = shotLenCap(an.shots);
         const otherClips = st.sequences.filter((s) => s.id !== st.activeSequenceId).flatMap((s) => s.clips || []);
-        const used = usedRangesFromClips(otherClips, an.shots);
-        const capTimes = caps.map((c) => c.startTime);
-        const hookOnly = hookSpec ? fitAssignment(slots.slice(0, 1), [], an.shots, hookSpec, used.ranges, capTimes) : null;
-        const hookUsed = (hookOnly?.clips || []).map((c) => ({
-          shot: c.shot || '',
-          from: +c.srcIn.toFixed(2),
-          to: +(c.srcIn + (c.end - c.start) * c.speed).toFixed(2),
-        }));
-        // 3) Claude 가 컷마다 장면 고르기
-        say(`AI가 컷 ${slots.filter((s) => !s.hook).length}개에 장면을 고르는 중...`);
-        const res = await api.autoEditAssign({ product, shots: an.shots, descs: an.descs, slots, hookUsed, usedElsewhere: used.byShot });
-        usage.input += res.usage.input;
-        usage.output += res.usage.output;
-        // 4) 원본 구간/속도 맞추기 → 타임라인 배치 → 자막을 컷에 맞추기
-        const fitted = fitAssignment(slots, res.assign, an.shots, hookSpec, used.ranges, capTimes);
-        await get().importAutoEditPlan({ format: 'auto-edit-plan/v1', duration: total, clips: fitted.clips });
+        const usedOther = usedRangesFromClips(otherClips, an.shots);
+        const allClips: AutoEditPlan['clips'] = [];
+        const warnings: string[] = [];
+        for (let gi = 0; gi < segs.length; gi++) {
+          const g = segs[gi];
+          const segCaps = caps
+            .filter((c) => c.startTime >= g.start - 0.02 && c.startTime < g.end - 0.02)
+            .map((c) => ({ ...c, startTime: c.startTime - g.start }));
+          if (!segCaps.length) continue;
+          const slots = buildSlotsFromCaptions(segCaps, g.end - g.start, { hi, fps: st.fps }).map((s) => ({
+            ...s,
+            start: s.start + g.start,
+            end: s.end + g.start,
+            dur: s.end - s.start,
+            captionStart: s.captionStart + g.start,
+          }));
+          if (!g.hook) slots[0].hook = false; // 후킹 지정이 없으면 첫 컷도 AI 가 고름
+          const prevNonHook = allClips.filter((c) => !c.hook);
+          const usedPrev = usedRangesFromClips(
+            prevNonHook.map((c) => ({ type: 'video' as const, sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })),
+            an.shots
+          );
+          const avoid = [...usedOther.ranges, ...usedPrev.ranges];
+          const capTimes = caps.map((c) => c.startTime);
+          const hookOnly = g.hook ? fitAssignment(slots.slice(0, 1), [], an.shots, g.hook, avoid, capTimes) : null;
+          const hookUsed = (hookOnly?.clips || []).map((c) => ({
+            shot: c.shot || '',
+            from: +c.srcIn.toFixed(2),
+            to: +(c.srcIn + (c.end - c.start) * c.speed).toFixed(2),
+          }));
+          say(`AI가 ${segs.length > 1 ? `광고 ${gi + 1}/${segs.length} (${g.name}) ` : ''}컷 ${slots.filter((s) => !s.hook).length}개에 장면을 고르는 중...`);
+          const res = await api.autoEditAssign({
+            product,
+            shots: an.shots,
+            descs: an.descs,
+            slots,
+            hookUsed,
+            usedElsewhere: [...usedOther.byShot, ...usedPrev.byShot],
+          });
+          usage.input += res.usage.input;
+          usage.output += res.usage.output;
+          const fitted = fitAssignment(slots, res.assign, an.shots, g.hook, avoid, capTimes);
+          allClips.push(...fitted.clips);
+          warnings.push(...fitted.warnings.map((w) => (segs.length > 1 ? `${g.name}: ${w}` : w)));
+        }
+        // 3) 타임라인 배치 → 자막을 컷에 맞추기
+        await get().importAutoEditPlan({ format: 'auto-edit-plan/v1', duration: total, clips: allClips });
         const snap = get().snapAllSubtitlesToClips();
+        const fitted = { clips: allClips, warnings };
         // Haiku 5.5 단가: 입력 $0.10 / 출력 $0.50 (100만 토큰당)
         const cost = (usage.input * 0.1 + usage.output * 0.5) / 1e6;
         const msg =
-          `AI 자동 배치 완료: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
+          `AI 자동 배치 완료${segs.length > 1 ? ` (광고 ${segs.length}개)` : ''}: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
           `(새로 분석한 영상 ${an.analyzedFiles}개, 사용량 약 $${cost.toFixed(3)})` +
           (fitted.warnings.length ? ` · 참고: ${fitted.warnings.slice(0, 3).join(' / ')}` : '');
         say(msg);

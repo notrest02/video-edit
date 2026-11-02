@@ -25,7 +25,18 @@ export interface SequenceItem {
   outPoint?: number | null; // 시퀀스 아웃 지점 (초)
   /** 대본의 후킹 지정 ("3초: 2번 0~3초" → 첫 3초를 2번 영상 0~3초로). AI 자동 배치에 미리 채움 */
   autoEditHook?: { sec: number; fileNo: number; from: number; to: number; note: string } | null;
+  /** 한 시퀀스에 광고 여러 개를 이어 만들 때의 광고 구간 (없으면 시퀀스 전체 = 광고 1개) */
+  adSegments?: AdSegment[];
 }
+
+/** 광고 구간: 한 시퀀스 안의 광고 하나 (오타 변환이 찾은 대본 버전 구간, 손으로 옮길 수 있음) */
+export type AdSegment = {
+  id: string;
+  name: string; // 내보낼 파일 이름 (예: 자동차햇빛차단_01)
+  start: number; // 타임라인 초
+  end: number;
+  hook: { sec: number; fileNo: number; from: number; to: number; note: string } | null;
+};
 
 /**
  * 자동 편집 계획 (format 'auto-edit-plan/v1'): 음성 기준 타임라인 위에 원본 영상 구간을 어디에 놓을지.
@@ -300,6 +311,7 @@ declare global {
       }>;
       createSampleVideo: () => Promise<Omit<MediaAsset, 'id'>>;
       exportVideo: (payload: unknown) => Promise<{ canceled: boolean; outputPath?: string }>;
+      chooseFolderDialog?: (title?: string) => Promise<string | null>;
       onExportProgress: (callback: (progress: number) => void) => () => void;
       saveProjectDialog: (defaultFileName?: string) => Promise<string | null>;
       writeProjectFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;

@@ -28,7 +28,7 @@ export const TopHeader: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   // 렌더 범위: 전체 시퀀스 / 인~아웃 구간
-  const [renderRange, setRenderRange] = useState<'all' | 'inout'>('inout');
+  const [renderRange, setRenderRange] = useState<'all' | 'inout' | 'segments'>('inout');
   const [exportProgress, setExportProgress] = useState(0);
 
   const {
@@ -54,7 +54,10 @@ export const TopHeader: React.FC = () => {
     outPoint,
   } = useEditorStore();
   const hasInOut = inPoint !== null || outPoint !== null;
+  const adSegments = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.adSegments) || [];
+  const hasSegments = adSegments.length > 1;
   const useInOutRange = hasInOut && renderRange === 'inout';
+  const rangeValue = renderRange === 'segments' ? (hasSegments ? 'segments' : 'all') : hasInOut ? renderRange : 'all';
 
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -64,8 +67,84 @@ export const TopHeader: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
+  /** [rangeStart, rangeEnd] 구간을 MP4 로. outputPath 를 주면 저장 창 없이 그 경로로 (광고 구간별 내보내기) */
+  const renderRangeTo = async (rangeStart: number, rangeEnd: number, outputPath?: string) => {
+    const visibleTrackIds = new Set(tracks.filter((t) => t.visible !== false).map((t) => t.id));
+    const audioTracks = tracks.filter((t) => t.type === 'audio');
+    const anySolo = audioTracks.some((t) => t.solo);
+    const activeAudioTrackIds = new Set(audioTracks.filter((t) => (anySolo ? t.solo : !t.muted)).map((t) => t.id));
+    const fullDuration = getTotalDuration();
+    const ranged =
+      rangeStart > 0 || rangeEnd < fullDuration
+        ? (clips.map((c) => clipToRange(c, rangeStart, rangeEnd)).filter(Boolean) as TimelineClip[])
+        : clips;
+    const pick = (type: 'video' | 'audio', ok: (c: TimelineClip) => boolean) =>
+      ranged
+        .filter((c) => c.type === type && ok(c) && c.sourcePath)
+        .map((c) => ({
+          id: c.id,
+          sourcePath: c.sourcePath!,
+          startTime: c.startTime,
+          duration: c.duration,
+          sourceStart: c.sourceStart,
+          speed: c.speed && c.speed > 0 ? c.speed : 1,
+          volume: c.volume,
+          muted: c.muted,
+        }));
+    const outW = sequence.width || 1920;
+    const outH = sequence.height || 1080;
+    await ensureFontsForValues(ranged.map((c) => c.fontFamily));
+    await ensureGdiClipsReady(ranged.filter((c) => c.type === 'text'));
+    const subtitleOverlays = ranged
+      .filter((c) => c.type === 'text' && visibleTrackIds.has(c.trackId) && c.text && c.text.trim().length > 0)
+      .map((c) => ({ id: c.id, startTime: c.startTime, endTime: c.startTime + c.duration, pngDataUrl: renderSubtitleClipToPngDataUrl(c, outW, outH) }))
+      .filter((s) => s.pngDataUrl.length > 0);
+    return window.electronAPI!.exportVideo({
+      videoClips: pick('video', (c) => visibleTrackIds.has(c.trackId)),
+      audioClips: pick('audio', (c) => activeAudioTrackIds.has(c.trackId)),
+      subtitleOverlays,
+      totalDuration: rangeEnd - rangeStart,
+      fps: sequence.fps || fps,
+      width: outW,
+      height: outH,
+      outputPath,
+    });
+  };
+
+  /** 광고 구간마다 파일 하나씩: 저장 폴더 한 번 고르고 <구간 이름>.mp4 로 */
+  const handleExportSegments = async () => {
+    if (!window.electronAPI?.chooseFolderDialog || !hasSegments) return;
+    if (clips.length === 0) {
+      setStatusMessage('내보낼 클립이 타임라인에 없습니다.');
+      return;
+    }
+    const folder = await window.electronAPI.chooseFolderDialog('광고 구간별 MP4 저장 폴더');
+    if (!folder) return;
+    setIsExporting(true);
+    const done: string[] = [];
+    try {
+      for (let i = 0; i < adSegments.length; i++) {
+        const g = adSegments[i];
+        setExportProgress(1);
+        setStatusMessage(`광고 ${i + 1}/${adSegments.length} (${g.name}) 내보내는 중...`);
+        const res = await renderRangeTo(g.start, g.end, `${folder}\\${g.name}.mp4`);
+        if (res.outputPath) done.push(res.outputPath);
+      }
+      setStatusMessage(`광고 ${done.length}개 내보내기 완료: ${folder}`);
+    } catch (err: any) {
+      setStatusMessage(`광고 구간별 내보내기 실패 (${done.length}개 완료): ${err.message}`);
+    } finally {
+      setIsExporting(false);
+      setExportProgress(0);
+    }
+  };
+
   const handleExportMp4 = async () => {
     if (!window.electronAPI) return;
+    if (renderRange === 'segments' && hasSegments) {
+      await handleExportSegments();
+      return;
+    }
     const visibleTrackIds = new Set(tracks.filter((t) => t.visible !== false).map((t) => t.id));
     const audioTracks = tracks.filter((t) => t.type === 'audio');
     const anySolo = audioTracks.some((t) => t.solo);
@@ -278,8 +357,8 @@ export const TopHeader: React.FC = () => {
       {/* 우측: 빠른 클립-자막 맞춤 & 워크스페이스/내보내기 */}
       <div className="flex items-center gap-2.5">
         <select
-          value={hasInOut ? renderRange : 'all'}
-          onChange={(e) => setRenderRange(e.target.value as 'all' | 'inout')}
+          value={rangeValue}
+          onChange={(e) => setRenderRange(e.target.value as 'all' | 'inout' | 'segments')}
           disabled={isExporting}
           title="렌더 범위 (타임라인에서 I / O 키로 인·아웃 지점 지정)"
           className="bg-[#262626] border border-[#3a3a3a] rounded px-1.5 py-1 text-[11px] text-[#dddddd] focus:outline-none"
@@ -287,6 +366,9 @@ export const TopHeader: React.FC = () => {
           <option value="all">전체</option>
           <option value="inout" disabled={!hasInOut}>
             인~아웃{hasInOut ? '' : ' (없음)'}
+          </option>
+          <option value="segments" disabled={!hasSegments}>
+            광고 구간별{hasSegments ? ` (${adSegments.length}개)` : ' (없음)'}
           </option>
         </select>
 

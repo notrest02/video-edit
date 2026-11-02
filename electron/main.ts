@@ -322,6 +322,13 @@ ipcMain.handle(
 );
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
 
+// 폴더 고르기 (광고 구간별 내보내기 저장 위치 등)
+ipcMain.handle('dialog:chooseFolder', async (_e, title?: string) => {
+  if (!mainWindow) return null;
+  const r = await dialog.showOpenDialog(mainWindow, { title: title || '폴더 선택', properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+});
+
 // 폴더에서 영상 가져오기: 폴더를 고르면 영상 파일 경로 목록
 ipcMain.handle('dialog:openMediaFolder', async () => {
   if (!mainWindow) return null;
@@ -1035,21 +1042,24 @@ ipcMain.handle(
       fps: number;
       width: number;
       height: number;
+      /** 지정하면 저장 창 없이 이 경로로 (광고 구간별 내보내기) */
+      outputPath?: string;
     }
   ) => {
     if (!mainWindow) return { canceled: true };
 
-    const saveRes = await dialog.showSaveDialog(mainWindow, {
-      title: '편집된 동영상 내보내기 (MP4)',
-      defaultPath: `antigravity_edit_${Date.now()}.mp4`,
-      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
-    });
-
-    if (saveRes.canceled || !saveRes.filePath) {
-      return { canceled: true };
+    let outputPath = payload.outputPath;
+    if (!outputPath) {
+      const saveRes = await dialog.showSaveDialog(mainWindow, {
+        title: '편집된 동영상 내보내기 (MP4)',
+        defaultPath: `antigravity_edit_${Date.now()}.mp4`,
+        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+      });
+      if (saveRes.canceled || !saveRes.filePath) {
+        return { canceled: true };
+      }
+      outputPath = saveRes.filePath;
     }
-
-    const outputPath = saveRes.filePath;
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'agy_export_'));
 
     try {

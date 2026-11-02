@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openScriptFileDialog: () => ipcRenderer.invoke('dialog:openScriptFile'),
   openAutoEditPlanDialog: () => ipcRenderer.invoke('dialog:openAutoEditPlan'),
   openMediaFolderDialog: () => ipcRenderer.invoke('dialog:openMediaFolder'),
+  chooseFolderDialog: (title?: string) => ipcRenderer.invoke('dialog:chooseFolder', title),
   claudeKeyStatus: () => ipcRenderer.invoke('claude:keyStatus'),
   claudeSaveKey: (key: string) => ipcRenderer.invoke('claude:saveKey', key),
   claudeTestKey: () => ipcRenderer.invoke('claude:testKey'),

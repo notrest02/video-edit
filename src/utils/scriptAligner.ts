@@ -454,6 +454,127 @@ export function parseScriptBlocks(raw: string): ScriptBlock[] {
   return blocks;
 }
 
+const normChars = (s: string) => s.replace(/[^가-힣0-9a-zA-Z]/g, '');
+
+/**
+ * 받아쓰기 자막 전체 글자 ↔ 대본 전체 글자를 한 번에 정렬(편집 거리)해서 대본 단어마다 어느 자막에 속하는지 정한다.
+ * 자막 하나가 아무리 길어도(받아쓰기가 20초를 한 문장으로 묶어도) 밀리지 않는다. (2026-11-02 test_file 33초 밀림 수정)
+ * 반환: 단어별 자막 번호, 편집 거리(작을수록 잘 맞음)
+ */
+function alignScriptWordsToCaptions(
+  capTexts: string[],
+  scriptWords: string[],
+  wantTrace = true
+): { dist: number; wordCap: number[] } {
+  const capChars: number[] = []; // 받아쓰기 글자 → 자막 번호
+  let a = '';
+  capTexts.forEach((t, i) => {
+    const n = normChars(t);
+    a += n;
+    for (let k = 0; k < n.length; k++) capChars.push(i);
+  });
+  const wordOfChar: number[] = [];
+  let b = '';
+  scriptWords.forEach((w, i) => {
+    const n = normChars(w);
+    b += n;
+    for (let k = 0; k < n.length; k++) wordOfChar.push(i);
+  });
+  const n = a.length;
+  const m = b.length;
+  if (!n || !m) return { dist: Math.max(n, m), wordCap: scriptWords.map(() => 0) };
+  // 편집 거리 DP (한 줄씩), 역추적용 방향만 저장 (0=대각, 1=받아쓰기 글자 건너뜀, 2=대본 글자 건너뜀)
+  let prev = new Int32Array(m + 1);
+  let cur = new Int32Array(m + 1);
+  for (let j = 0; j <= m; j++) prev[j] = j;
+  const dir = wantTrace ? new Uint8Array((n + 1) * (m + 1)) : null;
+  if (dir) for (let j = 1; j <= m; j++) dir[j] = 2;
+  for (let i = 1; i <= n; i++) {
+    cur[0] = i;
+    if (dir) dir[i * (m + 1)] = 1;
+    const ai = a.charCodeAt(i - 1);
+    for (let j = 1; j <= m; j++) {
+      const diag = prev[j - 1] + (ai === b.charCodeAt(j - 1) ? 0 : 1);
+      const up = prev[j] + 1;
+      const left = cur[j - 1] + 1;
+      let v = diag;
+      let d = 0;
+      if (up < v) {
+        v = up;
+        d = 1;
+      }
+      if (left < v) {
+        v = left;
+        d = 2;
+      }
+      cur[j] = v;
+      if (dir) dir[i * (m + 1) + j] = d;
+    }
+    [prev, cur] = [cur, prev];
+  }
+  const dist = prev[m];
+  if (!dir) return { dist, wordCap: [] };
+  // 역추적: 대본 글자마다 짝이 된(또는 바로 앞) 받아쓰기 글자의 자막
+  const charCap = new Int32Array(m).fill(-1);
+  let i = n;
+  let j = m;
+  while (j > 0) {
+    const d = i > 0 ? dir[i * (m + 1) + j] : 2;
+    if (d === 0) {
+      charCap[j - 1] = capChars[i - 1];
+      i--;
+      j--;
+    } else if (d === 1) {
+      i--;
+    } else {
+      charCap[j - 1] = i > 0 ? capChars[i - 1] : 0;
+      j--;
+    }
+  }
+  // 단어 → 글자들이 가장 많이 속한 자막 (자막 순서가 뒤집히지 않게 앞 단어보다 작아지지 않음)
+  const wordCap: number[] = [];
+  let k = 0;
+  for (let w = 0; w < scriptWords.length; w++) {
+    const votes = new Map<number, number>();
+    while (k < m && wordOfChar[k] === w) {
+      votes.set(charCap[k], (votes.get(charCap[k]) || 0) + 1);
+      k++;
+    }
+    let best = wordCap.length ? wordCap[wordCap.length - 1] : 0;
+    let bestV = -1;
+    for (const [c, v] of votes) if (v > bestV || (v === bestV && c < best)) [best, bestV] = [c, v];
+    wordCap.push(Math.max(best, wordCap.length ? wordCap[wordCap.length - 1] : 0));
+  }
+  return { dist, wordCap };
+}
+
+/** 정렬 결과로 자막별 변환 결과 만들기 */
+function diffsFromAlignment(
+  sortedSubs: TimelineClip[],
+  scriptWords: string[],
+  wordCap: number[],
+  wordOwner?: number[]
+): CaptionDiffItem[] {
+  return sortedSubs.map((sub, i) => {
+    const idx = scriptWords.map((_, w) => w).filter((w) => wordCap[w] === i);
+    const before = (sub.text || '').trim();
+    const after = idx.length ? idx.map((w) => scriptWords[w]).join(' ') : before;
+    const owners = idx.map((w) => wordOwner?.[w]).filter((x): x is number => x !== undefined);
+    const variant = owners.length ? owners[Math.floor(owners.length / 2)] : undefined;
+    return {
+      clipId: sub.id,
+      index: i + 1,
+      startTime: sub.startTime,
+      endTime: sub.startTime + sub.duration,
+      beforeText: before,
+      afterText: after,
+      similarity: idx.length ? computePhoneticSimilarity(before, after) : 0,
+      isChanged: before !== after,
+      variant,
+    };
+  });
+}
+
 /**
  * [STEP 2 핵심 알고리즘]
  * 이미 생성된 AI 자막 캡션들과 사용자가 제공한 대본을 비교해, 캡션 타임스탬프는 유지하고 오타만 대본 글자로 변환.
@@ -465,15 +586,18 @@ export function compareAndCorrectCaptionsWithScript(
   subtitleClips: TimelineClip[],
   rawScript: string
 ): CaptionDiffItem[] {
+  const sortedSubs = [...subtitleClips].sort((x, y) => x.startTime - y.startTime);
   const blocks = parseScriptBlocks(rawScript);
-  if (blocks.length <= 1) {
-    return compareCaptionsSequential(subtitleClips, blocks[0]?.text ?? rawScript).diffs.map((d) => ({
-      ...d,
-      variant: blocks.length ? 0 : undefined,
-    }));
+  if (!sortedSubs.length || !blocks.length) return [];
+  // 대본 1개이고 줄 수 = 자막 수면 예전처럼 1:1
+  if (blocks.length === 1) {
+    const lines = rawScript.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === sortedSubs.length) return compareCaptionsSequential(sortedSubs, rawScript).diffs;
   }
+  const capTexts = sortedSubs.map((c) => c.text || '');
+  const totalSubChars = Math.max(1, normChars(capTexts.join('')).length);
   const n = blocks.length;
-  // 순서 있는 부분집합 (버전 6개까지: 최대 1956가지)
+  // 순서 있는 부분집합 (버전 6개까지)
   const orders: number[][] = [];
   const rec = (cur: number[]) => {
     if (cur.length) orders.push([...cur]);
@@ -482,36 +606,28 @@ export function compareAndCorrectCaptionsWithScript(
   };
   if (n <= 6) rec([]);
   else orders.push(blocks.map((_, k) => k));
-  const totalSubChars = Math.max(1, subtitleClips.reduce((a, c) => a + (c.text || '').replace(/\s+/g, '').length, 0));
-  let best: { score: number; order: number[]; res: ReturnType<typeof compareCaptionsSequential> } | null = null;
+  const wordsOf = (order: number[]) => {
+    const words: string[] = [];
+    const owner: number[] = [];
+    for (const k of order)
+      for (const w of blocks[k].text.trim().split(/\s+/).filter(Boolean)) {
+        words.push(w);
+        owner.push(k);
+      }
+    return { words, owner };
+  };
+  let best: { dist: number; order: number[] } | null = null;
   for (const order of orders) {
-    const text = order.map((k) => blocks[k].text).join(' ');
-    const scriptChars = text.replace(/\s+/g, '').length;
-    if (scriptChars < totalSubChars * 0.6 || scriptChars > totalSubChars * 1.6) continue; // 길이가 너무 다르면 건너뜀
-    const res = compareCaptionsSequential(subtitleClips, text, false);
-    let w = 0;
-    let acc = 0;
-    for (const d of res.diffs) {
-      const len = Math.max(1, d.beforeText.replace(/\s+/g, '').length);
-      acc += d.similarity * len;
-      w += len;
-    }
-    const lenFit = 1 - Math.min(1, Math.abs(scriptChars - totalSubChars) / totalSubChars);
-    const score = acc / Math.max(1, w) + 0.1 * lenFit;
-    if (!best || score > best.score) best = { score, order, res };
+    const { words } = wordsOf(order);
+    const chars = normChars(words.join('')).length;
+    if (chars < totalSubChars * 0.5 || chars > totalSubChars * 1.8) continue; // 길이가 너무 다르면 건너뜀
+    const { dist } = alignScriptWordsToCaptions(capTexts, words, false);
+    if (!best || dist < best.dist) best = { dist, order };
   }
-  if (!best) {
-    return compareCaptionsSequential(subtitleClips, blocks.map((b) => b.text).join(' '), false).diffs;
-  }
-  // 각 캡션이 어느 버전 대사를 썼는지 (토큰 범위 → 버전)
-  const owner: number[] = [];
-  for (const k of best.order) for (const _ of blocks[k].text.trim().split(/\s+/).filter(Boolean)) owner.push(k);
-  const b = best;
-  return b.res.diffs.map((d, i) => {
-    const [t0, t1] = b.res.ranges[i] ?? [0, 0];
-    const mid = Math.min(owner.length - 1, Math.max(0, Math.floor((t0 + Math.max(t0, t1 - 1)) / 2)));
-    return { ...d, variant: owner.length ? owner[mid] : undefined };
-  });
+  const order = best ? best.order : blocks.map((_, k) => k);
+  const { words, owner } = wordsOf(order);
+  const { wordCap } = alignScriptWordsToCaptions(capTexts, words, true);
+  return diffsFromAlignment(sortedSubs, words, wordCap, n > 1 ? owner : owner.map(() => 0));
 }
 
 /**

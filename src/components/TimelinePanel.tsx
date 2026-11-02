@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { AdSegmentBands } from './AdSegmentBands';
 import {
   MousePointer,
   Scissors,
@@ -1092,6 +1093,9 @@ export const TimelinePanel: React.FC = () => {
                     <div className="absolute bottom-0 left-0 h-2 w-[1px] bg-[#555555]" />
                   </div>
                 ))}
+
+                {/* 광고 구간 띠 (한 시퀀스에 광고 여러 개) */}
+                <AdSegmentBands zoomPxPerSec={zoomPxPerSec} />
 
                 {/* 인/아웃 구간 표시 (I / O 키, Ctrl+Shift+X 로 지우기) */}
                 {(inPoint !== null || outPoint !== null) && (

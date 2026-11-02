@@ -69,6 +69,7 @@ export const LeftSidebar: React.FC = () => {
     reformatAllCaptionsLineLayout,
     importAutoEditPlan,
     splitVariantsIntoSequences,
+    setAdSegments,
     replaceClipWithSegments,
     addRawAiCaptions,
     applyScriptCorrectionsToCaptions,
@@ -255,7 +256,7 @@ export const LeftSidebar: React.FC = () => {
   };
 
   // [STEP 2 - 기존] 생성된 AI 캡션 구간은 유지한 채 내 대본과 비교해 오타만 변환 실행!
-  const handleRunStep2CompareAndConvert = () => {
+  const handleRunStep2CompareAndConvert = async () => {
     if (subtitleClips.length === 0) {
       setStatusMessage(
         '먼저 [1. AI 캡션 생성]에서 오디오 파일로 AI 초벌 자막을 생성해 주세요!'
@@ -284,14 +285,48 @@ export const LeftSidebar: React.FC = () => {
         runs.push({ variant: d.variant, start: runs.length ? d.startTime : 0, end: audioEnd, hook: blocks[d.variant]?.hook ?? null });
       }
     }
-    setVariantRuns(runs.length > 1 ? runs : []);
-    applyScriptCorrectionsToCaptions(
+    // 오타 변환 적용 (자동 분할이 켜져 있으면 대본 글자로 다시 13자 나눔) — 경계를 정확히 잡으려고 먼저 적용
+    await applyScriptCorrectionsToCaptions(
       diffs.map((d) => ({
         clipId: d.clipId,
         beforeText: d.beforeText,
         afterText: d.afterText,
       }))
     );
+    // 받아쓰기가 두 광고를 한 문장으로 묶은 경우(예: '…난리예요 남편 얼굴 보고…') 경계가 늦게 잡히므로,
+    // 다시 나눈 자막에서 각 대본 첫머리가 시작하는 자막을 찾아 경계로 씀
+    if (runs.length > 1) {
+      const norm = (t: string) => (t || '').replace(/[^가-힣0-9a-zA-Z]/g, '');
+      const caps = useEditorStore
+        .getState()
+        .clips.filter((c) => c.type === 'text')
+        .sort((a, b) => a.startTime - b.startTime);
+      for (let i = 1; i < runs.length; i++) {
+        const head = norm(blocks[runs[i].variant]?.text || '').slice(0, 6);
+        if (head.length < 3) continue;
+        const from = runs[i - 1].start + 0.5;
+        const hit = caps.find((c) => c.startTime > from && norm(c.text || '').startsWith(head));
+        if (hit && Math.abs(hit.startTime - runs[i].start) < 30) runs[i].start = hit.startTime;
+      }
+      for (let i = 0; i + 1 < runs.length; i++) runs[i].end = runs[i + 1].start;
+    }
+    setVariantRuns(runs.length > 1 ? runs : []);
+    // 광고 구간으로 저장 (한 시퀀스에 광고 여러 개). 안쪽 경계는 자막보다 3프레임 앞 = 컷 위치 (편집자 방식)
+    if (runs.length > 1) {
+      const st = useEditorStore.getState();
+      const seqName = st.sequence?.name || 'ad';
+      const base = seqName.replace(/[_\s-]*0?\d+$/, '') || seqName;
+      const lead = 3 / Math.max(1, fps);
+      setAdSegments(
+        runs.map((r, i) => ({
+          id: `seg_${Date.now()}_${i}`,
+          name: `${base}_${String(r.variant + 1).padStart(2, '0')}`,
+          start: i === 0 ? 0 : Math.max(0, r.start - lead),
+          end: i === runs.length - 1 ? r.end : Math.max(0, runs[i + 1].start - lead),
+          hook: r.hook,
+        }))
+      );
+    }
   };
 
   // 무음 구간 자동 컷 편집
@@ -726,16 +761,25 @@ export const LeftSidebar: React.FC = () => {
               {variantRuns.length > 1 && (
                 <div className="bg-[#14161a] border border-[#2e3440] rounded p-2 space-y-1.5">
                   <div className="text-[11px] text-[#aaaaaa]">
-                    음성에서 대본 {variantRuns.length}개를 찾았습니다 (음성 순서):{' '}
+                    음성에서 대본 {variantRuns.length}개를 찾아 <strong>광고 구간</strong>으로 저장했습니다 (타임라인 위 색 띠, 경계는
+                    끌어서 옮길 수 있음). 음성 순서:{' '}
                     {variantRuns
                       .map((r) => `대본${r.variant + 1} ${formatFullTimecode(r.start, fps).slice(3)}~${formatFullTimecode(r.end, fps).slice(3)}${r.hook ? ` · 후킹 ${r.hook.fileNo}번 ${r.hook.from}~${r.hook.to}초` : ''}`)
                       .join(' / ')}
                   </div>
                   <button
-                    onClick={() => splitVariantsIntoSequences(variantRuns)}
+                    onClick={() => {
+                      const st = useEditorStore.getState();
+                      const segs = st.sequences.find((q) => q.id === st.activeSequenceId)?.adSegments;
+                      splitVariantsIntoSequences(
+                        segs && segs.length > 1
+                          ? segs.map((g, i) => ({ variant: i, start: g.start, end: g.end, hook: g.hook, name: g.name }))
+                          : variantRuns
+                      );
+                    }}
                     className="w-full py-1.5 px-3 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white font-semibold text-[11px] rounded transition"
                   >
-                    버전별 시퀀스 만들기 ({variantRuns.length}개)
+                    (선택) 버전별 시퀀스로 나누기 ({variantRuns.length}개)
                   </button>
                 </div>
               )}
