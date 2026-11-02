@@ -1,6 +1,6 @@
 {
   "name": "antigravity-video-editor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Antigravity",
   "description": "AI-powered Desktop Video Editor with Script Forced Alignment and Frame-accurate Subtitle Snapping",
   "main": "dist-electron/main.cjs",
