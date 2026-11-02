@@ -95,7 +95,9 @@ export function drawSubtitleClip(
   const posXRatio = (clip.positionX ?? 50) / 100;
   const posYRatio = (clip.positionY ?? 86) / 100;
   const centerX = width * posXRatio;
-  const centerY = height * posYRatio;
+  // 세로 기준점: 위쪽/아래쪽 끝 기준이면 상자 높이 절반만큼 옮겨 가운데를 구함
+  const boxHalf = (totalTextHeight + Math.round(4 * scaleRatio) * 2) / 2;
+  const centerY = height * posYRatio + (clip.anchorY === 'top' ? boxHalf : clip.anchorY === 'bottom' ? -boxHalf : 0);
   const startY = centerY - totalTextHeight / 2 + lineHeight / 2;
 
   let maxLineWidth = 0;

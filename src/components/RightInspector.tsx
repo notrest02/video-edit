@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { MotionPanel, TextMotionPanel } from './MotionPanel';
+import { SequenceAutoMask } from './SequenceAutoMask';
 import { BlurMaskPanel } from './BlurMaskPanel';
 import {
   Type,
@@ -327,7 +328,10 @@ export const RightInspector: React.FC = () => {
       {tab === 'motion' && (
         <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-[#181818]">
           {!selectedClip || (selectedClip.type !== 'video' && selectedClip.type !== 'text') ? (
-            <p className="text-xs text-[#999999] text-center pt-10">영상 또는 자막 클립을 선택하면 모션과 키프레임이 여기에 크게 보입니다.</p>
+            <>
+              <p className="text-xs text-[#999999] text-center pt-10">영상 또는 자막 클립을 선택하면 모션과 키프레임이 여기에 크게 보입니다.</p>
+              <SequenceAutoMask />
+            </>
           ) : selectedClip.type === 'video' ? (
             <>
               <MotionPanel clip={selectedClip} wide />
@@ -1075,6 +1079,50 @@ export const RightInspector: React.FC = () => {
                   )}
                 </div>
 
+                {/* 정렬: 위 / 가운데 / 아래 (상자 끝을 안전 여백에 맞춤) + 모든 자막에 적용 */}
+                <div className="pt-1 border-t border-[#252525] space-y-1">
+                  <div className="flex items-center gap-1">
+                    <span className="text-[#999999] text-[10px] w-9 shrink-0">정렬</span>
+                    {([
+                      ['top', '상단', 8, '자막 상자 위쪽 끝을 화면 위 8%에 (두 줄이면 아래로 늘어남)'],
+                      ['center', '중간', 50, '자막 상자 가운데를 화면 가운데에'],
+                      ['bottom', '하단', 92, '자막 상자 아래쪽 끝을 화면 아래 8%에 (두 줄이면 위로 늘어남)'],
+                    ] as const).map(([a, label, y, tip]) => {
+                      const on = (selectedClip.anchorY ?? 'center') === a && Math.abs((selectedClip.positionY ?? 86) - y) < 0.5;
+                      return (
+                        <button
+                          key={a}
+                          onClick={() => updateClip(selectedClip.id, { anchorY: a, positionY: y }, true)}
+                          title={tip}
+                          className={`flex-1 py-0.5 rounded text-[10px] border ${on ? 'bg-[#2d8ceb] border-[#2d8ceb] text-white' : 'bg-[#242933] border-[#3b4454] text-[#cccccc] hover:bg-[#2e3542]'}`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                    <button
+                      onClick={() => updateClip(selectedClip.id, { positionX: 50 }, true)}
+                      title="가로 가운데"
+                      className={`flex-1 py-0.5 rounded text-[10px] border ${(selectedClip.positionX ?? 50) === 50 ? 'bg-[#2d8ceb]/30 border-[#2d8ceb] text-white' : 'bg-[#242933] border-[#3b4454] text-[#cccccc] hover:bg-[#2e3542]'}`}
+                    >
+                      가로 가운데
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const st = useEditorStore.getState();
+                      const pos = { positionX: selectedClip.positionX ?? 50, positionY: selectedClip.positionY ?? 86, anchorY: selectedClip.anchorY ?? 'center' };
+                      const targets = st.clips.filter((c) => c.type === 'text' && c.id !== selectedClip.id);
+                      targets.forEach((c, i) => st.updateClip(c.id, pos, i === 0));
+                      st.setStatusMessage(`자막 위치(가로 ${pos.positionX}% · 세로 ${pos.positionY}% · ${pos.anchorY === 'top' ? '위쪽 끝' : pos.anchorY === 'bottom' ? '아래쪽 끝' : '가운데'} 기준)를 자막 클립 ${targets.length}개에 적용했습니다.`);
+                    }}
+                    className="w-full py-1 rounded bg-[#242933] hover:bg-[#2e3542] border border-[#3b4454] text-[#dddddd] text-[10px]"
+                    title="지금 자막의 가로·세로 위치와 정렬 기준을 이 시퀀스의 모든 자막 클립에 적용"
+                  >
+                    이 위치를 모든 자막 클립에 적용
+                  </button>
+                </div>
+
                 {/* 수평 / 수직 위치 */}
                 <div className="pt-1 border-t border-[#252525] grid grid-cols-2 gap-2">
                   <div className="space-y-0.5">
@@ -1097,7 +1145,9 @@ export const RightInspector: React.FC = () => {
                   </div>
                   <div className="space-y-0.5">
                     <div className="flex justify-between">
-                      <span className="text-[#999999] text-[10px]">세로 위치 (Y)</span>
+                      <span className="text-[#999999] text-[10px]">
+                        세로 위치 (Y){selectedClip.anchorY === 'top' ? ' · 위쪽 끝' : selectedClip.anchorY === 'bottom' ? ' · 아래쪽 끝' : ''}
+                      </span>
                       <span className="font-mono text-[#cccccc]">
                         {selectedClip.positionY ?? 86}%
                       </span>

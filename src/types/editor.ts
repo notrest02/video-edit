@@ -187,6 +187,8 @@ export interface TimelineClip {
   backgroundPaddingY?: number;// 배경 상하 패딩 (px)
   positionX?: number;         // 수평 위치 5 ~ 95 (%)
   positionY?: number;         // 수직 위치 5 ~ 95 (%)
+  /** 세로 기준점: positionY 가 자막 상자의 위쪽 끝/가운데/아래쪽 끝 (기본 가운데). 위쪽이면 두 줄이 아래로, 아래쪽이면 위로 늘어남 */
+  anchorY?: 'top' | 'center' | 'bottom';
   snappedToClip?: boolean;    // 클립 경계에 스냅되었는지 표시
   needsReview?: boolean;      // 대본+파형 정렬기가 확신하지 못한 자막 (타임라인에 검토 표시)
   alignConfidence?: number;   // 0~1, 해당 구간 Whisper 텍스트와 대본 일치도
@@ -296,6 +298,7 @@ declare global {
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
+      textMaskCancel?: () => Promise<void>;
       textMaskAnalyze?: (params: { path: string; width: number; height: number }) => Promise<{ tracks: AutoTextTrack[]; cached: boolean }>;
       onTextMaskProgress?: (callback: (msg: string) => void) => () => void;
       getSystemFonts: (forceRefresh?: boolean) => Promise<SystemFontItem[]>;

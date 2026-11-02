@@ -12,7 +12,7 @@ import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
 import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
-import { analyzeText } from './textDetector';
+import { analyzeText, cancelTextAnalyze } from './textDetector';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
@@ -325,6 +325,7 @@ ipcMain.handle(
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
 
 // 자동 마스크: 원본에 박힌 글자 찾기 (로컬 모델, 원본별 저장)
+ipcMain.handle('textMask:cancel', () => cancelTextAnalyze());
 ipcMain.handle('textMask:analyze', async (e, p: { path: string; width: number; height: number }) =>
   analyzeText(resolvedFfmpegPath, p.path, p.width, p.height, (msg) => e.sender.send('textMask:progress', msg))
 );

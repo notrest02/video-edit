@@ -108,7 +108,16 @@ export function tracksToMasks(
   const masks: BlurMask[] = [];
   for (const tr of tracks) {
     if (tr.end <= s0 || tr.start >= s1) continue;
-    const inside = tr.samples.filter((p) => p.t >= s0 - 0.2 && p.t <= s1 + 0.2);
+    // 같은 순간에 조각으로 잡힌 상자(밝은 배경에서 한 줄이 '封闭道' + '全拍摄' 로 나뉨 등)는 하나로 합침
+    const byT = new Map<string, { t: number; box: [number, number, number, number] }>();
+    for (const p of tr.samples) {
+      if (p.t < s0 - 0.2 || p.t > s1 + 0.2) continue;
+      const k = p.t.toFixed(3);
+      const o = byT.get(k);
+      if (!o) byT.set(k, { t: p.t, box: [...p.box] as [number, number, number, number] });
+      else o.box = [Math.min(o.box[0], p.box[0]), Math.min(o.box[1], p.box[1]), Math.max(o.box[2], p.box[2]), Math.max(o.box[3], p.box[3])];
+    }
+    const inside = [...byT.values()].sort((a, b) => a.t - b.t);
     if (!inside.length) continue;
     const from = Math.max(0, (tr.start - s0) / sp);
     const to = Math.min(clip.duration, (tr.end - s0) / sp);
@@ -122,7 +131,23 @@ export function tracksToMasks(
     const mh = med(inside.map((p) => p.box[3] - p.box[1]));
     const dx = Math.max(...cx) - Math.min(...cx);
     const dy = Math.max(...cy) - Math.min(...cy);
-    const moving = (dx > 0.03 && dx > mw * 0.5) || (dy > 0.03 && dy > mh * 0.5);
+    // 왔다갔다(방향이 두 번 이상 바뀜) 하면 따라가지 않고, 움직이는 범위 전체를 고정 마스크 하나로 가림
+    const reversals = (v: number[], th: number) => {
+      let dir = 0;
+      let anchor = v[0];
+      let n = 0;
+      for (const x of v) {
+        const d = x - anchor;
+        if (Math.abs(d) < th) continue;
+        const sd = Math.sign(d);
+        if (dir && sd !== dir) n++;
+        dir = sd;
+        anchor = x;
+      }
+      return n;
+    };
+    const oscillating = reversals(cx, Math.max(0.02, mw * 0.25)) >= 2 || reversals(cy, Math.max(0.02, mh * 0.25)) >= 2;
+    const moving = !oscillating && ((dx > 0.03 && dx > mw * 0.5) || (dy > 0.03 && dy > mh * 0.5));
     const union: [number, number, number, number] = [
       Math.min(...inside.map((p) => p.box[0])),
       Math.min(...inside.map((p) => p.box[1])),

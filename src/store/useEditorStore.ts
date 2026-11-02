@@ -1161,6 +1161,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         backgroundPaddingY: sourceClip.backgroundPaddingY,
         positionX: sourceClip.positionX,
         positionY: sourceClip.positionY,
+        anchorY: sourceClip.anchorY,
       };
 
       pushHistory();
@@ -1875,6 +1876,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           'backgroundPaddingY',
           'positionX',
           'positionY',
+          'anchorY',
         ];
 
         const sharedStylePatch: Partial<TimelineClip> = {};

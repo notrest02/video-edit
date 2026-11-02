@@ -174,6 +174,18 @@ const textSim = (a: string, b: string) => {
   return hit / Math.max(a.length, b.length);
 };
 
+// 분석 취소 (시퀀스 전체 자동 마스크 중 [취소])
+let currentProc: ReturnType<typeof spawn> | null = null;
+let cancelled = false;
+export function cancelTextAnalyze() {
+  cancelled = true;
+  try {
+    currentProc?.kill();
+  } catch {
+    /* 이미 끝남 */
+  }
+}
+
 export async function analyzeText(
   ffmpegPath: string,
   file: string,
@@ -186,6 +198,7 @@ export async function analyzeText(
   const cachePath = path.join(cacheDir(), `${key}.json`);
   if (fs.existsSync(cachePath)) return { tracks: JSON.parse(fs.readFileSync(cachePath, 'utf8')), cached: true };
 
+  cancelled = false;
   await ensureModels(onProgress);
   const s = await load();
   // 분석 크기: 긴 쪽 960, 32의 배수
@@ -207,9 +220,11 @@ export async function analyzeText(
   const proc = spawn(ffmpegPath, ['-v', 'error', '-i', file, '-vf', `fps=${1 / STEP},scale=${W}:${H}`, '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'], {
     windowsHide: true,
   });
+  currentProc = proc;
   let pending = Buffer.alloc(0);
   let frameIdx = 0;
   const handle = async (buf: Buffer) => {
+    if (cancelled) return;
     const t = frameIdx * STEP;
     frameIdx++;
     if (frameIdx % 10 === 0) onProgress(`글자 찾는 중: ${path.basename(file)} ${t.toFixed(1)}초`);
@@ -270,6 +285,8 @@ export async function analyzeText(
     proc.on('error', reject);
     proc.on('close', () => chain.then(() => resolve(), reject));
   });
+  currentProc = null;
+  if (cancelled) throw new Error('취소됨');
   open.splice(0).forEach(close);
   // 너무 짧게(0.4초 미만) 스친 글자는 버림
   const tracks = done.filter((d) => d.end - d.start >= 0.4).sort((a, b) => a.start - b.start);

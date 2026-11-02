@@ -884,7 +884,7 @@ export const PreviewPlayer: React.FC = () => {
                 style={{
                   top: `${posY}%`,
                   left: `${posX}%`,
-                  transform: `translate(-50%, -50%) rotate(${sub.rotation ?? 0}deg) scale(${(sub.textScale ?? 100) / 100})`,
+                  transform: `translate(-50%, ${sub.anchorY === 'top' ? '0%' : sub.anchorY === 'bottom' ? '-100%' : '-50%'}) rotate(${sub.rotation ?? 0}deg) scale(${(sub.textScale ?? 100) / 100})`,
                   opacity: clipOpacity,
                 }}
                 className="absolute w-full z-20 flex flex-col items-center justify-center px-2 pointer-events-none"

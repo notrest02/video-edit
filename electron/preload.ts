@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
   autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
   textMaskAnalyze: (params: unknown) => ipcRenderer.invoke('textMask:analyze', params),
+  textMaskCancel: () => ipcRenderer.invoke('textMask:cancel'),
   onTextMaskProgress: (callback: (msg: string) => void) => {
     const handler = (_event: unknown, msg: string) => callback(msg);
     ipcRenderer.on('textMask:progress', handler);

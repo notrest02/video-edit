@@ -11,6 +11,7 @@ import { Timer } from 'lucide-react';
 import { KeyframeStrip } from './KeyframeStrip';
 import { AutoMaskSection } from './AutoMaskSection';
 import { MaskRangeBar } from './MaskRangeBar';
+import { SequenceAutoMask } from './SequenceAutoMask';
 
 export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   const updateClip = useEditorStore((s) => s.updateClip);
@@ -120,6 +121,7 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
         </button>
         </span>
       </div>
+      <SequenceAutoMask />
       <AutoMaskSection key={clip.id} clip={clip} />
       {masks.length === 0 ? (
         <div className="text-[10px] text-[#888888] leading-relaxed">
