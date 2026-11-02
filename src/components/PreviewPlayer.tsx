@@ -19,6 +19,39 @@ import {
   onGdiGlyphsLoaded,
 } from '../utils/gdiFonts';
 
+/**
+ * 보조 오디오 재생: 같은 시각에 다른 오디오 트랙(A2 배경음악 등)에 있는 클립을 함께 재생.
+ * 내보내기는 소리 켜진 오디오 클립을 모두 섞으므로 미리보기도 똑같이 들리게 함 (2026-11-02).
+ * 재생 시계는 주 오디오(첫 번째 클립)가 맡고, 여기서는 그 시각을 따라가기만 함.
+ */
+const ExtraAudio: React.FC<{ clip: TimelineClip; currentTime: number; isPlaying: boolean }> = ({ clip, currentTime, isPlaying }) => {
+  const ref = useRef<HTMLAudioElement | null>(null);
+  const lastSeek = useRef(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !clip.sourcePath) return;
+    if (el.dataset.srcPath !== clip.sourcePath) {
+      el.dataset.srcPath = clip.sourcePath;
+      el.src = `media://local?path=${encodeURIComponent(clip.sourcePath)}`;
+    }
+    const sp = clipSpeed(clip);
+    if (Math.abs(el.playbackRate - sp) > 1e-3) el.playbackRate = sp;
+    const vol = typeof clip.volume === 'number' && !isNaN(clip.volume) ? clip.volume : 1;
+    el.volume = Math.min(1, Math.max(0, vol));
+    const target = clip.sourceStart + (currentTime - clip.startTime) * sp;
+    const diff = Math.abs(el.currentTime - target);
+    const now = performance.now();
+    if ((!isPlaying && diff > 0.03) || (isPlaying && diff > 0.25 && !el.seeking && now - lastSeek.current > 350)) {
+      el.currentTime = Math.max(0, target);
+      lastSeek.current = now;
+    }
+    if (isPlaying && el.paused) el.play().catch(() => {});
+    if (!isPlaying && !el.paused) el.pause();
+  }, [clip, currentTime, isPlaying]);
+  useEffect(() => () => ref.current?.pause(), []);
+  return <audio ref={ref} preload="auto" />;
+};
+
 export const PreviewPlayer: React.FC = () => {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   // 컷 전환 때 검은 화면이 보이지 않게 <video> 두 개를 번갈아 씀:
@@ -202,6 +235,15 @@ export const PreviewPlayer: React.FC = () => {
   }
 
   // 오디오 트랙에서 현재 재생 중인 클립 찾기
+  // 같은 시각에 소리 나는 오디오 클립 전부 (트랙별로). 첫 번째 = 재생 시계 기준, 나머지 = ExtraAudio
+  const activeAudioClips = clips.filter(
+    (c) =>
+      c.type === 'audio' &&
+      playableAudioTrackIds.has(c.trackId) &&
+      !c.muted &&
+      currentTime >= c.startTime &&
+      currentTime < c.startTime + c.duration
+  );
   const activeAudioClip = clips.find(
     (c) =>
       c.type === 'audio' &&
@@ -372,6 +414,7 @@ export const PreviewPlayer: React.FC = () => {
       return;
     }
 
+    if (preparedRef.current && preparedRef.current.idx === frontIdxRef.current) preparedRef.current = null;
     // 다음 클립으로 넘어왔고 뒤쪽 <video> 에 미리 준비돼 있으면 그쪽을 바로 앞으로 (검은 화면 없이 전환)
     if (lastVideoClipIdRef.current !== activeVideoClip.id && preparedRef.current?.clipId === activeVideoClip.id) {
       const prevFront = videoRef.current;
@@ -403,8 +446,9 @@ export const PreviewPlayer: React.FC = () => {
 
     // 음성이 A 트랙으로 분리되었거나(activeVideoClip.muted), 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
     // (분리된 A 트랙 음성 클립을 삭제했더라도 비디오 클립은 muted=true 상태를 유지하므로 소리가 나지 않음)
-    const hasActiveAudio = Boolean(activeAudioClip);
-    const shouldMuteVideo = hasActiveAudio || Boolean(activeVideoClip.muted);
+    // 내보내기와 같게: 영상 클립 소리는 그 클립이 음소거일 때만 끔 (예전엔 음성이 재생되면 무조건 꺼서,
+    // 미리보기에선 안 들리던 영상 원본 소리가 내보낸 mp4 에서 들렸음)
+    const shouldMuteVideo = Boolean(activeVideoClip.muted);
     videoEl.muted = shouldMuteVideo;
     videoEl.volume = shouldMuteVideo
       ? 0
@@ -444,6 +488,8 @@ export const PreviewPlayer: React.FC = () => {
   useEffect(() => {
     const back = videoEls()[1 - frontIdxRef.current];
     if (!back) return;
+    if (preparedRef.current && preparedRef.current.idx === frontIdxRef.current) preparedRef.current = null;
+    // 뒤쪽이 다른 클립용으로 준비돼 있는데 그 클립이 더는 '다음'이 아니면(건너뛰기 등) 다시 준비
     const from = activeVideoClip ? activeVideoClip.startTime + activeVideoClip.duration - 0.02 : currentTime;
     let next: (typeof clips)[number] | undefined;
     for (const c of clips) {
@@ -451,7 +497,8 @@ export const PreviewPlayer: React.FC = () => {
       if (c.startTime < from || c.startTime - currentTime > 1.5) continue;
       if (!next || c.startTime < next.startTime) next = c;
     }
-    if (!next || preparedRef.current?.clipId === next.id) return;
+    if (!next) return;
+    if (preparedRef.current?.clipId === next.id && back.dataset.srcPath) return;
     const previewPath = previewProxyMap[next.sourcePath!] || next.sourcePath!;
     if (back.dataset.srcPath !== previewPath) {
       back.dataset.srcPath = previewPath;
@@ -675,6 +722,11 @@ export const PreviewPlayer: React.FC = () => {
             />
           ))}
           <audio ref={audioRef} preload="auto" />
+          {activeAudioClips
+            .filter((c) => c.id !== activeAudioClip?.id)
+            .map((c) => (
+              <ExtraAudio key={c.trackId} clip={c} currentTime={currentTime} isPlaying={isPlaying} />
+            ))}
           <canvas
             ref={gdiOverlayRef}
             style={{ width: '100%', height: '100%' }}

@@ -1117,8 +1117,11 @@ ipcMain.handle(
         const vScaled = `[vclip_${i}]`;
         const vOut = `[vbase_${i}]`;
 
+        // tpad: 30fps 로 맞출 때 클립 마지막 1프레임이 빠지면 그 자리에 검은 바탕이 비쳐 번쩍임
+        //  (클립 시작이 프레임 경계와 미세하게 어긋날 때, AI 자동 배치에서 자주) → 마지막 프레임을 2프레임 복제해 메움.
+        //  보이는 구간은 아래 overlay enable 이 정하므로 다음 장면이 비치지는 않음 (2026-11-02)
         filterParts.push(
-          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=${fps},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
+          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
         );
         const endT = (clip.startTime + clip.duration).toFixed(4);
         filterParts.push(

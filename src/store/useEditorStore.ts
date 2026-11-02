@@ -29,6 +29,8 @@ import {
 interface HistorySnapshot {
   tracks: TimelineTrack[];
   clips: TimelineClip[];
+  /** 광고 구간 (무음 제거 등으로 같이 바뀌므로 되돌리기에도 포함) */
+  adSegments?: AdSegment[];
 }
 
 interface EditorState {
@@ -543,11 +545,21 @@ try {
 }
 
 export const useEditorStore = create<EditorState>((set, get) => {
+  const activeAdSegments = (): AdSegment[] | undefined => {
+    const { sequences, activeSequenceId } = get();
+    const segs = sequences.find((s) => s.id === activeSequenceId)?.adSegments;
+    return segs ? JSON.parse(JSON.stringify(segs)) : undefined;
+  };
+  const withAdSegments = (seqs: SequenceItem[], segs: AdSegment[] | undefined) => {
+    const { activeSequenceId } = get();
+    return seqs.map((s) => (s.id === activeSequenceId ? { ...s, adSegments: segs } : s));
+  };
   const pushHistory = () => {
     const { tracks, clips, past } = get();
     const snapshot: HistorySnapshot = {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
+      adSegments: activeAdSegments(),
     };
     set({
       past: [...past.slice(-29), snapshot],
@@ -2507,6 +2519,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
       let remainingClips = clips.filter((c) => !targetIds.has(c.id));
       let captionNote = '';
+      let mapTimeForSegments: ((t: number) => number) | null = null;
       if (rippleCompact && removedTotal > 0.001) {
         // 무음을 빼서 당겨진 만큼 자막도 같은 방식으로 당기고 줄임
         const mapTime = (t: number) => {
@@ -2519,6 +2532,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           }
           return clipStart + keptTotal;
         };
+        mapTimeForSegments = mapTime;
         let shrunk = 0;
         let dropped = 0;
         const mapped: TimelineClip[] = [];
@@ -2550,9 +2564,28 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }
 
       const nextClips = [...remainingClips, ...generatedClips];
+      let nextSequences = syncActiveSequenceData(tracks, nextClips);
+      // 광고 구간 띠도 무음을 뺀 만큼 같이 당기고 줄임 (자막과 같은 시간 변환)
+      const mapSeg = mapTimeForSegments;
+      const activeId = get().activeSequenceId;
+      if (mapSeg) {
+        nextSequences = nextSequences.map((s) =>
+          s.id === activeId && s.adSegments?.length
+            ? {
+                ...s,
+                adSegments: s.adSegments.map((g) => ({
+                  ...g,
+                  start: Number(mapSeg(g.start).toFixed(4)),
+                  end: Number(mapSeg(g.end).toFixed(4)),
+                })),
+              }
+            : s
+        );
+        if (nextSequences.find((s) => s.id === activeId)?.adSegments?.length) captionNote += ' 광고 구간도 함께 맞췄습니다.';
+      }
       set({
         clips: nextClips,
-        sequences: syncActiveSequenceData(tracks, nextClips),
+        sequences: nextSequences,
         selectedClipId: generatedClips[0]?.id || null,
         statusMessage: `무음 구간이 제거되어 영상(V) 및 음성(A) 클립이 ${segments.length}개의 유음 컷으로 동시에 분할되었습니다!${captionNote}`,
       });
@@ -2796,8 +2829,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const isFree = (trackId: string) =>
         !clips.some((c) => c.trackId === trackId && c.startTime < end - 1e-3 && c.startTime + c.duration > 1e-3);
       // 2) 비어 있는 트랙을 고르고, 없으면 새 트랙 (기존 클립은 건드리지 않음)
-      const pickTrack = (type: 'video' | 'audio'): TimelineTrack => {
-        const free = tracks.filter((t) => t.type === type && !t.locked).find((t) => isFree(t.id));
+      const pickTrack = (type: 'video' | 'audio', exclude: string[] = []): TimelineTrack => {
+        const free = tracks
+          .filter((t) => t.type === type && !t.locked && !exclude.includes(t.id))
+          .find((t) => isFree(t.id));
         if (free) return free;
         const same = tracks.filter((t) => t.type === type);
         const prefix = type === 'video' ? 'V' : 'A';
@@ -2820,10 +2855,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const vTrack = pickTrack('video');
       const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const added: TimelineClip[] = [];
+      let voiceTrackId: string | null = null;
       if (plan.voice) {
         const asset = byPath.get(key(plan.voice.path));
         if (asset) {
           const aTrack = pickTrack('audio');
+          voiceTrackId = aTrack.id;
           added.push({
             id: `clip_a_${uid()}`,
             trackId: aTrack.id,
@@ -2839,7 +2876,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           });
         }
       }
-      // 3) 영상 클립 (원본 소리는 넣지 않음: B롤)
+      // 3) 영상 클립만 (B롤: 원본 소리 클립은 만들지 않음 — 사용자 요청 2026-11-02)
       for (const c of plan.clips) {
         const asset = byPath.get(key(c.path));
         if (!asset) continue;
@@ -2854,7 +2891,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
           sourcePath: asset.path,
           assetId: asset.id,
           volume: 1,
-          muted: false,
+          // B롤: 원본 소리 끔. (미리보기는 음성이 재생되면 영상 소리를 자동으로 끄지만, 내보내기는 muted 만 보고 섞음 →
+          //  예전엔 내보낸 mp4 에 원본 소리가 나왔음. 2026-11-02 수정)
+          muted: true,
           speed: c.speed && Math.abs(c.speed - 1) > 1e-3 ? Number(c.speed.toFixed(3)) : undefined,
         });
       }
@@ -3061,11 +3100,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const currentSnapshot: HistorySnapshot = {
         tracks: JSON.parse(JSON.stringify(tracks)),
         clips: JSON.parse(JSON.stringify(clips)),
+        adSegments: activeAdSegments(),
       };
       set({
         tracks: previous.tracks,
         clips: previous.clips,
-        sequences: syncActiveSequenceData(previous.tracks, previous.clips),
+        sequences: withAdSegments(syncActiveSequenceData(previous.tracks, previous.clips), previous.adSegments),
         past: past.slice(0, -1),
         future: [currentSnapshot, ...future.slice(0, 29)],
         statusMessage: '실행 취소(Undo) 완료',
@@ -3079,11 +3119,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const currentSnapshot: HistorySnapshot = {
         tracks: JSON.parse(JSON.stringify(tracks)),
         clips: JSON.parse(JSON.stringify(clips)),
+        adSegments: activeAdSegments(),
       };
       set({
         tracks: next.tracks,
         clips: next.clips,
-        sequences: syncActiveSequenceData(next.tracks, next.clips),
+        sequences: withAdSegments(syncActiveSequenceData(next.tracks, next.clips), next.adSegments),
         past: [...past, currentSnapshot],
         future: future.slice(1),
         statusMessage: '다시 실행(Redo) 완료',
