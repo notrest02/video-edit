@@ -46,3 +46,8 @@ Thumbs.db
 
 # 자동 편집 평가 데이터 (고객 자료 포함 - 저장소에 올리지 않음)
 eval_data/
+
+# 빌드 결과물
+tools/premiere/align_cli.cjs
+tools/premiere/caption_check.cjs
+__pycache__/
