@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useMemo } from 'react';
+import { MotionPanel, TextMotionPanel } from './MotionPanel';
 import { BlurMaskPanel } from './BlurMaskPanel';
 import {
   Type,
@@ -73,6 +74,22 @@ export const RightInspector: React.FC = () => {
   } = useEditorStore();
 
   const [systemFonts, setSystemFonts] = useState<SystemFontItem[]>(globalCachedFonts);
+  // 상단 탭: 속성 / 모션(키프레임을 넓게 보는 창). 마지막 탭 기억
+  const [tab, setTabState] = useState<'props' | 'motion'>(() => {
+    try {
+      return localStorage.getItem('agy_inspector_tab') === 'motion' ? 'motion' : 'props';
+    } catch {
+      return 'props';
+    }
+  });
+  const setTab = (t: 'props' | 'motion') => {
+    setTabState(t);
+    try {
+      localStorage.setItem('agy_inspector_tab', t);
+    } catch {
+      // ignore
+    }
+  };
   const [isLoadingFonts, setIsLoadingFonts] = useState(false);
   const [fontSearchQuery, setFontSearchQuery] = useState('');
 
@@ -262,13 +279,28 @@ export const RightInspector: React.FC = () => {
   };
 
   return (
-    <aside className="w-[310px] shrink-0 bg-[#1d1d1d] border border-[#2d8ceb] flex flex-col justify-between h-full select-none text-[#cccccc]">
-      {/* 1. 상단 속성 탭 헤더 */}
+    <aside
+      className={`${tab === 'motion' ? 'w-[460px]' : 'w-[310px]'} shrink-0 bg-[#1d1d1d] border border-[#2d8ceb] flex flex-col justify-between h-full select-none text-[#cccccc]`}
+    >
+      {/* 1. 상단 탭 헤더: 속성 / 모션 */}
       <div>
-        <div className="h-7 bg-[#161616] border-b border-[#2b2b2b] flex items-center px-3">
-          <div className="h-full flex items-center border-b-2 border-[#2d8ceb] text-white text-[11px] font-semibold px-1">
-            속성 ≡
-          </div>
+        <div className="h-7 bg-[#161616] border-b border-[#2b2b2b] flex items-center px-3 gap-3">
+          {(
+            [
+              ['props', '속성 ≡'],
+              ['motion', '모션 (키프레임)'],
+            ] as const
+          ).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setTab(k)}
+              className={`h-full flex items-center px-1 text-[11px] font-semibold border-b-2 ${
+                tab === k ? 'border-[#2d8ceb] text-white' : 'border-transparent text-[#888888] hover:text-white'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* 시퀀스/클립 요약 바 */}
@@ -291,8 +323,24 @@ export const RightInspector: React.FC = () => {
         </div>
       </div>
 
+      {/* 2-1. 모션 탭: 키프레임을 넓게 */}
+      {tab === 'motion' && (
+        <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-[#181818]">
+          {!selectedClip || (selectedClip.type !== 'video' && selectedClip.type !== 'text') ? (
+            <p className="text-xs text-[#999999] text-center pt-10">영상 또는 자막 클립을 선택하면 모션과 키프레임이 여기에 크게 보입니다.</p>
+          ) : selectedClip.type === 'video' ? (
+            <>
+              <MotionPanel clip={selectedClip} wide />
+              <BlurMaskPanel clip={selectedClip} />
+            </>
+          ) : (
+            <TextMotionPanel clip={selectedClip} wide />
+          )}
+        </div>
+      )}
+
       {/* 2. 본문: 선택된 클립이 없을 때 vs 있을 때 */}
-      {!selectedClip ? (
+      {tab === 'motion' ? null : !selectedClip ? (
         <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
           <p className="text-xs text-[#999999]">속성을 보려면 타임라인에서 클립을 선택하세요.</p>
         </div>
@@ -1070,32 +1118,14 @@ export const RightInspector: React.FC = () => {
             </div>
           )}
 
-          {/* 비디오 클립 화면 비율(Scale) 제어 */}
-          {selectedClip.type === 'video' && (
-            <div className="bg-[#202020] border border-[#2e2e2e] rounded p-2.5 space-y-2 text-[11px]">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-white">비디오 비율 (Scale)</span>
-                <button
-                  onClick={() => updateClip(selectedClip.id, { scale: 100 }, true)}
-                  className="px-2 py-0.5 rounded bg-[#141414] border border-[#333333] text-[#cccccc] text-[10px]"
-                >
-                  시퀀스 프레임에 맞춤 (100%)
-                </button>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-[#999999]">크기 조정</span>
-                <span className="font-mono text-[#6cb6ff]">{selectedClip.scale ?? 100}%</span>
-              </div>
-              <input
-                type="range"
-                min={20}
-                max={250}
-                step={5}
-                value={selectedClip.scale ?? 100}
-                onChange={(e) => updateClip(selectedClip.id, { scale: Number(e.target.value) })}
-                className="w-full accent-[#2d8ceb]"
-              />
-            </div>
+          {/* 모션: 위치/크기/회전/불투명도 + 키프레임 (영상 / 자막) */}
+          {(selectedClip.type === 'video' || selectedClip.type === 'text') && (
+            <button
+              onClick={() => setTab('motion')}
+              className="w-full py-1.5 rounded bg-[#202020] border border-[#2e2e2e] hover:border-[#2d8ceb] text-[11px] text-[#cccccc]"
+            >
+              위치·크기·회전·불투명도 키프레임은 [모션] 탭에서 →
+            </button>
           )}
 
           {/* 블러 마스크 (원본에 박힌 글자 가리기) */}

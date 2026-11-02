@@ -1,4 +1,5 @@
 import { maskPngDataUrl, maskPointsAt } from '../utils/blurMask';
+import { hasTextMotionKeyframes, resolveTextAt, shiftKeyframes } from '../utils/keyframes';
 import React, { useEffect, useState } from 'react';
 import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
 import { ShortcutSettingsModal } from './ShortcutSettingsModal';
@@ -18,6 +19,11 @@ function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): Tim
   if (e - s < 1e-4) return null;
   return {
     ...c,
+    // 앞을 잘라낸 만큼 키프레임 시각도 당김 (클립 안 시각 기준)
+    keyframes: shiftKeyframes(c.keyframes, s - c.startTime),
+    blurMasks: c.blurMasks?.map((m) =>
+      m.keyframes?.length ? { ...m, keyframes: m.keyframes.map((f) => ({ ...f, t: f.t - (s - c.startTime) })) } : m
+    ),
     startTime: s - rangeStart,
     duration: e - s,
     sourceStart:
@@ -91,6 +97,9 @@ export const TopHeader: React.FC = () => {
           speed: c.speed && c.speed > 0 ? c.speed : 1,
           volume: c.volume,
           muted: c.muted,
+          ...(type === 'video'
+            ? { scale: c.scale, posX: c.posX, posY: c.posY, rotation: c.rotation, opacity: c.opacity, keyframes: c.keyframes }
+            : {}),
         }));
     const outW = sequence.width || 1920;
     const outH = sequence.height || 1080;
@@ -98,12 +107,33 @@ export const TopHeader: React.FC = () => {
     await ensureGdiClipsReady(ranged.filter((c) => c.type === 'text'));
     const subtitleOverlays = ranged
       .filter((c) => c.type === 'text' && visibleTrackIds.has(c.trackId) && c.text && c.text.trim().length > 0)
-      .map((c) => ({ id: c.id, startTime: c.startTime, endTime: c.startTime + c.duration, pngDataUrl: renderSubtitleClipToPngDataUrl(c, outW, outH) }))
+      .map((c) => ({
+        id: c.id,
+        startTime: c.startTime,
+        endTime: c.startTime + c.duration,
+        pngDataUrl: renderSubtitleClipToPngDataUrl(resolveTextAt(c, 0), outW, outH),
+        // 모션 키프레임이 있는 자막: 프레임마다 그린 PNG (위치/크기/회전/불투명도가 움직임)
+        frames: hasTextMotionKeyframes(c)
+          ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, f) =>
+              renderSubtitleClipToPngDataUrl(resolveTextAt(c, f / (sequence.fps || fps)), outW, outH)
+            )
+          : undefined,
+      }))
       .filter((s) => s.pngDataUrl.length > 0);
     const withMasks = (vc: ReturnType<typeof pick>) =>
       vc.map((v) => {
         const c = ranged.find((x) => x.id === v.id);
-        return { ...v, masks: (c?.blurMasks || []).map((m) => ({ png: maskPngDataUrl(maskPointsAt(m, 0), outW, outH, m.feather), blur: m.blur })) };
+        const f = sequence.fps || fps;
+        return {
+          ...v,
+          masks: (c?.blurMasks || []).map((m) => ({
+            png: maskPngDataUrl(maskPointsAt(m, 0), outW, outH, m.feather),
+            blur: m.blur,
+            frames: m.keyframes?.length
+              ? Array.from({ length: Math.max(1, Math.ceil((c?.duration || 0) * f)) }, (_, k) => maskPngDataUrl(maskPointsAt(m, k / f), outW, outH, m.feather))
+              : undefined,
+          })),
+        };
       });
     return window.electronAPI!.exportVideo({
       videoClips: withMasks(pick('video', (c) => visibleTrackIds.has(c.trackId))),
@@ -192,9 +222,20 @@ export const TopHeader: React.FC = () => {
           speed: c.speed && c.speed > 0 ? c.speed : 1,
           volume: c.volume,
           muted: c.muted,
+          scale: c.scale,
+          posX: c.posX,
+          posY: c.posY,
+          rotation: c.rotation,
+          opacity: c.opacity,
+          keyframes: c.keyframes,
           masks: (c.blurMasks || []).map((m) => ({
             png: maskPngDataUrl(maskPointsAt(m, 0), sequence.width || 1920, sequence.height || 1080, m.feather),
             blur: m.blur,
+            frames: m.keyframes?.length
+              ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, k) =>
+                  maskPngDataUrl(maskPointsAt(m, k / (sequence.fps || fps)), sequence.width || 1920, sequence.height || 1080, m.feather)
+                )
+              : undefined,
           })),
         }));
 
@@ -231,7 +272,12 @@ export const TopHeader: React.FC = () => {
           id: c.id,
           startTime: c.startTime,
           endTime: c.startTime + c.duration,
-          pngDataUrl: renderSubtitleClipToPngDataUrl(c, outW, outH),
+          pngDataUrl: renderSubtitleClipToPngDataUrl(resolveTextAt(c, 0), outW, outH),
+          frames: hasTextMotionKeyframes(c)
+            ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, f) =>
+                renderSubtitleClipToPngDataUrl(resolveTextAt(c, f / (sequence.fps || fps)), outW, outH)
+              )
+            : undefined,
         }))
         .filter((s) => s.pngDataUrl.length > 0);
 

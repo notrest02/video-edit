@@ -12,6 +12,7 @@ import { matchAction } from '../utils/shortcuts';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
 import { BlurMaskOverlay } from './BlurMaskOverlay';
+import { resolveTextAt, valueAt } from '../utils/keyframes';
 import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
 import {
   ensureGdiTextReady,
@@ -62,6 +63,14 @@ export const PreviewPlayer: React.FC = () => {
   const frontIdxRef = useRef(0);
   const [frontIdx, setFrontIdx] = useState(0);
   const preparedRef = useRef<{ idx: number; clipId: string } | null>(null);
+  const motionRef = useRef<{ transform: string; opacity: number; px: number; py: number; rot: number; sc: number }>({
+    transform: 'none',
+    opacity: 1,
+    px: 0,
+    py: 0,
+    rot: 0,
+    sc: 1,
+  });
   const videoEls = () => [videoARef.current, videoBRef.current];
   const videoRef = {
     get current() {
@@ -287,8 +296,9 @@ export const PreviewPlayer: React.FC = () => {
         trackMap.set(sub.trackId, sub);
       }
     }
-    return Array.from(trackMap.values());
-  }, [activeSubtitles, selectedClipId]);
+    // 자막 모션 키프레임: 지금 시각 모습으로 (위치/크기/회전/불투명도)
+    return Array.from(trackMap.values()).map((sub) => resolveTextAt(sub, currentTime - sub.startTime));
+  }, [activeSubtitles, selectedClipId, currentTime]);
 
   // ---------- Windows(GDI) 렌더 글꼴 자막: 화면 위 캔버스에 윤곽선으로 그림 ----------
   // (글자 수정용 textarea 는 그대로 두고 글자만 투명하게 → 클릭/커서/Enter 나누기 동작 유지)
@@ -738,15 +748,34 @@ export const PreviewPlayer: React.FC = () => {
           }}
           className="relative max-w-full max-h-full h-full bg-black border border-[#2a2a2a] shadow-2xl flex items-center justify-center overflow-hidden"
         >
+          {(() => {
+            // 모션 (키프레임 포함): 출력 px → 미리보기 px
+            const c = activeVideoClip;
+            const lt = c ? currentTime - c.startTime : 0;
+            const k = canvasWidth / Math.max(1, sequence.width || 1080);
+            const px = c ? valueAt(c.keyframes?.posX, lt, c.posX ?? 0) * k : 0;
+            const py = c ? valueAt(c.keyframes?.posY, lt, c.posY ?? 0) * k : 0;
+            const sc = c ? valueAt(c.keyframes?.scale, lt, c.scale ?? 100) / 100 : 1;
+            const rot = c ? valueAt(c.keyframes?.rotation, lt, c.rotation ?? 0) : 0;
+            motionRef.current = {
+              px,
+              py,
+              rot,
+              sc,
+              transform: `translate(${px.toFixed(2)}px, ${py.toFixed(2)}px) rotate(${rot.toFixed(3)}deg) scale(${sc.toFixed(4)})`,
+              opacity: c ? Math.min(1, Math.max(0, valueAt(c.keyframes?.opacity, lt, (c.opacity ?? 1) * 100) / 100)) : 1,
+            };
+            return null;
+          })()}
           {[videoARef, videoBRef].map((ref, idx) => (
             <video
               key={idx}
               ref={ref}
               preload="auto"
               style={{
-                transform: `scale(${(activeVideoClip?.scale ?? 100) / 100})`,
+                transform: motionRef.current.transform,
                 // 안 보이는 쪽도 그려 둬야(투명) 앞으로 올 때 첫 프레임이 바로 보임
-                opacity: activeVideoClip && idx === frontIdx ? 1 : 0,
+                opacity: activeVideoClip && idx === frontIdx ? motionRef.current.opacity : 0,
               }}
               className={`absolute inset-0 w-full h-full transition-transform duration-75 ${
                 sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
@@ -760,7 +789,14 @@ export const PreviewPlayer: React.FC = () => {
             .map((c) => (
               <ExtraAudio key={c.trackId} clip={c} currentTime={currentTime} isPlaying={isPlaying} />
             ))}
-          <BlurMaskOverlay clip={activeVideoClip} width={sequence.width || 1080} height={sequence.height || 1920} canvasWidth={canvasWidth} />
+          <BlurMaskOverlay
+            clip={activeVideoClip}
+            width={sequence.width || 1080}
+            height={sequence.height || 1920}
+            canvasWidth={canvasWidth}
+            layerTransform={motionRef.current.transform}
+            motion={motionRef.current}
+          />
           <canvas
             ref={gdiOverlayRef}
             style={{ width: '100%', height: '100%' }}
@@ -848,7 +884,7 @@ export const PreviewPlayer: React.FC = () => {
                 style={{
                   top: `${posY}%`,
                   left: `${posX}%`,
-                  transform: 'translate(-50%, -50%)',
+                  transform: `translate(-50%, -50%) rotate(${sub.rotation ?? 0}deg) scale(${(sub.textScale ?? 100) / 100})`,
                   opacity: clipOpacity,
                 }}
                 className="absolute w-full z-20 flex flex-col items-center justify-center px-2 pointer-events-none"

@@ -12,6 +12,7 @@ import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
 import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
+import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
   computeEmission,
@@ -1022,7 +1023,14 @@ ipcMain.handle(
         volume: number;
         muted: boolean;
         /** 블러 마스크: 흑백 PNG(흰색=흐리게, 출력 크기) + 블러 강도 */
-        masks?: Array<{ png: string; blur: number }>;
+        masks?: Array<{ png: string; blur: number; frames?: string[] }>;
+        /** 모션: 위치(px), 크기(%), 회전(도), 불투명도(0~1), 키프레임 */
+        scale?: number;
+        posX?: number;
+        posY?: number;
+        rotation?: number;
+        opacity?: number;
+        keyframes?: KeyframeMap;
       }>;
       audioClips: Array<{
         id: string;
@@ -1039,6 +1047,8 @@ ipcMain.handle(
         startTime: number;
         endTime: number;
         pngDataUrl: string;
+        /** 모션 키프레임 자막: 프레임마다 그린 PNG (fps 간격) */
+        frames?: string[];
       }>;
       totalDuration: number;
       fps: number;
@@ -1123,28 +1133,83 @@ ipcMain.handle(
         //  (클립 시작이 프레임 경계와 미세하게 어긋날 때, AI 자동 배치에서 자주) → 마지막 프레임을 2프레임 복제해 메움.
         //  보이는 구간은 아래 overlay enable 이 정하므로 다음 장면이 비치지는 않음 (2026-11-02)
         filterParts.push(
-          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
+          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
         );
         // 블러 마스크: 클립 화면을 흐리게 한 복사본을 마스크 모양(흰 곳)만 원래 화면 위에 덮음
         let clipLabel = vScaled;
         for (let j = 0; j < (clip.masks || []).length; j++) {
           const mk = clip.masks![j];
           const b64 = mk.png.replace(/^data:image\/png;base64,/, '');
-          const maskPath = path.join(tempDir, `mask_${i}_${j}.png`);
-          await fs.promises.writeFile(maskPath, Buffer.from(b64, 'base64'));
-          inputArgs.push('-loop', '1', '-framerate', String(fps), '-t', (clip.startTime + clip.duration + 1).toFixed(3), '-i', maskPath);
-          const mIdx = inputIdx++;
           const tag = `${i}_${j}`;
+          let maskSrc: string;
+          if (mk.frames && mk.frames.length > 1) {
+            // 움직이는 마스크(키프레임): 프레임마다 그린 마스크 PNG 묶음 → 클립 시작 시각에 맞춤
+            const dir = path.join(tempDir, `maskseq_${tag}`);
+            await fs.promises.mkdir(dir, { recursive: true });
+            for (let f = 0; f < mk.frames.length; f++) {
+              const fb = mk.frames[f].replace(/^data:image\/png;base64,/, '');
+              await fs.promises.writeFile(path.join(dir, `m_${String(f).padStart(5, '0')}.png`), Buffer.from(fb, 'base64'));
+            }
+            inputArgs.push('-framerate', String(fps), '-start_number', '0', '-i', path.join(dir, 'm_%05d.png'));
+            const mIdx = inputIdx++;
+            filterParts.push(
+              `[${mIdx}:v]format=gray,scale=${width}:${height},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB[mk_${tag}]`
+            );
+            maskSrc = `[mk_${tag}]`;
+          } else {
+            const maskPath = path.join(tempDir, `mask_${i}_${j}.png`);
+            await fs.promises.writeFile(maskPath, Buffer.from(b64, 'base64'));
+            inputArgs.push('-loop', '1', '-framerate', String(fps), '-t', (clip.startTime + clip.duration + 1).toFixed(3), '-i', maskPath);
+            const mIdx = inputIdx++;
+            filterParts.push(`[${mIdx}:v]format=gray,scale=${width}:${height}[mk_${tag}]`);
+            maskSrc = `[mk_${tag}]`;
+          }
           filterParts.push(`${clipLabel}split=2[mo_${tag}][mb_${tag}]`);
           filterParts.push(`[mb_${tag}]gblur=sigma=${Math.max(0.5, mk.blur).toFixed(2)}[mbb_${tag}]`);
-          filterParts.push(`[${mIdx}:v]format=gray,scale=${width}:${height}[mk_${tag}]`);
-          filterParts.push(`[mbb_${tag}][mk_${tag}]alphamerge[ma_${tag}]`);
+          filterParts.push(`[mbb_${tag}]${maskSrc}alphamerge[ma_${tag}]`);
           filterParts.push(`[mo_${tag}][ma_${tag}]overlay=format=auto[mm_${tag}]`);
           clipLabel = `[mm_${tag}]`;
         }
+        // 모션 (위치/크기/회전/불투명도, 키프레임 포함). 미리보기와 같은 계산식(ffExpr)
+        //  크기: 프레임마다 다시 계산 → 고정 크기 투명 바탕에 가운데 → (회전) → (불투명도) → 위치만큼 옮겨 얹음
+        const kf = clip.keyframes || {};
+        const has = (k: string) => (kf[k]?.length ?? 0) > 0;
+        const sBase = clip.scale ?? 100;
+        const rBase = clip.rotation ?? 0;
+        const oBase = (clip.opacity ?? 1) * 100;
+        const motion =
+          ['posX', 'posY', 'scale', 'rotation', 'opacity'].some(has) ||
+          Math.abs(clip.posX ?? 0) > 1e-6 ||
+          Math.abs(clip.posY ?? 0) > 1e-6 ||
+          Math.abs(sBase - 100) > 1e-6 ||
+          Math.abs(rBase) > 1e-6 ||
+          oBase < 100 - 1e-6;
+        let ox = '0';
+        let oy = '0';
+        if (motion) {
+          const T = `(t-${clip.startTime.toFixed(4)})`;
+          const S = ffExpr(kf.scale, sBase, T);
+          const maxS = Math.max(100, sBase, ...(kf.scale || []).map((k) => k.v));
+          const even = (x: number) => Math.ceil(x / 2) * 2;
+          const rotUsed = has('rotation') || Math.abs(rBase) > 1e-6;
+          const PW = rotUsed ? even(Math.hypot(width, height) * maxS / 100) : even(width * maxS / 100);
+          const PH = rotUsed ? PW : even(height * maxS / 100);
+          let chain = `${clipLabel}scale=w='max(2,trunc(iw*(${S})/200)*2)':h='max(2,trunc(ih*(${S})/200)*2)':eval=frame,pad=${PW}:${PH}:'(ow-iw)/2':'(oh-ih)/2':color=black@0:eval=frame`;
+          if (rotUsed) chain += `,rotate=a='(${ffExpr(kf.rotation, rBase, T)})*PI/180':c=none:ow=${PW}:oh=${PH}`;
+          if (has('opacity')) {
+            const O = ffExpr(kf.opacity, oBase, `(T-${clip.startTime.toFixed(4)})`);
+            chain += `,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*max(0,min(100,${O}))/100'`;
+          } else if (oBase < 100 - 1e-6) {
+            chain += `,colorchannelmixer=aa=${Math.max(0, oBase / 100).toFixed(4)}`;
+          }
+          filterParts.push(`${chain}[mot_${i}]`);
+          clipLabel = `[mot_${i}]`;
+          ox = `(W-w)/2+(${ffExpr(kf.posX, clip.posX ?? 0, T)})`;
+          oy = `(H-h)/2+(${ffExpr(kf.posY, clip.posY ?? 0, T)})`;
+        }
         const endT = (clip.startTime + clip.duration).toFixed(4);
         filterParts.push(
-          `${currentVideoLabel}${clipLabel}overlay=x=0:y=0:enable='between(t,${clip.startTime.toFixed(4)},${endT})':eof_action=pass${vOut}`
+          `${currentVideoLabel}${clipLabel}overlay=x='${ox}':y='${oy}':eval=frame:enable='between(t,${clip.startTime.toFixed(4)},${endT})':eof_action=pass${vOut}`
         );
         currentVideoLabel = vOut;
 
@@ -1180,16 +1245,31 @@ ipcMain.handle(
       // Process Subtitle PNG Overlays (pixel-accurate Korean typography)
       for (let i = 0; i < subtitleOverlays.length; i++) {
         const sub = subtitleOverlays[i];
-        const base64Data = sub.pngDataUrl.replace(/^data:image\/png;base64,/, '');
-        const pngPath = path.join(tempDir, `sub_${i}.png`);
-        await fs.promises.writeFile(pngPath, Buffer.from(base64Data, 'base64'));
-
-        inputArgs.push('-i', pngPath);
-        const sIdx = inputIdx++;
         const sOut = `[vsub_${i}]`;
-        filterParts.push(
-          `${currentVideoLabel}[${sIdx}:v]overlay=0:0:enable='between(t,${sub.startTime.toFixed(4)},${sub.endTime.toFixed(4)})'${sOut}`
-        );
+        if (sub.frames && sub.frames.length > 1) {
+          // 움직이는 자막: PNG 묶음 → 자막 시작 시각부터 fps 간격으로
+          const dir = path.join(tempDir, `subseq_${i}`);
+          await fs.promises.mkdir(dir, { recursive: true });
+          for (let f = 0; f < sub.frames.length; f++) {
+            const b = sub.frames[f].replace(/^data:image\/png;base64,/, '');
+            await fs.promises.writeFile(path.join(dir, `f_${String(f).padStart(5, '0')}.png`), Buffer.from(b, 'base64'));
+          }
+          inputArgs.push('-framerate', String(fps), '-start_number', '0', '-i', path.join(dir, 'f_%05d.png'));
+          const sIdx = inputIdx++;
+          filterParts.push(`[${sIdx}:v]format=rgba,tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${sub.startTime.toFixed(4)}/TB[vsubsrc_${i}]`);
+          filterParts.push(
+            `${currentVideoLabel}[vsubsrc_${i}]overlay=0:0:enable='between(t,${sub.startTime.toFixed(4)},${sub.endTime.toFixed(4)})':eof_action=pass${sOut}`
+          );
+        } else {
+          const base64Data = sub.pngDataUrl.replace(/^data:image\/png;base64,/, '');
+          const pngPath = path.join(tempDir, `sub_${i}.png`);
+          await fs.promises.writeFile(pngPath, Buffer.from(base64Data, 'base64'));
+          inputArgs.push('-i', pngPath);
+          const sIdx = inputIdx++;
+          filterParts.push(
+            `${currentVideoLabel}[${sIdx}:v]overlay=0:0:enable='between(t,${sub.startTime.toFixed(4)},${sub.endTime.toFixed(4)})'${sOut}`
+          );
+        }
         currentVideoLabel = sOut;
       }
 

@@ -5,12 +5,21 @@
 import React from 'react';
 import { useEditorStore } from '../store/useEditorStore';
 import type { TimelineClip } from '../types/editor';
-import { newBlurMask } from '../utils/blurMask';
+import { maskPointsAt, newBlurMask } from '../utils/blurMask';
+import { EASE_LABEL, type KfEase } from '../utils/keyframes';
+import { Timer } from 'lucide-react';
+import { KeyframeStrip } from './KeyframeStrip';
 
 export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   const updateClip = useEditorStore((s) => s.updateClip);
   const setStatusMessage = useEditorStore((s) => s.setStatusMessage);
   const masks = clip.blurMasks || [];
+  const currentTime = useEditorStore((s) => s.currentTime);
+  const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
+  const t = Math.min(clip.duration, Math.max(0, currentTime - clip.startTime));
+  const near = (a: number) => Math.abs(a - t) <= 1 / 60;
+  const patchMask = (id: string, fn: (m: NonNullable<TimelineClip['blurMasks']>[number]) => NonNullable<TimelineClip['blurMasks']>[number]) =>
+    setMasks(masks.map((x) => (x.id === id ? fn(x) : x)), true);
   const clipboard = useEditorStore((s) => s.maskClipboard);
   const setClipboard = useEditorStore((s) => s.setMaskClipboard);
   const selectedIds = useEditorStore((s) => s.selectedClipIds);
@@ -88,6 +97,92 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
                 >
                   삭제
                 </button>
+              </div>
+              {/* 꼭짓점 위치 키프레임 (움직이는 글자 따라가기) */}
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() =>
+                    patchMask(m.id, (x) =>
+                      x.keyframes?.length
+                        ? { ...x, points: maskPointsAt(x, t), keyframes: undefined }
+                        : { ...x, keyframes: [{ t: +t.toFixed(3), points: maskPointsAt(x, t), ease: 'linear' }] }
+                    )
+                  }
+                  className={`p-0.5 rounded ${m.keyframes?.length ? 'text-[#2d8ceb] bg-[#2d8ceb]/15' : 'text-[#777777] hover:text-white'}`}
+                  title={m.keyframes?.length ? '키프레임 끄기 (지금 모양으로 고정)' : '꼭짓점 키프레임 켜기 — 재생헤드를 옮기고 점을 움직이면 키프레임이 생김'}
+                >
+                  <Timer className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-[#999999]">꼭짓점 위치</span>
+                {m.keyframes?.length ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        const k = [...m.keyframes!].sort((a, b) => b.t - a.t).find((f) => f.t < t - 1e-3);
+                        if (k) setCurrentTime(clip.startTime + k.t);
+                      }}
+                      className="px-1 text-[#aaaaaa] hover:text-white"
+                      title="이전 키프레임"
+                    >
+                      ◀
+                    </button>
+                    <button
+                      onClick={() =>
+                        patchMask(m.id, (x) =>
+                          x.keyframes!.some((f) => near(f.t))
+                            ? { ...x, keyframes: x.keyframes!.filter((f) => !near(f.t)) }
+                            : { ...x, keyframes: [...x.keyframes!, { t: +t.toFixed(3), points: maskPointsAt(x, t), ease: 'linear' as KfEase }].sort((a, b) => a.t - b.t) }
+                        )
+                      }
+                      className={`px-1 ${m.keyframes.some((f) => near(f.t)) ? 'text-[#2d8ceb]' : 'text-[#777777] hover:text-white'}`}
+                      title="이 위치 키프레임 추가/지우기"
+                    >
+                      ◆
+                    </button>
+                    <button
+                      onClick={() => {
+                        const k = [...m.keyframes!].sort((a, b) => a.t - b.t).find((f) => f.t > t + 1e-3);
+                        if (k) setCurrentTime(clip.startTime + k.t);
+                      }}
+                      className="px-1 text-[#aaaaaa] hover:text-white"
+                      title="다음 키프레임"
+                    >
+                      ▶
+                    </button>
+                    <KeyframeStrip
+                      clipStart={clip.startTime}
+                      duration={clip.duration}
+                      times={m.keyframes.map((f) => f.t)}
+                      onMove={(i, nt, history) =>
+                        setMasks(
+                          masks.map((x) =>
+                            x.id === m.id
+                              ? { ...x, keyframes: x.keyframes!.map((f, j) => (j === i ? { ...f, t: nt } : f)) }
+                              : x
+                          ),
+                          history
+                        )
+                      }
+                    />
+                    <select
+                      value={m.keyframes.find((f) => near(f.t))?.ease || 'linear'}
+                      disabled={!m.keyframes.some((f) => near(f.t))}
+                      onChange={(e) =>
+                        patchMask(m.id, (x) => ({ ...x, keyframes: x.keyframes!.map((f) => (near(f.t) ? { ...f, ease: e.target.value as KfEase } : f)) }))
+                      }
+                      className="bg-[#111318] border border-[#333947] rounded px-0.5 py-0.5 text-[9px] text-[#dddddd] disabled:opacity-40 max-w-[80px]"
+                      title="이 키프레임에서 다음 키프레임까지 움직임"
+                    >
+                      {(Object.keys(EASE_LABEL) as KfEase[]).map((k) => (
+                        <option key={k} value={k}>
+                          {EASE_LABEL[k]}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                ) : (
+                  <span className="text-[10px] text-[#666666]">(고정)</span>
+                )}
               </div>
               <div className="flex justify-between">
                 <span className="text-[#999999]">블러 강도</span>

@@ -4,6 +4,7 @@
  * keyframes 가 있으면 클립 안 시각(초)에 따라 꼭짓점이 선형으로 움직임 (움직이는 글자, 2단계).
  */
 import type { BlurMask, MaskPoint } from '../types/editor';
+import { easeFn } from './keyframes';
 
 export function newBlurMask(): BlurMask {
   return {
@@ -28,8 +29,8 @@ export function maskPointsAt(mask: BlurMask, t: number): MaskPoint[] {
   if (t >= ks[ks.length - 1].t) return ks[ks.length - 1].points;
   for (let i = 0; i + 1 < ks.length; i++) {
     const [a, b] = [ks[i], ks[i + 1]];
-    if (t >= a.t && t <= b.t) {
-      const r = (t - a.t) / Math.max(1e-6, b.t - a.t);
+    if (t >= a.t && t < b.t) {
+      const r = easeFn(a.ease, (t - a.t) / Math.max(1e-6, b.t - a.t));
       return a.points.map((p, k) => [p[0] + (b.points[k][0] - p[0]) * r, p[1] + (b.points[k][1] - p[1]) * r]) as MaskPoint[];
     }
   }

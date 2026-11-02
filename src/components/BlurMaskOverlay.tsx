@@ -12,12 +12,16 @@ import { maskPointsAt, maskSvgDataUrl } from '../utils/blurMask';
 
 const key = (mi: number, k: number) => `${mi}:${k}`;
 
-export const BlurMaskOverlay: React.FC<{ clip: TimelineClip | undefined; width: number; height: number; canvasWidth: number }> = ({
-  clip,
-  width,
-  height,
-  canvasWidth,
-}) => {
+export const BlurMaskOverlay: React.FC<{
+  clip: TimelineClip | undefined;
+  width: number;
+  height: number;
+  canvasWidth: number;
+  /** 영상 클립 모션(위치/크기/회전)과 같이 움직이게 */
+  layerTransform?: string;
+  /** 같은 모션의 숫자 (미리보기 px, 도, 배율) — 끌 때 마우스 위치를 클립 좌표로 되돌리는 데 씀 */
+  motion?: { px: number; py: number; rot: number; sc: number };
+}> = ({ clip, width, height, canvasWidth, layerTransform, motion }) => {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const currentTime = useEditorStore((s) => s.currentTime);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
@@ -30,11 +34,18 @@ export const BlurMaskOverlay: React.FC<{ clip: TimelineClip | undefined; width: 
   const scale = canvasWidth / Math.max(1, width); // 출력 px → 미리보기 px
   const editing = selectedClipId === clip.id;
 
-  const rectOf = () => svgRef.current?.getBoundingClientRect();
-  const toN = (rect: DOMRect, ev: { clientX: number; clientY: number }): MaskPoint => [
-    (ev.clientX - rect.left) / rect.width,
-    (ev.clientY - rect.top) / rect.height,
-  ];
+  // 기준 사각형 = 변형 안 된 미리보기 화면(부모). 마우스 위치 → 모션(이동·회전·크기)을 되돌려 클립 좌표로
+  const rectOf = () => svgRef.current?.parentElement?.getBoundingClientRect();
+  const toN = (rect: DOMRect, ev: { clientX: number; clientY: number }): MaskPoint => {
+    const m = motion || { px: 0, py: 0, rot: 0, sc: 1 };
+    let x = ev.clientX - (rect.left + rect.width / 2) - m.px;
+    let y = ev.clientY - (rect.top + rect.height / 2) - m.py;
+    const a = (-m.rot * Math.PI) / 180;
+    [x, y] = [x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a)];
+    x /= m.sc || 1;
+    y /= m.sc || 1;
+    return [(x + rect.width / 2) / rect.width, (y + rect.height / 2) / rect.height];
+  };
 
   /** 선택된 점들 끌기 */
   const dragSelected = (e: React.PointerEvent, selection: Set<string>) => {
@@ -66,7 +77,13 @@ export const BlurMaskOverlay: React.FC<{ clip: TimelineClip | undefined; width: 
         );
         // 키프레임이 있으면 지금 시각의 키프레임을 만들거나 고침, 없으면 고정 위치를 바꿈
         return m.keyframes?.length
-          ? { ...m, keyframes: [...m.keyframes.filter((f) => Math.abs(f.t - t) > 1 / 60), { t: +t.toFixed(3), points: pts }].sort((a, b) => a.t - b.t) }
+          ? {
+              ...m,
+              keyframes: [
+                ...m.keyframes.filter((f) => Math.abs(f.t - t) > 1 / 60),
+                { t: +t.toFixed(3), points: pts, ease: m.keyframes.find((f) => Math.abs(f.t - t) <= 1 / 60)?.ease ?? 'linear' },
+              ].sort((a, b) => a.t - b.t),
+            }
           : { ...m, points: pts };
       });
       updateClip(clip.id, { blurMasks: next });
@@ -139,6 +156,7 @@ export const BlurMaskOverlay: React.FC<{ clip: TimelineClip | undefined; width: 
           key={m.id}
           className="absolute inset-0 z-[5] pointer-events-none"
           style={{
+            transform: layerTransform,
             backdropFilter: `blur(${(m.blur * scale).toFixed(2)}px)`,
             WebkitBackdropFilter: `blur(${(m.blur * scale).toFixed(2)}px)`,
             WebkitMaskImage: maskSvgDataUrl(maskPointsAt(m, t), width, height, m.feather),
@@ -154,7 +172,7 @@ export const BlurMaskOverlay: React.FC<{ clip: TimelineClip | undefined; width: 
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="none"
           className="absolute inset-0 w-full h-full z-20"
-          style={{ pointerEvents: 'all', cursor: 'default' }}
+          style={{ pointerEvents: 'all', cursor: 'default', transform: layerTransform }}
           onPointerDown={onEmptyDown}
         >
           {masks.map((m, mi) => {

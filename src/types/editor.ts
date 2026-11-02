@@ -80,7 +80,7 @@ export type BlurMask = {
   points: MaskPoint[];
   blur: number;
   feather: number;
-  keyframes?: Array<{ t: number; points: MaskPoint[] }>;
+  keyframes?: Array<{ t: number; points: MaskPoint[]; ease?: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold' }>;
 };
 
 export interface MediaAsset {
@@ -123,6 +123,12 @@ export interface TimelineClip {
   scale?: number;        // 비디오 클립 크기 비율 (기본 100%)
   speed?: number;        // 재생 속도 (1 = 100%). 타임라인 길이 = 원본 사용 길이 ÷ 속도
   blurMasks?: BlurMask[]; // 영상 클립: 원본에 박힌 글자 등을 흐리게 가리는 마스크
+  posX?: number;         // 모션: 위치 X (출력 화면 px, 0 = 가운데)
+  posY?: number;         // 모션: 위치 Y
+  rotation?: number;     // 모션: 회전 (도) — 영상/자막 공통
+  textScale?: number;    // 자막 모션: 크기 (%)
+  /** 키프레임: 속성 이름(posX/posY/scale/rotation/opacity …) → [{t: 클립 안 초, v, ease}] */
+  keyframes?: Record<string, Array<{ t: number; v: number; ease?: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'hold' }>>;
 
   // 자막/텍스트 클립 전용 속성
   text?: string;

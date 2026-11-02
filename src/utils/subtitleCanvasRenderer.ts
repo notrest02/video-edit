@@ -107,6 +107,15 @@ export function drawSubtitleClip(
   const clipOpacity = clip.opacity ?? 1;
   ctx.save();
   ctx.globalAlpha = clipOpacity;
+  // 자막 모션: 자막 가운데를 기준으로 회전/크기
+  const rot = ((clip.rotation ?? 0) * Math.PI) / 180;
+  const tsc = (clip.textScale ?? 100) / 100;
+  if (rot || Math.abs(tsc - 1) > 1e-6) {
+    ctx.translate(centerX, centerY);
+    if (rot) ctx.rotate(rot);
+    if (Math.abs(tsc - 1) > 1e-6) ctx.scale(tsc, tsc);
+    ctx.translate(-centerX, -centerY);
+  }
 
   // 1. 배경 박스 그리기
   const bgEnabled =
