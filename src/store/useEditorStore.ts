@@ -173,9 +173,8 @@ interface EditorState {
   commitMultiClipsOverlapOverwrite: (clipIds: string[]) => void;
   unlinkClip: (clipId?: string) => void;
   deleteClip: (clipId?: string) => void;
+  /** 인디케이터 위치에서 자르기: 선택한 클립이 있으면 그 클립만(연결된 V+A 포함), 없으면 아래 클립 전부 */
   splitClipAtPlayhead: () => void;
-  /** D 키: 인디케이터 위치에서 '선택된' 클립만 자르기 (연결된 V+A 포함) */
-  splitSelectedClipsAtPlayhead: () => void;
   splitClipAtTime: (clipId: string, splitTime: number) => void;
   /** 클립 속도 변경 (1 = 100%). 길이가 바뀌며, 뒤 클립과 겹치지 않게 맞춤 */
   setClipSpeed: (clipId: string, speed: number) => void;
@@ -357,7 +356,7 @@ async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTr
     (c) => c.type === 'audio' && c.sourcePath && !c.muted && clipSpeed(c) === 1 && overlapsText(c)
   );
   if (sources.length === 0) {
-    sources = clips.filter((c) => c.type === 'video' && c.sourcePath && clipSpeed(c) === 1 && overlapsText(c));
+    sources = clips.filter((c) => c.type === 'video' && c.sourcePath && !c.muted && clipSpeed(c) === 1 && overlapsText(c));
   }
   if (sources.length === 0) return undefined;
 
@@ -2065,24 +2064,45 @@ export const useEditorStore = create<EditorState>((set, get) => {
     },
 
     splitClipAtPlayhead: () => {
-      const { clips, tracks, currentTime, selectedClipId, linkedSelection } = get();
+      const { clips, tracks, currentTime, selectedClipId, selectedClipIds, linkedSelection } = get();
+      const lockedTracks = new Set(tracks.filter((t) => t.locked).map((t) => t.id));
 
       const candidates = clips.filter(
-        (c) => currentTime > c.startTime + 0.04 && currentTime < c.startTime + c.duration - 0.04
+        (c) =>
+          !lockedTracks.has(c.trackId) &&
+          currentTime > c.startTime + 0.04 &&
+          currentTime < c.startTime + c.duration - 0.04
       );
       if (candidates.length === 0) {
-        set({ statusMessage: '재생 헤드(파란 선)가 분할할 클립 내부에 위치해야 합니다.' });
+        set({ statusMessage: '인디케이터(파란 선)가 자를 클립 안에 있어야 합니다.' });
         return;
       }
 
-      let targets = candidates;
-      if (selectedClipId && candidates.some((c) => c.id === selectedClipId)) {
-        const sel = candidates.find((c) => c.id === selectedClipId)!;
-        targets = candidates.filter(
-          (c) =>
-            c.id === sel.id ||
-            (linkedSelection && sel.linkedGroupId && c.linkedGroupId === sel.linkedGroupId)
+      const selected = new Set<string>([
+        ...selectedClipIds,
+        ...(selectedClipId ? [selectedClipId] : []),
+      ]);
+      const hasSelection = selected.size > 0;
+
+      if (hasSelection && linkedSelection) {
+        const groups = new Set(
+          clips.filter((c) => selected.has(c.id) && c.linkedGroupId).map((c) => c.linkedGroupId!)
         );
+        for (const c of clips) {
+          if (c.linkedGroupId && groups.has(c.linkedGroupId)) selected.add(c.id);
+        }
+      }
+
+      const targets = hasSelection
+        ? candidates.filter((c) => selected.has(c.id))
+        : candidates;
+
+      if (targets.length === 0) {
+        set({
+          statusMessage:
+            '인디케이터(파란 선)가 선택한 클립 안에 있어야 자를 수 있습니다. (전체 클립을 자르려면 빈 곳을 클릭해 선택을 해제하세요)',
+        });
+        return;
       }
 
       pushHistory();
@@ -2090,6 +2110,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const targetIds = new Set(targets.map((t) => t.id));
       const newGroupMap = new Map<string, string>();
       const nextClips: TimelineClip[] = [];
+      const newSelected: string[] = [];
 
       for (const clip of clips) {
         if (!targetIds.has(clip.id)) {
@@ -2111,76 +2132,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           secondGroupId = newGroupMap.get(clip.linkedGroupId);
         }
 
-        nextClips.push(
-          { ...clip, duration: firstDuration },
-          {
-            ...clip,
-            id: `${clip.id}_s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
-            startTime: Number(currentTime.toFixed(4)),
-            duration: secondDuration,
-            sourceStart:
-              clip.type === 'text'
-                ? 0
-                : Number((clip.sourceStart + firstDuration * clipSpeed(clip)).toFixed(4)),
-            linkedGroupId: secondGroupId,
-          }
-        );
-      }
-
-      set({
-        clips: nextClips,
-        sequences: syncActiveSequenceData(tracks, nextClips),
-        statusMessage: '재생 헤드 위치에서 클립이 분할되었습니다.',
-      });
-    },
-
-    splitSelectedClipsAtPlayhead: () => {
-      const { clips, tracks, currentTime, selectedClipId, selectedClipIds, linkedSelection } = get();
-      const selected = new Set<string>([...selectedClipIds, ...(selectedClipId ? [selectedClipId] : [])]);
-      if (selected.size === 0) {
-        set({ statusMessage: '자를 클립을 먼저 선택해 주세요. (D: 인디케이터 위치에서 선택한 클립 자르기)' });
-        return;
-      }
-      // 연결된 V+A 짝도 함께
-      if (linkedSelection) {
-        const groups = new Set(
-          clips.filter((c) => selected.has(c.id) && c.linkedGroupId).map((c) => c.linkedGroupId!)
-        );
-        for (const c of clips) if (c.linkedGroupId && groups.has(c.linkedGroupId)) selected.add(c.id);
-      }
-      const lockedTracks = new Set(tracks.filter((t) => t.locked).map((t) => t.id));
-      const targets = clips.filter(
-        (c) =>
-          selected.has(c.id) &&
-          !lockedTracks.has(c.trackId) &&
-          currentTime > c.startTime + 0.04 &&
-          currentTime < c.startTime + c.duration - 0.04
-      );
-      if (targets.length === 0) {
-        set({ statusMessage: '인디케이터(파란 선)가 선택한 클립 안에 있어야 자를 수 있습니다.' });
-        return;
-      }
-
-      pushHistory();
-      const targetIds = new Set(targets.map((t) => t.id));
-      const newGroupMap = new Map<string, string>();
-      const nextClips: TimelineClip[] = [];
-      const newSelected: string[] = [];
-      for (const clip of clips) {
-        if (!targetIds.has(clip.id)) {
-          nextClips.push(clip);
-          continue;
-        }
-        const firstDuration = Number((currentTime - clip.startTime).toFixed(4));
-        const secondDuration = Number((clip.duration - firstDuration).toFixed(4));
-        let secondGroupId = clip.linkedGroupId;
-        if (clip.linkedGroupId) {
-          if (!newGroupMap.has(clip.linkedGroupId)) {
-            newGroupMap.set(clip.linkedGroupId, `link_d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
-          }
-          secondGroupId = newGroupMap.get(clip.linkedGroupId);
-        }
-        const secondId = `${clip.id}_d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
+        const secondId = `${clip.id}_s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
         nextClips.push(
           { ...clip, duration: firstDuration },
           {
@@ -2197,13 +2149,20 @@ export const useEditorStore = create<EditorState>((set, get) => {
         );
         newSelected.push(secondId);
       }
+
       set({
         clips: nextClips,
         sequences: syncActiveSequenceData(tracks, nextClips),
-        // 자른 뒤쪽 조각을 선택 상태로 → D 를 이어서 눌러 계속 자르기 편하게
-        selectedClipIds: newSelected,
-        selectedClipId: newSelected[0] ?? null,
-        statusMessage: `인디케이터 위치에서 선택한 클립 ${targets.length}개를 잘랐습니다.`,
+        ...(hasSelection
+          ? {
+              // 선택한 클립을 자른 경우 뒤쪽 조각을 선택 상태로 유지해 연속 자르기 편하게
+              selectedClipIds: newSelected,
+              selectedClipId: newSelected[0] ?? null,
+            }
+          : {}),
+        statusMessage: hasSelection
+          ? `인디케이터 위치에서 선택한 클립 ${targets.length}개를 잘랐습니다.`
+          : `인디케이터 위치에서 전체 클립 ${targets.length}개를 잘랐습니다.`,
       });
     },
 

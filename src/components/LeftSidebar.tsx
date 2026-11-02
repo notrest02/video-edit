@@ -106,7 +106,7 @@ export const LeftSidebar: React.FC = () => {
           .filter((c) => c.type === 'audio' && c.sourcePath)
           .sort((a, b) => a.startTime - b.startTime)
       : clips
-          .filter((c) => c.type === 'video' && c.sourcePath)
+          .filter((c) => c.type === 'video' && c.sourcePath && !c.muted)
           .sort((a, b) => a.startTime - b.startTime);
 
   const targetAudioClips =

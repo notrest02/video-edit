@@ -8,6 +8,7 @@ import {
   StepForward,
 } from 'lucide-react';
 import { useEditorStore, clipSpeed } from '../store/useEditorStore';
+import { matchAction } from '../utils/shortcuts';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
 import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
@@ -377,11 +378,10 @@ export const PreviewPlayer: React.FC = () => {
       videoEl.playbackRate = clipSpeed(activeVideoClip);
     }
 
-    // 음성이 A 트랙으로 분리되어 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
+    // 음성이 A 트랙으로 분리되었거나(activeVideoClip.muted), 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
+    // (분리된 A 트랙 음성 클립을 삭제했더라도 비디오 클립은 muted=true 상태를 유지하므로 소리가 나지 않음)
     const hasActiveAudio = Boolean(activeAudioClip);
-    const hasAnyAudioOnTimeline = clips.some((c) => c.type === 'audio');
-    const shouldMuteVideo =
-      hasActiveAudio || (hasAnyAudioOnTimeline && Boolean(activeVideoClip.muted));
+    const shouldMuteVideo = hasActiveAudio || Boolean(activeVideoClip.muted);
     videoEl.muted = shouldMuteVideo;
     videoEl.volume = shouldMuteVideo
       ? 0
@@ -788,7 +788,8 @@ export const PreviewPlayer: React.FC = () => {
                         // Enter = 현재 커서 위치에서 즉시 자막 나누기
                         // Backspace = 앞 자막과 즉시 하나로 합치기 (Shift+Backspace는 뒤 자막과 합치기)
                         if (isQuickSplitMergeMode) {
-                          if (e.key === 'Enter' && !e.shiftKey) {
+                          const subAction = matchAction(e.nativeEvent, 'subtitle');
+                          if (subAction === 'subtitleSplit') {
                             e.preventDefault();
                             e.stopPropagation();
                             const nextId = splitSubtitleClipAtTextCursor(sub.id, cursor);
@@ -804,10 +805,10 @@ export const PreviewPlayer: React.FC = () => {
                             return;
                           }
 
-                          if (e.key === 'Backspace') {
+                          if (subAction === 'subtitleMergePrev' || subAction === 'subtitleMergeNext') {
                             e.preventDefault();
                             e.stopPropagation();
-                            const dir = e.shiftKey ? 'next' : 'prev';
+                            const dir = subAction === 'subtitleMergeNext' ? 'next' : 'prev';
                             const mergedId = mergeSubtitleClipWithAdjacent(sub.id, dir);
                             if (mergedId) {
                               setTimeout(() => {

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus } from 'lucide-react';
+import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
+import { ShortcutSettingsModal } from './ShortcutSettingsModal';
 import { useEditorStore } from '../store/useEditorStore';
 import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
 import { ensureFontsForValues } from '../utils/pcFonts';
@@ -25,6 +26,7 @@ function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): Tim
 
 export const TopHeader: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
   // 렌더 범위: 전체 시퀀스 / 인~아웃 구간
   const [renderRange, setRenderRange] = useState<'all' | 'inout'>('inout');
   const [exportProgress, setExportProgress] = useState(0);
@@ -234,6 +236,16 @@ export const TopHeader: React.FC = () => {
             <Redo2 className="w-3.5 h-3.5" />
           </button>
         </div>
+
+        <div className="h-3.5 w-[1px] bg-[#333333] mx-0.5" />
+        <button
+          onClick={() => setShowShortcuts(true)}
+          title="키보드 단축키 보기 / 바꾸기"
+          className="px-1.5 py-0.5 rounded hover:bg-[#2e2e2e] text-[#aaaaaa] hover:text-white transition flex items-center gap-1 text-[11px]"
+        >
+          <Keyboard className="w-3.5 h-3.5" />
+          <span>단축키</span>
+        </button>
       </div>
 
       {/* 중앙: 프로젝트 이름 & 상태 표시 */}
@@ -292,6 +304,7 @@ export const TopHeader: React.FC = () => {
         </button>
 
       </div>
+      {showShortcuts && <ShortcutSettingsModal onClose={() => setShowShortcuts(false)} />}
     </header>
   );
 };

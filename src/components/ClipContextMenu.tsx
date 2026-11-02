@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useEditorStore, clipSpeed, MIN_CLIP_SPEED, MAX_CLIP_SPEED } from '../store/useEditorStore';
+import { displayBinding, getShortcutMap } from '../utils/shortcuts';
 
 const PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -148,11 +149,13 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
         </>
       )}
       <button
-        onClick={() => run(() => st.splitSelectedClipsAtPlayhead())}
+        onClick={() => run(() => st.splitClipAtPlayhead())}
         className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
       >
         <span>인디케이터 위치에서 자르기</span>
-        <span className="text-[#888888]">D</span>
+        <span className="text-[#888888]">
+          {getShortcutMap().splitAtPlayhead.map(displayBinding).join(' / ')}
+        </span>
       </button>
     </div>
   );

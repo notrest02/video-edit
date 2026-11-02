@@ -9,12 +9,15 @@ import { TimelinePanel } from './components/TimelinePanel';
 import { SequenceSettingsModal } from './components/SequenceSettingsModal';
 import { RelinkMediaModal } from './components/RelinkMediaModal';
 import { useEditorStore } from './store/useEditorStore';
+import { areShortcutsSuspended, matchAction } from './utils/shortcuts';
 import { ensureFontsForValues } from './utils/pcFonts';
 import { importDroppedFiles } from './utils/dropImport';
 
 export const App: React.FC = () => {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // 단축키 설정 창에서 키를 입력받는 중에는 앱 단축키를 쓰지 않음
+      if (areShortcutsSuspended()) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -27,129 +30,87 @@ export const App: React.FC = () => {
       }
 
       const state = useEditorStore.getState();
-      const isCtrl = e.ctrlKey || e.metaKey;
+      // 현재 시간에 보이는(또는 선택된) 자막
+      const activeSubtitle = () =>
+        state.clips.find((c) => c.id === state.selectedClipId && c.type === 'text') ||
+        state.clips.find(
+          (c) =>
+            c.type === 'text' &&
+            state.currentTime >= c.startTime &&
+            state.currentTime < c.startTime + c.duration
+        );
 
-      // 1. [Ctrl / Cmd 복합 단축키 우선 처리]
-      // - Ctrl+S / Ctrl+Shift+S (저장 / 다른 이름으로 저장)
-      // - Ctrl+O (열기), Ctrl+N (새로만들기), Ctrl+Z / Ctrl+Y (실행취소/다시실행)
-      // - 중요: Ctrl이 눌렸을 때는 일반 단일키 's'(클립 분할) 등이 절대 실행되지 않고 즉시 return!
-      if (isCtrl) {
-        if (e.code === 'KeyS' || e.key.toLowerCase() === 's' || e.key === 'ㄴ') {
-          e.preventDefault();
-          e.stopPropagation();
-          state.saveProject(e.shiftKey);
-          return;
-        }
-
-        if (e.code === 'KeyO' || e.key.toLowerCase() === 'o' || e.key === 'ㅐ') {
-          e.preventDefault();
-          e.stopPropagation();
-          state.openProject();
-          return;
-        }
-
-        if (e.code === 'KeyN' || e.key.toLowerCase() === 'n' || e.key === 'ㅜ') {
-          e.preventDefault();
-          e.stopPropagation();
-          state.newProject();
-          return;
-        }
-
-        if (e.code === 'KeyZ' || e.key.toLowerCase() === 'z' || e.key === 'ㅋ') {
-          e.preventDefault();
-          e.stopPropagation();
-          if (e.shiftKey) {
-            state.redo();
-          } else {
-            state.undo();
+      // 1) 화면 단축키 모드가 켜져 있으면 자막 나누기/합치기 단축키가 우선
+      if (state.isQuickSplitMergeMode) {
+        const sub = matchAction(e, 'subtitle');
+        if (sub) {
+          const activeSub = activeSubtitle();
+          if (activeSub) {
+            e.preventDefault();
+            if (sub === 'subtitleSplit') state.splitSubtitleClipAtTextCursor(activeSub.id);
+            else state.mergeSubtitleClipWithAdjacent(activeSub.id, sub === 'subtitleMergeNext' ? 'next' : 'prev');
+            return;
           }
-          return;
         }
-
-        if (e.code === 'KeyY' || e.key.toLowerCase() === 'y' || e.key === 'ㅛ') {
-          e.preventDefault();
-          e.stopPropagation();
-          state.redo();
-          return;
-        }
-
-        // Ctrl+Shift+X: 인/아웃 지점 지우기 (프리미어와 동일)
-        if (e.shiftKey && (e.code === 'KeyX' || e.key.toLowerCase() === 'x' || e.key === 'ㅌ')) {
-          e.preventDefault();
-          state.clearInOut();
-          state.setStatusMessage('인/아웃 지점을 지웠습니다.');
-          return;
-        }
-
-        return; // 기타 Ctrl 조합 시 하단의 단일 문자 단축키 실행 방지
       }
 
-      // 2. [단일 키 단축키 - Ctrl/Cmd 미입력 시에만 실행]
-      if (e.code === 'Space') {
-        e.preventDefault();
-        state.setIsPlaying(!state.isPlaying);
-      } else if (e.code === 'KeyI' && !e.altKey) {
-        // I: 인 지점 표시
-        e.preventDefault();
-        state.setInPoint(state.currentTime);
-      } else if (e.code === 'KeyO' && !e.altKey) {
-        // O: 아웃 지점 표시
-        e.preventDefault();
-        state.setOutPoint(state.currentTime);
-      } else if (e.code === 'KeyV' || e.key === 'v' || e.key === 'V' || e.key === 'ㅍ') {
-        state.setActiveTool('select');
-      } else if (e.code === 'KeyC' || e.key === 'c' || e.key === 'C' || e.key === 'ㅊ') {
-        state.setActiveTool('razor');
-      } else if (e.code === 'KeyD' && !e.altKey) {
-        // D: 인디케이터 위치에서 선택한 클립만 자르기
-        e.preventDefault();
-        state.splitSelectedClipsAtPlayhead();
-      } else if (e.code === 'KeyS' || e.key === 's' || e.key === 'S' || e.key === 'ㄴ') {
-        // 순수 'S' 키만 눌렸을 때만 인디케이터 클립 분할!
-        e.preventDefault();
-        state.splitClipAtPlayhead();
-      } else if (e.key === 'Enter' && state.isQuickSplitMergeMode) {
-        // 단축키 분할/합치기 모드가 켜져 있을 때 Enter를 누르면 현재 선택/표시 중인 자막 클립을 즉시 분할
-        const activeSub =
-          state.clips.find((c) => c.id === state.selectedClipId && c.type === 'text') ||
-          state.clips.find(
-            (c) =>
-              c.type === 'text' &&
-              state.currentTime >= c.startTime &&
-              state.currentTime < c.startTime + c.duration
-          );
-        if (activeSub) {
-          e.preventDefault();
-          state.splitSubtitleClipAtTextCursor(activeSub.id);
-        }
-      } else if (e.key === 'Backspace' && state.isQuickSplitMergeMode) {
-        // 단축키 분할/합치기 모드가 켜져 있을 때 Backspace를 누르면 현재 선택/표시 중인 자막을 앞 자막과 병합
-        const activeSub =
-          state.clips.find((c) => c.id === state.selectedClipId && c.type === 'text') ||
-          state.clips.find(
-            (c) =>
-              c.type === 'text' &&
-              state.currentTime >= c.startTime &&
-              state.currentTime < c.startTime + c.duration
-          );
-        if (activeSub) {
-          e.preventDefault();
-          state.mergeSubtitleClipWithAdjacent(activeSub.id, e.shiftKey ? 'next' : 'prev');
-        } else {
-          e.preventDefault();
+      // 2) 일반 단축키 (설정에서 바꾼 키 기준)
+      const action = matchAction(e, 'global');
+      if (!action) return;
+      e.preventDefault();
+      e.stopPropagation();
+      switch (action) {
+        case 'newProject':
+          state.newProject();
+          break;
+        case 'openProject':
+          state.openProject();
+          break;
+        case 'save':
+          state.saveProject(false);
+          break;
+        case 'saveAs':
+          state.saveProject(true);
+          break;
+        case 'undo':
+          state.undo();
+          break;
+        case 'redo':
+          state.redo();
+          break;
+        case 'delete':
           state.deleteSelectedLayers();
-        }
-      } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        state.deleteSelectedLayers();
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        state.setIsPlaying(false);
-        state.setCurrentTime(Math.max(0, state.currentTime - 1 / state.fps));
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        state.setIsPlaying(false);
-        state.setCurrentTime(state.currentTime + 1 / state.fps);
+          break;
+        case 'playPause':
+          state.setIsPlaying(!state.isPlaying);
+          break;
+        case 'prevFrame':
+          state.setIsPlaying(false);
+          state.setCurrentTime(Math.max(0, state.currentTime - 1 / state.fps));
+          break;
+        case 'nextFrame':
+          state.setIsPlaying(false);
+          state.setCurrentTime(state.currentTime + 1 / state.fps);
+          break;
+        case 'toolSelect':
+          state.setActiveTool('select');
+          break;
+        case 'toolRazor':
+          state.setActiveTool('razor');
+          break;
+        case 'splitAtPlayhead':
+          state.splitClipAtPlayhead();
+          break;
+        case 'markIn':
+          state.setInPoint(state.currentTime);
+          break;
+        case 'markOut':
+          state.setOutPoint(state.currentTime);
+          break;
+        case 'clearInOut':
+          state.clearInOut();
+          state.setStatusMessage('인/아웃 지점을 지웠습니다.');
+          break;
       }
     };
 

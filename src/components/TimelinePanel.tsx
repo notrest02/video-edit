@@ -929,7 +929,7 @@ export const TimelinePanel: React.FC = () => {
 
                 <button
                   onClick={splitClipAtPlayhead}
-                  title="현재 재생 헤드 위치에서 분할 (S)"
+                  title="현재 인디케이터 위치에서 자르기 — 선택 시 해당 클립만, 미선택 시 전체 (D)"
                   className="p-1 rounded bg-[#262626] hover:bg-[#333333] border border-[#383838] text-[#cccccc]"
                 >
                   <Scissors className="w-3 h-3" />
