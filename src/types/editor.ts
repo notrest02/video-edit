@@ -298,6 +298,25 @@ declare global {
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
+      /** STEP 0 대본 만들기 (Claude Haiku: 생성 + 검수) */
+      scriptGenGenerate?: (params: {
+        product: string;
+        facts: string;
+        space: string;
+        target: string;
+        seconds: number;
+        versions: Array<{ hookType: string; story: string; focus: string }>;
+        media: Array<{ no: number; path: string; duration: number; name: string }>;
+        examplePaths: string[];
+      }) => Promise<{
+        versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[]; warnings: string[] }>;
+        fixes: Array<{ version: number; before: string; after: string; reason: string }>;
+        usage: { input: number; output: number };
+        exampleCount: number;
+      }>;
+      scriptGenSaveTxt?: (params: { defaultName: string; content: string }) => Promise<string | null>;
+      openScriptExamplesDialog?: () => Promise<string[]>;
+      onScriptGenProgress?: (callback: (msg: string) => void) => () => void;
       textMaskCancel?: () => Promise<void>;
       textMaskAnalyze?: (params: { path: string; width: number; height: number }) => Promise<{ tracks: AutoTextTrack[]; cached: boolean }>;
       onTextMaskProgress?: (callback: (msg: string) => void) => () => void;

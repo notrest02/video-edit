@@ -12,10 +12,10 @@ import {
   Mic,
   ArrowRight,
   RefreshCw,
-  Clapperboard,
 } from 'lucide-react';
 import { useEditorStore, LOCAL_WHISPER_MODEL } from '../store/useEditorStore';
 import { AutoEditCard } from './AutoEditCard';
+import { ScriptGenCard } from './ScriptGenCard';
 import {
   CaptionDiffItem,
   compareAndCorrectCaptionsWithScript,
@@ -37,7 +37,7 @@ import { WordTimestamp } from '../types/editor';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 
 export const LeftSidebar: React.FC = () => {
-  const [subTab, setSubTab] = useState<'step1-ai' | 'step2-script' | 'step3-manage'>('step1-ai');
+  const [subTab, setSubTab] = useState<'step0-script' | 'step1-ai' | 'step2-script' | 'step3-manage'>('step1-ai');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [progressText, setProgressText] = useState<string>('');
   const [diffReport, setDiffReport] = useState<CaptionDiffItem[]>([]);
@@ -67,7 +67,6 @@ export const LeftSidebar: React.FC = () => {
     setCaptionMaxCharsPerLine,
     setAutoSplitOnCaptionGenerate,
     reformatAllCaptionsLineLayout,
-    importAutoEditPlan,
     splitVariantsIntoSequences,
     setAdSegments,
     replaceClipWithSegments,
@@ -527,29 +526,41 @@ export const LeftSidebar: React.FC = () => {
   );
 
   return (
-    <aside className="w-[430px] shrink-0 bg-[#1d1d1d] border-r border-[#111111] flex flex-col h-full select-none text-[#cccccc]">
+    <aside className="w-full bg-[#1d1d1d] border-r border-[#111111] flex flex-col h-full select-none text-[#cccccc]">
       {/* 상단 1 -> 2 -> 3 단계 탭 헤더 */}
       <div className="h-9 bg-[#161616] border-b border-[#2b2b2b] px-2 flex items-center gap-1 text-[11px]">
         <button
+          onClick={() => setSubTab('step0-script')}
+          title="AI 대본 만들기"
+          className={`shrink-0 h-7 rounded px-2 flex items-center justify-center gap-1 font-semibold transition whitespace-nowrap ${
+            subTab === 'step0-script'
+              ? 'bg-[#2d8ceb] text-white shadow'
+              : 'text-[#999999] hover:text-white hover:bg-[#222222]'
+          }`}
+        >
+          <span>0. 대본</span>
+        </button>
+
+        <button
           onClick={() => setSubTab('step1-ai')}
-          className={`flex-1 h-7 rounded px-2 flex items-center justify-center gap-1 font-semibold transition ${
+          className={`flex-1 min-w-0 h-7 rounded px-1.5 flex items-center justify-center gap-1 font-semibold transition whitespace-nowrap ${
             subTab === 'step1-ai'
               ? 'bg-[#2d8ceb] text-white shadow'
               : 'text-[#999999] hover:text-white hover:bg-[#222222]'
           }`}
         >
-          <span>1. AI 캡션 생성</span>
+          <span className="truncate">1. AI 캡션 생성</span>
         </button>
 
         <button
           onClick={() => setSubTab('step2-script')}
-          className={`flex-1 h-7 rounded px-2 flex items-center justify-center gap-1 font-semibold transition ${
+          className={`flex-1 min-w-0 h-7 rounded px-1.5 flex items-center justify-center gap-1 font-semibold transition whitespace-nowrap ${
             subTab === 'step2-script'
               ? 'bg-[#2d8ceb] text-white shadow'
               : 'text-[#999999] hover:text-white hover:bg-[#222222]'
           }`}
         >
-          <span>2. 대본 오타 변환</span>
+          <span className="truncate">2. 대본 오타 변환</span>
           {subtitleClips.length > 0 && (
             <span className="px-1 rounded-full bg-black/30 text-[10px]">
               {subtitleClips.length}
@@ -559,13 +570,14 @@ export const LeftSidebar: React.FC = () => {
 
         <button
           onClick={() => setSubTab('step3-manage')}
-          className={`flex-1 h-7 rounded px-2 flex items-center justify-center gap-1 font-semibold transition ${
+          title="AI 자동 배치 · 음성 무음 제거"
+          className={`flex-1 min-w-0 h-7 rounded px-1.5 flex items-center justify-center gap-1 font-semibold transition whitespace-nowrap ${
             subTab === 'step3-manage'
               ? 'bg-[#2d8ceb] text-white shadow'
               : 'text-[#999999] hover:text-white hover:bg-[#222222]'
           }`}
         >
-          <span>3. 컷/클립 정리</span>
+          <span className="truncate">3. 자동배치·무음제거</span>
         </button>
       </div>
 
@@ -579,6 +591,16 @@ export const LeftSidebar: React.FC = () => {
 
       {/* 본문 영역 */}
       <div className="flex-1 overflow-y-auto p-3.5 bg-[#181818] space-y-3.5">
+        {/* STEP 0: AI 대본 만들기 — 탭을 옮겨도 입력·결과가 남도록 늘 그려 두고 숨기기만 한다 */}
+        <div className={subTab === 'step0-script' ? '' : 'hidden'}>
+          <ScriptGenCard
+            onSendToScript={(text) => {
+              setScriptText(text);
+              setSubTab('step2-script');
+            }}
+          />
+        </div>
+
         {/* =====================================================================
             STEP 1: 선택되어 있는 오디오 파일을 대상으로 AI 자막 캡션 생성 (최우선 화면!)
            ===================================================================== */}
@@ -850,39 +872,11 @@ export const LeftSidebar: React.FC = () => {
         )}
 
         {/* =====================================================================
-            STEP 3: (후순위) 컷 편집 진행 후 클립과 자막 시작/끝을 맞추는 정리 기능 & 무음 컷
+            STEP 3: AI 자동 배치 + 음성 무음 제거
            ===================================================================== */}
         {subTab === 'step3-manage' && (
           <div className="space-y-3.5">
             <AutoEditCard />
-
-            {/* 자동 편집 계획 불러오기 (시험): 영상 클립을 빈 트랙에 배치 */}
-            <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs">
-              <div className="font-semibold text-white flex items-center gap-1.5">
-                <Clapperboard className="w-4 h-4 text-[#2d8ceb]" />
-                자동 편집 계획 불러오기 (시험)
-              </div>
-              <p className="text-[11px] text-[#aaaaaa] leading-relaxed">
-                계획 파일(.json)의 영상 클립과 음성을 지금 시퀀스의 빈 트랙에 올립니다. 기존 클립은 그대로이며
-                Ctrl+Z로 되돌릴 수 있습니다.
-              </p>
-              <button
-                onClick={async () => {
-                  const f = await window.electronAPI?.openAutoEditPlanDialog?.();
-                  if (!f) return;
-                  try {
-                    await importAutoEditPlan(JSON.parse(f.content));
-                  } catch {
-                    useEditorStore.getState().setStatusMessage(`계획 파일을 읽지 못했습니다: ${f.name}`);
-                  }
-                }}
-                disabled={isProcessing}
-                className="w-full py-2 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white font-semibold rounded flex items-center justify-center gap-1.5 transition"
-              >
-                <Clapperboard className="w-3.5 h-3.5" />
-                계획 파일 열기
-              </button>
-            </div>
 
             {/* 무음 구간 자동 컷 편집 */}
             <div className="bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2.5 text-xs">

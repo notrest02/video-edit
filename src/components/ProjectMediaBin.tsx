@@ -88,30 +88,30 @@ export const ProjectMediaBin: React.FC = () => {
     <section
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleExternalDrop}
-      className="w-[430px] shrink-0 bg-[#1d1d1d] border-r border-[#111111] flex flex-col h-full select-none text-[#cccccc]"
+      className="w-full bg-[#1d1d1d] border-r border-[#111111] flex flex-col h-full select-none text-[#cccccc]"
     >
       {/* 프로젝트 상단 액션 바 (+ 새 시퀀스 / 미디어 가져오기 / 샘플 영상) */}
       <div className="p-2 space-y-1.5 border-b border-[#2b2b2b] bg-[#1d1d1d]">
         <div className="flex items-center justify-between text-[11px]">
-          <span className="text-[#aaaaaa] font-mono truncate">🎬 {projectName}.prproj</span>
-          <div className="flex items-center gap-1">
+          <span className="text-[#aaaaaa] font-mono truncate min-w-0">🎬 {projectName}.prproj</span>
+          <div className="flex items-center gap-1 shrink-0">
             <button
               onClick={openNewSequenceModal}
               title="원하는 해상도/비율로 새 시퀀스 생성"
-              className="px-2 py-0.5 bg-[#2ea043] hover:bg-[#268c39] text-white rounded text-[11px] font-semibold flex items-center gap-1 transition"
+              className="px-2 py-0.5 bg-[#2ea043] hover:bg-[#268c39] text-white rounded text-[11px] font-semibold flex items-center gap-1 transition whitespace-nowrap"
             >
               <PlusSquare className="w-3 h-3" /> 새 시퀀스
             </button>
             <button
               onClick={handleOpenMedia}
-              className="px-2 py-0.5 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white rounded text-[11px] font-medium flex items-center gap-1 transition"
+              className="px-2 py-0.5 bg-[#2d8ceb] hover:bg-[#1e78d6] text-white rounded text-[11px] font-medium flex items-center gap-1 transition whitespace-nowrap"
             >
               <FolderPlus className="w-3 h-3" /> 가져오기
             </button>
             <button
               onClick={handleCreateSampleVideo}
               disabled={isCreatingSample}
-              className="px-2 py-0.5 bg-[#2b2b2b] hover:bg-[#383838] text-[#dddddd] border border-[#3d3d3d] rounded text-[11px] flex items-center gap-1 transition"
+              className="px-2 py-0.5 bg-[#2b2b2b] hover:bg-[#383838] text-[#dddddd] border border-[#3d3d3d] rounded text-[11px] flex items-center gap-1 transition whitespace-nowrap"
             >
               <Wand2 className="w-3 h-3 text-[#2d8ceb]" />
               {isCreatingSample ? '생성 중' : '샘플'}

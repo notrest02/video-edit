@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { TopHeader } from './components/TopHeader';
 import { ModelStatusBar } from './components/ModelStatusBar';
 import { LeftSidebar } from './components/LeftSidebar';
@@ -9,6 +9,15 @@ import { TimelinePanel } from './components/TimelinePanel';
 import { SequenceSettingsModal } from './components/SequenceSettingsModal';
 import { RelinkMediaModal } from './components/RelinkMediaModal';
 import { useEditorStore } from './store/useEditorStore';
+import { LIMITS, fitBin, fitTopRow, useLayoutStore } from './store/useLayoutStore';
+import { Splitter } from './components/Splitter';
+
+// 칸 크기를 끄는 동안 App 만 다시 그려지고 무거운 패널은 다시 그리지 않도록 (패널은 props 가 없고 각자 스토어를 구독)
+const LeftPanel = React.memo(LeftSidebar);
+const Preview = React.memo(PreviewPlayer);
+const Inspector = React.memo(RightInspector);
+const MediaBin = React.memo(ProjectMediaBin);
+const Timeline = React.memo(TimelinePanel);
 import { areShortcutsSuspended, matchAction } from './utils/shortcuts';
 import { ensureFontsForValues } from './utils/pcFonts';
 import { importDroppedFiles } from './utils/dropImport';
@@ -188,23 +197,74 @@ export const App: React.FC = () => {
     if (fontKey) ensureFontsForValues(fontKey.split('|'));
   }, [fontKey]);
 
+  // 칸 크기 (경계선 끌기) — 창 폭이 줄면 가운데 미리보기·타임라인 최소 폭을 남기도록 그릴 때 맞춘다
+  const layout = useLayoutStore();
+  const [winW, setWinW] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setWinW(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const tab = layout.inspectorTab;
+  const top = fitTopRow(winW, layout.leftW, layout.rightW[tab]);
+  const binW = fitBin(winW, layout.binW);
+  const clampTo = (v: number, [lo, hi]: readonly [number, number]) => Math.min(hi, Math.max(lo, v));
+  const maxSide = (other: number) => winW - other - LIMITS.centerMin - 12;
+
   return (
-    <div className="h-screen w-screen flex flex-col bg-[#111111] text-[#cccccc] overflow-hidden">
+    <div ref={rootRef} className="h-screen w-screen flex flex-col bg-[#111111] text-[#cccccc] overflow-hidden">
       {/* 최상단 프리미어 스타일 메뉴 바 */}
       <TopHeader />
       <ModelStatusBar />
 
       {/* 상단 영역 (54% 높이): [좌: 텍스트/대본/캡션] | [중: 프로그램 모니터] | [우: 속성] */}
-      <div className="h-[54%] flex min-h-0 border-b-[3px] border-[#0a0a0a] overflow-hidden">
-        <LeftSidebar />
-        <PreviewPlayer />
-        <RightInspector />
+      <div style={{ height: `${layout.topFrac * 100}%` }} className="flex min-h-0 shrink-0 overflow-hidden">
+        <div style={{ width: top.left }} className="shrink-0 h-full min-w-0">
+          <LeftPanel />
+        </div>
+        <Splitter
+          dir="col"
+          getStart={() => top.left}
+          onDrag={(start, d) => layout.set({ leftW: clampTo(Math.min(start + d, maxSide(top.right)), LIMITS.leftW) })}
+          onReset={() => layout.reset('leftW')}
+        />
+        <Preview />
+        <Splitter
+          dir="col"
+          getStart={() => top.right}
+          onDrag={(start, d) =>
+            layout.set({ rightW: { ...layout.rightW, [tab]: clampTo(Math.min(start - d, maxSide(top.left)), LIMITS.rightW[tab]) } })
+          }
+          onReset={() => layout.reset('rightW')}
+        />
+        <div style={{ width: top.right }} className="shrink-0 h-full min-w-0">
+          <Inspector />
+        </div>
       </div>
+      <Splitter
+        dir="row"
+        getStart={() => layout.topFrac}
+        onDrag={(start, d) => {
+          // 높이 비율은 화면 전체 기준 (예전 h-[54%] 와 같은 뜻)
+          const total = rootRef.current?.clientHeight || window.innerHeight;
+          layout.set({ topFrac: clampTo(start + d / total, LIMITS.topFrac) });
+        }}
+        onReset={() => layout.reset('topFrac')}
+      />
 
       {/* 하단 영역 (46% 높이): [좌: 프로젝트 미디어 보관함] | [중: 세로 툴바 + V3/V2/V1 & A1/A2/A3 타임라인] | [우: dB 오디오 미터] */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        <ProjectMediaBin />
-        <TimelinePanel />
+        <div style={{ width: binW }} className="shrink-0 h-full min-w-0">
+          <MediaBin />
+        </div>
+        <Splitter
+          dir="col"
+          getStart={() => binW}
+          onDrag={(start, d) => layout.set({ binW: clampTo(Math.min(start + d, winW - LIMITS.timelineMin - 6), LIMITS.binW) })}
+          onReset={() => layout.reset('binW')}
+        />
+        <Timeline />
       </div>
 
       {/* 새 시퀀스 만들기 / 시퀀스 규격 커스텀 모달 */}

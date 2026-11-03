@@ -622,13 +622,13 @@ export const PreviewPlayer: React.FC = () => {
           <button
             onClick={() => setIsQuickSplitMergeMode(!isQuickSplitMergeMode)}
             title="켜면 프리뷰 화면 자막에서 Enter로 즉시 나누기, Backspace로 앞 자막과 즉시 합치기가 작동합니다. 끄면 일반 글자 타이핑 수정이 가능합니다."
-            className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition truncate ${
+            className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border transition min-w-0 whitespace-nowrap ${
               isQuickSplitMergeMode
                 ? 'bg-[#2ea043] border-[#3fb950] text-white shadow'
                 : 'bg-[#242424] border-[#3a3a3a] text-[#999999] hover:text-white'
             }`}
           >
-            <span>
+            <span className="truncate">
               {isQuickSplitMergeMode
                 ? '⚡ 화면 단축키 모드 ON (Enter:나누기 / Backspace:합치기)'
                 : '✏️ 화면 단축키 모드 OFF (일반 글자 수정)'}

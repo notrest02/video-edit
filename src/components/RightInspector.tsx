@@ -20,6 +20,7 @@ import {
   Search,
 } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
+import { useLayoutStore } from '../store/useLayoutStore';
 import { SystemFontItem } from '../types/editor';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { buildPcFontList, ensurePcFont, extractPcfPostscriptName } from '../utils/pcFonts';
@@ -91,6 +92,8 @@ export const RightInspector: React.FC = () => {
       // ignore
     }
   };
+  // 탭마다 폭이 다르다 (App 의 칸 크기가 이 값을 읽음)
+  useEffect(() => useLayoutStore.getState().setInspectorTab(tab), [tab]);
   const [isLoadingFonts, setIsLoadingFonts] = useState(false);
   const [fontSearchQuery, setFontSearchQuery] = useState('');
 
@@ -281,7 +284,7 @@ export const RightInspector: React.FC = () => {
 
   return (
     <aside
-      className={`${tab === 'motion' ? 'w-[460px]' : 'w-[310px]'} shrink-0 bg-[#1d1d1d] border border-[#2d8ceb] flex flex-col justify-between h-full select-none text-[#cccccc]`}
+      className={`w-full bg-[#1d1d1d] border border-[#2d8ceb] flex flex-col justify-between h-full select-none text-[#cccccc]`}
     >
       {/* 1. 상단 탭 헤더: 속성 / 모션 */}
       <div>

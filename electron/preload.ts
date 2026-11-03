@@ -28,6 +28,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeClearKey: () => ipcRenderer.invoke('claude:clearKey'),
   autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
   autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
+  scriptGenGenerate: (params: unknown) => ipcRenderer.invoke('scriptGen:generate', params),
+  scriptGenSaveTxt: (params: { defaultName: string; content: string }) => ipcRenderer.invoke('scriptGen:saveTxt', params),
+  openScriptExamplesDialog: () => ipcRenderer.invoke('dialog:openScriptExamples'),
+  onScriptGenProgress: (callback: (msg: string) => void) => {
+    const handler = (_event: unknown, msg: string) => callback(msg);
+    ipcRenderer.on('scriptGen:progress', handler);
+    return () => ipcRenderer.removeListener('scriptGen:progress', handler);
+  },
   textMaskAnalyze: (params: unknown) => ipcRenderer.invoke('textMask:analyze', params),
   textMaskCancel: () => ipcRenderer.invoke('textMask:cancel'),
   onTextMaskProgress: (callback: (msg: string) => void) => {

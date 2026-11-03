@@ -93,7 +93,27 @@ async function makeSheet(ffmpegPath: string, file: string, duration: number, out
   await run(ffmpegPath, ['-v', 'error', '-y', '-i', file, '-vf', vf, '-frames:v', '1', '-q:v', '4', out]);
 }
 
-const DESC_SYSTEM = `당신은 숏폼(세로 9:16) 제품 광고 편집자다. 원본 촬영 영상의 샷(화면 전환 없이 이어지는 구간)마다 화면 내용을 한국어로 적는다.
+/**
+ * 썸네일 시트(0.5초 간격, 칸마다 원본 초 표시) 경로. 자동 배치 분석과 같은 캐시를 쓰고, 없으면 새로 만든다.
+ * 대본 만들기(STEP 0)가 영상 장면을 AI에게 보여줄 때 쓴다.
+ */
+export async function ensureSheet(ffmpegPath: string, file: string, duration: number): Promise<string> {
+  const key = cacheKey(file);
+  const cachePath = path.join(cacheDir(), `${key}.json`);
+  if (fs.existsSync(cachePath)) {
+    try {
+      const c = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as FileCache;
+      if (c.sheet && fs.existsSync(c.sheet)) return c.sheet;
+    } catch {
+      /* 캐시가 깨졌으면 새로 만든다 */
+    }
+  }
+  const sheet = path.join(cacheDir(), `${key}.jpg`);
+  if (!fs.existsSync(sheet)) await makeSheet(ffmpegPath, file, duration, sheet);
+  return sheet;
+}
+
+const DESC_SYSTEM =`당신은 숏폼(세로 9:16) 제품 광고 편집자다. 원본 촬영 영상의 샷(화면 전환 없이 이어지는 구간)마다 화면 내용을 한국어로 적는다.
 썸네일 시트는 원본 영상 하나를 0.5초 간격으로 펼친 것이고, 칸 왼쪽 아래 노란 숫자 = 원본 초다. 샷 목록의 시작~끝 초로 칸을 찾아 실제로 보고 적을 것.`;
 
 const DESC_TEXT = (product: string, shots: Shot[]) => `제품: ${product || '(미지정)'}

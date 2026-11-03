@@ -2,7 +2,8 @@
  * STEP 3 'AI 자동 배치' 카드: Claude API 키, 폴더에서 영상 가져오기, 후킹 지정(선택), 실행
  */
 import React, { useEffect, useState } from 'react';
-import { Clapperboard, FolderOpen, KeyRound, Loader2, Wand2 } from 'lucide-react';
+import { Clapperboard, FolderOpen, Loader2, Wand2 } from 'lucide-react';
+import { ClaudeKeyBox, useClaudeKey } from './ClaudeKeyBox';
 import { useEditorStore } from '../store/useEditorStore';
 import type { MediaAsset } from '../types/editor';
 
@@ -21,9 +22,7 @@ function looksLikeRender(file: string, folderName: string) {
 export const AutoEditCard: React.FC = () => {
   const { assets, addAssets, runAutoEdit, setStatusMessage } = useEditorStore();
   const api = window.electronAPI;
-  const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [keyInput, setKeyInput] = useState('');
-  const [keyMsg, setKeyMsg] = useState('');
+  const hasKey = useClaudeKey();
   const [product, setProduct] = useState('');
   const [useHook, setUseHook] = useState(false);
   const [hookAssetId, setHookAssetId] = useState('');
@@ -56,10 +55,6 @@ export const AutoEditCard: React.FC = () => {
     setAdSegments(next.map((g, i) => ({ ...g, name: `${base}_${String(i + 1).padStart(2, '0')}` })));
   };
 
-  useEffect(() => {
-    api?.claudeKeyStatus?.().then((s) => setHasKey(s.hasKey));
-  }, [api]);
-
   // 시퀀스에 대본의 후킹 지정("3초: 2번 0~3초")이 있으면 미리 채움. 'n번' = 이름이 n으로 시작하는 영상(예: 2.mp4), 없으면 미디어 n번째
   useEffect(() => {
     if (!seqHook) return;
@@ -71,17 +66,6 @@ export const AutoEditCard: React.FC = () => {
     setHookTo(String(seqHook.to));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSequenceId, seqHook, videos.length]);
-
-  const saveKey = async () => {
-    if (!keyInput.trim() || !api?.claudeSaveKey) return;
-    setKeyMsg('확인 중...');
-    const r = await api.claudeSaveKey(keyInput);
-    setKeyMsg(r.message);
-    if (r.ok) {
-      setHasKey(true);
-      setKeyInput('');
-    }
-  };
 
   const pickFolder = async () => {
     const r = await api?.openMediaFolderDialog?.();
@@ -134,42 +118,7 @@ export const AutoEditCard: React.FC = () => {
         원본 영상으로 자막이 바뀌는 곳마다 장면을 골라 빈 영상 트랙에 놓고, 자막을 컷에 맞춥니다.
       </p>
 
-      {/* API 키 */}
-      <div className="space-y-1 border-t border-[#2e2e2e] pt-2">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="text-[#cccccc] flex items-center gap-1">
-            <KeyRound className="w-3 h-3" /> Claude API 키
-          </span>
-          <span className={hasKey ? 'text-[#7ee787]' : 'text-[#ff9b9b]'}>
-            {hasKey === null ? '' : hasKey ? '저장됨' : '없음'}
-          </span>
-        </div>
-        <div className="flex gap-1">
-          <input
-            type="password"
-            value={keyInput}
-            onChange={(e) => setKeyInput(e.target.value)}
-            placeholder={hasKey ? '새 키로 바꾸려면 입력' : 'sk-ant-...'}
-            className={input}
-          />
-          <button onClick={saveKey} disabled={!keyInput.trim()} className={`${btn} bg-[#2d8ceb] text-white shrink-0`}>
-            저장
-          </button>
-          {hasKey && (
-            <button
-              onClick={async () => {
-                await api?.claudeClearKey?.();
-                setHasKey(false);
-                setKeyMsg('키를 지웠습니다.');
-              }}
-              className={`${btn} bg-[#2b2b2b] text-[#dddddd] shrink-0`}
-            >
-              삭제
-            </button>
-          )}
-        </div>
-        {keyMsg && <div className="text-[10px] text-[#aaaaaa]">{keyMsg}</div>}
-      </div>
+      <ClaudeKeyBox usedFor="AI 자동 배치" />
 
       {/* 원본 영상 */}
       <div className="space-y-1 border-t border-[#2e2e2e] pt-2">

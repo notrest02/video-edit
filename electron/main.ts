@@ -12,6 +12,7 @@ import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
 import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
+import { generateScripts, type ScriptGenParams } from './scriptGenerator';
 import { analyzeText, cancelTextAnalyze } from './textDetector';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
@@ -326,6 +327,33 @@ ipcMain.handle(
     analyzeMedia(resolvedFfmpegPath, params.media, params.product, (msg) => e.sender.send('autoEdit:progress', msg))
 );
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
+
+// ---------- STEP 0 대본 만들기 (Claude) ----------
+ipcMain.handle('scriptGen:generate', async (e, params: ScriptGenParams) =>
+  generateScripts(resolvedFfmpegPath, params, (msg) => e.sender.send('scriptGen:progress', msg))
+);
+// 말투 예시로 쓸 고객 대본 txt 고르기 (여러 개)
+ipcMain.handle('dialog:openScriptExamples', async () => {
+  if (!mainWindow) return [];
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: '말투 예시로 쓸 대본 파일(.txt) 고르기 — 여러 개 선택 가능',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: '대본 텍스트', extensions: ['txt'] }],
+  });
+  return r.canceled ? [] : r.filePaths;
+});
+// 만든 대본을 txt 로 저장
+ipcMain.handle('scriptGen:saveTxt', async (_e, p: { defaultName: string; content: string }) => {
+  if (!mainWindow) return null;
+  const r = await dialog.showSaveDialog(mainWindow, {
+    title: '대본 저장',
+    defaultPath: p.defaultName,
+    filters: [{ name: '대본 텍스트', extensions: ['txt'] }],
+  });
+  if (r.canceled || !r.filePath) return null;
+  await fs.promises.writeFile(r.filePath, p.content, 'utf-8');
+  return r.filePath;
+});
 
 // 자동 마스크: 원본에 박힌 글자 찾기 (로컬 모델, 원본별 저장)
 ipcMain.handle('textMask:cancel', () => cancelTextAnalyze());
