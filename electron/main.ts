@@ -23,6 +23,9 @@ import {
   type Emission,
 } from '../src/utils/forcedAligner';
 
+// 이름을 바꿔도 예전 저장 폴더(API 키·모델·분석 캐시)를 계속 쓴다
+app.setPath('userData', path.join(app.getPath('appData'), 'antigravity-video-editor'));
+
 const resolvedFfmpegPath = ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : '';
 const resolvedFfprobePath = ffprobeStatic?.path ? ffprobeStatic.path.replace('app.asar', 'app.asar.unpacked') : '';
 
@@ -69,7 +72,7 @@ function createWindow() {
     minWidth: 1180,
     minHeight: 740,
     backgroundColor: '#0f1117',
-    title: 'Antigravity Studio - AI 비디오 편집기',
+    title: 'ShortCut - 숏폼 광고 편집기 (by syeong)',
     // autoHideMenuBar 를 쓰면 Alt 키(Alt+휠 줌 등)를 뗄 때마다 메뉴바가 튀어나오므로 끄고 숨김 처리만 한다
     autoHideMenuBar: false,
     webPreferences: {
@@ -1071,7 +1074,7 @@ ipcMain.handle(
     if (!outputPath) {
       const saveRes = await dialog.showSaveDialog(mainWindow, {
         title: '편집된 동영상 내보내기 (MP4)',
-        defaultPath: `antigravity_edit_${Date.now()}.mp4`,
+        defaultPath: `shortcut_edit_${Date.now()}.mp4`,
         filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
       });
       if (saveRes.canceled || !saveRes.filePath) {
@@ -1365,7 +1368,7 @@ ipcMain.handle('project:saveDialog', async (_event, defaultFileName?: string) =>
     title: '프로젝트 파일 저장 위치 선택',
     defaultPath: cleanName,
     filters: [
-      { name: 'Antigravity Studio 프로젝트 (*.agproj)', extensions: ['agproj'] },
+      { name: 'ShortCut 프로젝트 (*.agproj)', extensions: ['agproj'] },
       { name: 'JSON 프로젝트 (*.json)', extensions: ['json'] },
       { name: '모든 파일 (*.*)', extensions: ['*'] },
     ],
@@ -1395,7 +1398,7 @@ ipcMain.handle('project:openDialog', async () => {
     title: '프로젝트 파일 열기',
     properties: ['openFile' as const],
     filters: [
-      { name: 'Antigravity Studio 프로젝트 (*.agproj, *.json)', extensions: ['agproj', 'json'] },
+      { name: 'ShortCut 프로젝트 (*.agproj, *.json)', extensions: ['agproj', 'json'] },
       { name: '모든 파일 (*.*)', extensions: ['*'] },
     ],
   };

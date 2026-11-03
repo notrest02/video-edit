@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/electron-userland/electron-builder/master/packages/app-builder-lib/scheme.json",
   "appId": "com.antigravity.videoeditor",
-  "productName": "Antigravity Video Editor",
-  "copyright": "Copyright © 2026 Antigravity",
+  "productName": "ShortCut",
+  "copyright": "Copyright © 2026 syeong",
   "directories": {
     "output": "release"
   },
@@ -66,7 +66,7 @@
         ]
       }
     ],
-    "executableName": "AntigravityVideoEditor"
+    "executableName": "ShortCut"
   },
   "nsis": {
     "oneClick": true,
@@ -74,14 +74,14 @@
     "allowElevation": false,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "Antigravity Video Editor",
-    "uninstallDisplayName": "Antigravity Video Editor",
+    "shortcutName": "ShortCut",
+    "uninstallDisplayName": "ShortCut",
     "installerIcon": "build/icon.ico",
     "uninstallerIcon": "build/icon.ico",
     "installerHeaderIcon": "build/icon.ico"
   },
   "portable": {
-    "artifactName": "Antigravity Video Editor Portable ${version}.${ext}",
+    "artifactName": "ShortCut Portable ${version}.${ext}",
     "requestExecutionLevel": "user"
   }
 }
