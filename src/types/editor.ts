@@ -42,7 +42,23 @@ export type AdSegment = {
  * 자동 편집 계획 (format 'auto-edit-plan/v1'): 음성 기준 타임라인 위에 원본 영상 구간을 어디에 놓을지.
  * 지금은 tools/premiere/slot_plan.py 가 만들고, 이후 앱 안 API 자동 배치가 같은 형식을 만든다.
  */
-export type AutoEditShot = { id: string; file: string; path: string; start: number; end: number; dur: number };
+/** STEP 0 대본 만들기 요청 (electron/scriptGenerator.ts ScriptGenParams 와 같은 모양) */
+export type ScriptGenRequest = {
+  product: string;
+  facts: string;
+  sellingPoints: string[];
+  mustInclude: string[];
+  tone: '' | '존댓말' | '반말';
+  mode: 'auto' | 'distribute' | 'story' | 'samebody';
+  space: string;
+  target: string;
+  seconds: number;
+  versions: Array<{ hookType: string; story: string; focus: string; points: number[] }>;
+  media: Array<{ no: number; path: string; duration: number; name: string }>;
+  examplePaths: string[];
+};
+
+export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number };
 export type AutoEditShotDesc = {
   id: string;
   desc: string;
@@ -299,21 +315,41 @@ declare global {
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
       /** STEP 0 대본 만들기 (Claude Haiku: 생성 + 검수) */
-      scriptGenGenerate?: (params: {
-        product: string;
-        facts: string;
-        space: string;
-        target: string;
-        seconds: number;
-        versions: Array<{ hookType: string; story: string; focus: string }>;
-        media: Array<{ no: number; path: string; duration: number; name: string }>;
-        examplePaths: string[];
-      }) => Promise<{
+      scriptGenGenerate?: (params: ScriptGenRequest) => Promise<{
         versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[]; warnings: string[] }>;
         fixes: Array<{ version: number; before: string; after: string; reason: string }>;
         usage: { input: number; output: number };
         exampleCount: number;
+        mode: 'distribute' | 'story' | 'samebody';
+        shots: Array<{ no: number; start: number; end: number }>;
       }>;
+      /** 클라이언트 오더 글 → 제품·소구점·꼭 넣을 문장·말투·버전 방식 */
+      scriptGenParseOrder?: (order: string) => Promise<{
+        product: string;
+        facts: string;
+        sellingPoints: string[];
+        target: string;
+        mustInclude: string[];
+        tone: '' | '존댓말' | '반말';
+        mode: 'distribute' | 'story' | 'samebody';
+        modeReason: string;
+        versionCount: number;
+        seconds: number;
+        notes: string;
+        usage: { input: number; output: number };
+      }>;
+      /** 버전 기획표: 버전마다 후킹 유형·콘셉트·중심 장점·맡을 소구점 */
+      scriptGenPlan?: (params: Omit<ScriptGenRequest, 'seconds' | 'media' | 'examplePaths'>) => Promise<{
+        mode: 'distribute' | 'story' | 'samebody';
+        versions: Array<{ hookType: string; story: string; focus: string; points: number[] }>;
+        usage: { input: number; output: number };
+      }>;
+      openOrderFileDialog?: () => Promise<{ name: string; text: string } | null>;
+      /** 오더가 없을 때: 영상 장면과 파일 이름을 보고 제품 이름·사실·소구점 후보 */
+      scriptGenFromVideos?: (params: {
+        product: string;
+        media: Array<{ no: number; path: string; duration: number; name: string }>;
+      }) => Promise<{ product: string; facts: string; sellingPoints: string[]; target: string; notes: string; usage: { input: number; output: number } }>;
       scriptGenSaveTxt?: (params: { defaultName: string; content: string }) => Promise<string | null>;
       openScriptExamplesDialog?: () => Promise<string[]>;
       onScriptGenProgress?: (callback: (msg: string) => void) => () => void;

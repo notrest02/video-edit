@@ -12,7 +12,8 @@ import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
 import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
-import { generateScripts, type ScriptGenParams } from './scriptGenerator';
+import { factsFromVideos, generateScripts, parseOrder, planVersions, type ScriptGenParams } from './scriptGenerator';
+import { docxToText } from './docxText';
 import { analyzeText, cancelTextAnalyze } from './textDetector';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
@@ -332,6 +333,24 @@ ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignSho
 ipcMain.handle('scriptGen:generate', async (e, params: ScriptGenParams) =>
   generateScripts(resolvedFfmpegPath, params, (msg) => e.sender.send('scriptGen:progress', msg))
 );
+ipcMain.handle('scriptGen:parseOrder', async (_e, order: string) => parseOrder(order));
+ipcMain.handle('scriptGen:fromVideos', async (e, params: Parameters<typeof factsFromVideos>[1]) =>
+  factsFromVideos(resolvedFfmpegPath, params, (msg) => e.sender.send('scriptGen:progress', msg))
+);
+ipcMain.handle('scriptGen:plan', async (_e, params: Parameters<typeof planVersions>[0]) => planVersions(params));
+// 클라이언트 오더 파일(.txt/.docx) 열어서 글자만
+ipcMain.handle('dialog:openOrderFile', async () => {
+  if (!mainWindow) return null;
+  const r = await dialog.showOpenDialog(mainWindow, {
+    title: '클라이언트 오더 파일 열기',
+    properties: ['openFile'],
+    filters: [{ name: '오더 (txt, docx)', extensions: ['txt', 'docx', 'md'] }],
+  });
+  if (r.canceled || !r.filePaths.length) return null;
+  const f = r.filePaths[0];
+  const text = /\.docx$/i.test(f) ? docxToText(f) : (await fs.promises.readFile(f, 'utf-8')).replace(/^﻿/, '');
+  return { name: path.basename(f), text };
+});
 // 말투 예시로 쓸 고객 대본 txt 고르기 (여러 개)
 ipcMain.handle('dialog:openScriptExamples', async () => {
   if (!mainWindow) return [];

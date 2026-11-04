@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
   autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
   scriptGenGenerate: (params: unknown) => ipcRenderer.invoke('scriptGen:generate', params),
+  scriptGenParseOrder: (order: string) => ipcRenderer.invoke('scriptGen:parseOrder', order),
+  scriptGenFromVideos: (params: unknown) => ipcRenderer.invoke('scriptGen:fromVideos', params),
+  scriptGenPlan: (params: unknown) => ipcRenderer.invoke('scriptGen:plan', params),
+  openOrderFileDialog: () => ipcRenderer.invoke('dialog:openOrderFile'),
   scriptGenSaveTxt: (params: { defaultName: string; content: string }) => ipcRenderer.invoke('scriptGen:saveTxt', params),
   openScriptExamplesDialog: () => ipcRenderer.invoke('dialog:openScriptExamples'),
   onScriptGenProgress: (callback: (msg: string) => void) => {
