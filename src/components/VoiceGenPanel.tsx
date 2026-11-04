@@ -131,6 +131,8 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
 
   const [perVersion, setPerVersion] = useState(false);
   const [versionVoices, setVersionVoices] = useState<string[]>([]);
+  const [perVersionTempo, setPerVersionTempo] = useState(false);
+  const [versionTempos, setVersionTempos] = useState<number[]>([]);
 
   // Typecast 전용 설정
   const [emotion, setEmotion] = useState('smart');
@@ -215,6 +217,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
     if (elVoiceId) localStorage.setItem(VOICE_KEY_EL, elVoiceId);
   }, [elVoiceId]);
   useEffect(() => setVersionVoices((vv) => versions.map((_, i) => vv[i] || voiceId)), [versions, voiceId]);
+  useEffect(() => setVersionTempos((vt) => versions.map((_, i) => vt[i] ?? tempo)), [versions, tempo]);
 
   // 저장 폴더 기본값: 원본 영상 폴더 안 '<제품>_음성' → 없으면 마지막에 쓴 폴더
   useEffect(() => {
@@ -231,24 +234,29 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
   };
 
   // 바로 듣기 (무료, 대략): 미리듣기 샘플에 지금 속도·음높이를 적용해서 (메인 프로세스 ffmpeg). 감정·스타일은 반영 안 됨
-  const preview = async (id: string) => {
+  const preview = async (id: string, customTempo?: number, playKey?: string) => {
     const url = previewUrlOf(id);
     if (!url) {
       setProgress('이 목소리는 미리듣기 샘플이 없어요.');
       return;
     }
+    const key = playKey || id;
+    const usedTempo = customTempo ?? tempo;
     audioRef.current?.pause();
-    if (playing === id) {
+    if (playing === key) {
       setPlaying('');
       return;
     }
     try {
-      const src = (tempo !== 1 || pitch !== 0) && api?.typecastPreview ? await api.typecastPreview({ url, tempo, pitch }) : url;
+      const src =
+        (usedTempo !== 1 || pitch !== 0) && api?.typecastPreview
+          ? await api.typecastPreview({ url, tempo: usedTempo, pitch })
+          : url;
       const a = new Audio(src);
       audioRef.current = a;
       a.onended = () => setPlaying('');
       await a.play();
-      setPlaying(id);
+      setPlaying(key);
     } catch (e) {
       setProgress(`미리듣기를 재생하지 못했어요: ${errText(e)}`);
     }
@@ -280,7 +288,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
                 voiceId: perVersion ? versionVoices[i] || voiceId : voiceId,
                 emotion,
                 intensity,
-                tempo,
+                tempo: perVersionTempo ? (versionTempos[i] ?? tempo) : tempo,
                 pitch,
               })),
               removeSilenceMs: silence < 0 ? null : silence,
@@ -296,7 +304,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
                 stability,
                 similarityBoost: similarity,
                 style: styleExag,
-                speed: tempo,
+                speed: perVersionTempo ? (versionTempos[i] ?? tempo) : tempo,
                 pitch,
               })),
               removeSilenceMs: silence < 0 ? null : silence,
@@ -495,10 +503,16 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
                     ))}
                   </select>
                   <button
-                    onClick={() => preview(versionVoices[i] || voiceId)}
+                    onClick={() =>
+                      preview(
+                        versionVoices[i] || voiceId,
+                        perVersionTempo ? (versionTempos[i] ?? tempo) : tempo,
+                        `ver_voice_${i}`
+                      )
+                    }
                     className={`${btn} bg-[#2b2b2b] text-white shrink-0 flex items-center`}
                   >
-                    {playing === (versionVoices[i] || voiceId) ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                    {playing === `ver_voice_${i}` ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
                   </button>
                 </div>
               ))}
@@ -612,18 +626,73 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
           )}
 
           {/* 공통: 속도·음높이 */}
-          <div className="flex items-center gap-2 text-[11px] text-[#cccccc]">
-            <span className="w-14 shrink-0">속도</span>
-            <input
-              type="range"
-              min={0.8}
-              max={1.5}
-              step={0.05}
-              value={tempo}
-              onChange={(e) => setTempo(Number(e.target.value))}
-              className="flex-1 accent-[#2d8ceb]"
-            />
-            <span className="w-8 text-right">{tempo.toFixed(2)}</span>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-[11px] text-[#cccccc]">
+              <span className="w-14 shrink-0">{perVersionTempo ? '기본 속도' : '속도'}</span>
+              <input
+                type="range"
+                min={0.8}
+                max={1.5}
+                step={0.05}
+                value={tempo}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setTempo(v);
+                  if (!perVersionTempo) setVersionTempos(versions.map(() => v));
+                }}
+                className="flex-1 accent-[#2d8ceb]"
+              />
+              <span className="w-8 text-right">{tempo.toFixed(2)}</span>
+            </div>
+            {versions.length > 1 && (
+              <label className="flex items-center gap-1.5 text-[11px] text-[#dddddd] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={perVersionTempo}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setPerVersionTempo(checked);
+                    if (checked) {
+                      setVersionTempos((vt) => versions.map((_, i) => vt[i] ?? tempo));
+                    }
+                  }}
+                  className="accent-[#2d8ceb]"
+                />
+                버전마다 속도 다르게
+              </label>
+            )}
+            {perVersionTempo &&
+              versions.map((_, i) => {
+                const vTempo = versionTempos[i] ?? tempo;
+                const vVoice = perVersion ? versionVoices[i] || voiceId : voiceId;
+                const playKey = `ver_tempo_${i}`;
+                return (
+                  <div key={i} className="flex items-center gap-1.5 text-[11px] text-[#cccccc] pl-1">
+                    <span className="text-[10px] text-[#aaaaaa] w-12 shrink-0">버전 {i + 1}</span>
+                    <input
+                      type="range"
+                      min={0.8}
+                      max={1.5}
+                      step={0.05}
+                      value={vTempo}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setVersionTempos((vt) => versions.map((__, j) => (j === i ? val : (vt[j] ?? tempo))));
+                      }}
+                      className="flex-1 accent-[#2d8ceb]"
+                    />
+                    <span className="w-8 text-right font-mono text-[10px]">{vTempo.toFixed(2)}</span>
+                    <button
+                      onClick={() => preview(vVoice, vTempo, playKey)}
+                      disabled={!vVoice}
+                      title={`버전 ${i + 1} 속도(${vTempo.toFixed(2)}x)로 미리듣기`}
+                      className={`${btn} bg-[#2b2b2b] text-white shrink-0 flex items-center !py-1 !px-2`}
+                    >
+                      {playing === playKey ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                    </button>
+                  </div>
+                );
+              })}
           </div>
           <div className="flex items-center gap-2 text-[11px] text-[#cccccc]">
             <span className="w-14 shrink-0">음높이</span>

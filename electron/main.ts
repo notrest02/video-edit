@@ -890,20 +890,23 @@ ipcMain.handle(
         }
 
         // Convert silences into active speech segments with padding
-        const padSec = (paddingMs || 80) / 1000;
+        // AI 음성처럼 이미 0.15~0.2초로 줄어든 짧은 무음을 자를 때 양쪽 패딩(70ms*2 + 병합 40ms = 180ms)이 무음을 삼키지 않도록 상한 적용
+        const rawPadSec = (paddingMs ?? 70) / 1000;
+        const padSec = Math.min(rawPadSec, Math.max(0.02, minSilenceDuration * 0.22));
+        const mergeGapSec = Math.min(0.03, Math.max(0.01, minSilenceDuration * 0.1));
         const speechSegments: Array<{ start: number; end: number }> = [];
         let cursor = 0;
 
         for (const sil of silences) {
           const segStart = Math.max(0, cursor);
           const segEnd = Math.min(duration, sil.start + padSec);
-          if (segEnd - segStart >= 0.12) {
+          if (segEnd - segStart >= 0.08) {
             speechSegments.push({ start: segStart, end: segEnd });
           }
           cursor = Math.max(cursor, sil.end - padSec);
         }
 
-        if (duration - cursor >= 0.12) {
+        if (duration - cursor >= 0.08) {
           speechSegments.push({ start: cursor, end: duration });
         }
 
@@ -914,7 +917,7 @@ ipcMain.handle(
             merged.push({ ...seg });
           } else {
             const prev = merged[merged.length - 1];
-            if (seg.start <= prev.end + 0.04) {
+            if (seg.start <= prev.end + mergeGapSec) {
               prev.end = Math.max(prev.end, seg.end);
             } else {
               merged.push({ ...seg });

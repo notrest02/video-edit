@@ -335,32 +335,48 @@ export const LeftSidebar: React.FC = () => {
     }
   };
 
-  // 무음 구간 자동 컷 편집
+  // 무음 구간 자동 컷 편집 (선택된 클립들 또는 트랙의 전체 오디오 클립 모두 처리)
   const handleAutoSilenceCut = async () => {
     if (!window.electronAPI) return;
-    const targetClip = targetAudioClips[0];
-    if (!targetClip || !targetClip.sourcePath) {
+    const targets = targetAudioClips.filter((c) => c.sourcePath);
+    if (targets.length === 0) {
       setStatusMessage('무음 구간을 분석할 오디오/비디오 클립을 먼저 시퀀스에 배치해 주세요.');
       return;
     }
 
     setIsProcessing(true);
-    setProgressText(`'${targetClip.name}' 무음 구간 감지 및 컷 편집 중...`);
+    let cutClipCount = 0;
+    let totalSegments = 0;
 
     try {
-      const result = await window.electronAPI.detectSilence({
-        filePath: targetClip.sourcePath,
-        sourceStart: targetClip.sourceStart,
-        duration: targetClip.duration * (targetClip.speed && targetClip.speed > 0 ? targetClip.speed : 1),
-        noiseDb,
-        minSilenceDuration: minSilenceDur,
-        paddingMs,
-      });
+      for (let i = 0; i < targets.length; i++) {
+        // 앞 클립 무음 제거로 뒤 클립의 startTime 이 당겨졌을 수 있으므로 최신 스토어 상태에서 클립 조회
+        const latestClip = useEditorStore.getState().clips.find((c) => c.id === targets[i].id) || targets[i];
+        if (!latestClip.sourcePath) continue;
+        setProgressText(`'${latestClip.name}' (${i + 1}/${targets.length}) 무음 구간 감지 및 컷 편집 중...`);
 
-      if (result.speechSegments.length <= 1 && result.silences.length === 0) {
-        setStatusMessage(`감지된 무음 구간이 없습니다. 기준 데시벨(${noiseDb}dB)을 높여보세요.`);
-      } else {
-        replaceClipWithSegments(targetClip.id, result.speechSegments, rippleAfterSilence);
+        const result = await window.electronAPI.detectSilence({
+          filePath: latestClip.sourcePath,
+          sourceStart: latestClip.sourceStart,
+          duration: latestClip.duration * (latestClip.speed && latestClip.speed > 0 ? latestClip.speed : 1),
+          noiseDb,
+          minSilenceDuration: minSilenceDur,
+          paddingMs,
+        });
+
+        if (result.speechSegments.length > 1 || result.silences.length > 0) {
+          replaceClipWithSegments(latestClip.id, result.speechSegments, rippleAfterSilence);
+          cutClipCount++;
+          totalSegments += result.speechSegments.length;
+        }
+      }
+
+      if (cutClipCount === 0) {
+        setStatusMessage(
+          `감지된 무음 구간이 없습니다. (AI 음성에서 '쉼 최대 0.15초'로 생성한 경우 이미 0.15초 이하로 줄어 있으니 최소 무음 길이를 0.12~0.15초로 낮추거나 데시벨을 높여보세요.)`
+        );
+      } else if (targets.length > 1) {
+        setStatusMessage(`오디오 클립 ${cutClipCount}개에서 무음 구간을 제거하여 총 ${totalSegments}개의 유음 컷으로 분할했습니다.`);
       }
     } catch (err: any) {
       setStatusMessage(`무음 분석 실패: ${err.message}`);
@@ -912,9 +928,9 @@ export const LeftSidebar: React.FC = () => {
                 </div>
                 <input
                   type="range"
-                  min={0.15}
+                  min={0.1}
                   max={2.0}
-                  step={0.05}
+                  step={0.02}
                   value={minSilenceDur}
                   onChange={(e) => setMinSilenceDur(Number(e.target.value))}
                   className="w-full accent-[#2d8ceb]"

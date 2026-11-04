@@ -2602,7 +2602,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const mapped: TimelineClip[] = [];
         for (const c of remainingClips) {
           if (c.type !== 'text') {
-            mapped.push(c);
+            // 대상 클립 뒤쪽에 있는 다른 음성/영상 클립(예: 광고 _02 음성)도 빠진 무음 길이만큼 함께 앞으로 당김
+            if (c.startTime >= clipEnd - 0.005) {
+              mapped.push({
+                ...c,
+                startTime: Number(Math.max(0, c.startTime - removedTotal).toFixed(4)),
+              });
+            } else {
+              mapped.push(c);
+            }
             continue;
           }
           const ns = mapTime(c.startTime);
