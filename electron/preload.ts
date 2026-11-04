@@ -31,6 +31,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scriptGenGenerate: (params: unknown) => ipcRenderer.invoke('scriptGen:generate', params),
   scriptGenParseOrder: (order: string) => ipcRenderer.invoke('scriptGen:parseOrder', order),
   scriptGenFromVideos: (params: unknown) => ipcRenderer.invoke('scriptGen:fromVideos', params),
+  typecastKeyStatus: () => ipcRenderer.invoke('typecast:keyStatus'),
+  typecastSaveKey: (key: string) => ipcRenderer.invoke('typecast:saveKey', key),
+  typecastClearKey: () => ipcRenderer.invoke('typecast:clearKey'),
+  typecastSubscription: () => ipcRenderer.invoke('typecast:subscription'),
+  typecastVoices: (filter: unknown) => ipcRenderer.invoke('typecast:voices', filter),
+  typecastPreview: (p: { url: string; tempo: number; pitch: number }) => ipcRenderer.invoke('typecast:preview', p),
+  typecastSynthesize: (params: unknown) => ipcRenderer.invoke('typecast:synthesize', params),
+  elevenKeyStatus: () => ipcRenderer.invoke('eleven:keyStatus'),
+  elevenSaveKey: (key: string) => ipcRenderer.invoke('eleven:saveKey', key),
+  elevenClearKey: () => ipcRenderer.invoke('eleven:clearKey'),
+  elevenSubscription: () => ipcRenderer.invoke('eleven:subscription'),
+  elevenVoices: (filter: unknown) => ipcRenderer.invoke('eleven:voices', filter),
+  elevenSynthesize: (params: unknown) => ipcRenderer.invoke('eleven:synthesize', params),
+  onTypecastProgress: (callback: (msg: string) => void) => {
+    const handler = (_event: unknown, msg: string) => callback(msg);
+    ipcRenderer.on('typecast:progress', handler);
+    return () => ipcRenderer.removeListener('typecast:progress', handler);
+  },
+  fileExists: (p: string) => ipcRenderer.invoke('fs:exists', p),
   scriptGenPlan: (params: unknown) => ipcRenderer.invoke('scriptGen:plan', params),
   openOrderFileDialog: () => ipcRenderer.invoke('dialog:openOrderFile'),
   scriptGenSaveTxt: (params: { defaultName: string; content: string }) => ipcRenderer.invoke('scriptGen:saveTxt', params),

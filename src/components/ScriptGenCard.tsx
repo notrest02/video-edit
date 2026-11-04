@@ -10,6 +10,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ClipboardList, Copy, Eye, FileText, FolderOpen, LayoutList, Loader2, PenLine, Save, Send, X } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import { ClaudeKeyBox, useClaudeKey } from './ClaudeKeyBox';
+import { VoiceGenPanel } from './VoiceGenPanel';
+import { ElevenLabsKeyBox, TypecastKeyBox } from './TypecastKeyBox';
 import type { MediaAsset } from '../types/editor';
 import {
   HAIKU_PRICE,
@@ -23,6 +25,7 @@ import {
   estimateSeconds,
   modeLabel,
   scriptToText,
+  videoNumbers,
   splitList,
   targetChars,
   type ScriptMode,
@@ -106,26 +109,6 @@ const pathKey = (p: string) => p.replace(/\\/g, '/').toLowerCase();
 const nearestLength = (s: number) => LENGTHS.reduce((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a), LENGTHS[0]);
 const errText = (e: unknown) => (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
 
-/** 대본의 'n번' 번호 — AI 자동 배치와 같은 규칙: 이름이 숫자로 시작하면 그 숫자, 아니면 미디어 영상 순서 */
-function videoNumbers(videos: MediaAsset[]): Map<string, number> {
-  const out = new Map<string, number>();
-  const used = new Set<number>();
-  videos.forEach((v) => {
-    const m = v.name.match(/^(\d+)(\D|$)/);
-    if (m && !used.has(Number(m[1]))) {
-      out.set(v.id, Number(m[1]));
-      used.add(Number(m[1]));
-    }
-  });
-  videos.forEach((v, i) => {
-    if (out.has(v.id)) return;
-    let n = i + 1;
-    while (used.has(n)) n++;
-    out.set(v.id, n);
-    used.add(n);
-  });
-  return out;
-}
 
 const won = (u: { input: number; output: number }) =>
   Math.max(1, Math.round(((u.input * HAIKU_PRICE.input + u.output * HAIKU_PRICE.output) / 1e6) * KRW_PER_USD));
@@ -371,6 +354,8 @@ export const ScriptGenCard: React.FC<{ onSendToScript: (text: string) => void }>
           검수하고, 길이·금지 글자(ㅋㅋ·이모지)·꼭 넣을 문장·숫자도 검사합니다.
         </p>
         <ClaudeKeyBox usedFor="AI 대본 만들기" />
+        <TypecastKeyBox />
+        <ElevenLabsKeyBox />
 
         {/* 클라이언트 오더 */}
         <div className="space-y-1 bg-[#14161a] border border-[#2e3440] rounded p-2">
@@ -725,6 +710,8 @@ export const ScriptGenCard: React.FC<{ onSendToScript: (text: string) => void }>
               </button>
             </div>
           ))}
+
+          <VoiceGenPanel versions={result.versions} product={form.product} videos={videos} />
 
           {result.fixes.length > 0 && (
             <details className="text-[10px] text-[#aaaaaa]">

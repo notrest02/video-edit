@@ -147,6 +147,30 @@ export function checkVersion(
   return warn;
 }
 
+/**
+ * 대본의 'n번' 영상 번호 — 대본 만들기·음성 만들기·자동 배치 구간 후킹이 같이 쓴다.
+ * 이름이 숫자로 시작하면 그 숫자(예: 2.mp4 → 2번), 아니면 미디어 영상 순서 (겹치면 다음 빈 번호)
+ */
+export function videoNumbers(videos: Array<{ id: string; name: string }>): Map<string, number> {
+  const out = new Map<string, number>();
+  const used = new Set<number>();
+  videos.forEach((v) => {
+    const m = v.name.match(/^(\d+)(\D|$)/);
+    if (m && !used.has(Number(m[1]))) {
+      out.set(v.id, Number(m[1]));
+      used.add(Number(m[1]));
+    }
+  });
+  videos.forEach((v, i) => {
+    if (out.has(v.id)) return;
+    let n = i + 1;
+    while (used.has(n)) n++;
+    out.set(v.id, n);
+    used.add(n);
+  });
+  return out;
+}
+
 /** 고객 대본과 같은 형식: 버전마다 후킹 지정 줄 + 대사, 버전 사이 빈 줄 (STEP 2 대본 칸이 그대로 읽음) */
 export function scriptToText(versions: Array<Pick<ScriptVersion, 'hookSpec' | 'lines'>>): string {
   return versions.map((v) => [v.hookSpec.trim(), ...v.lines.map((l) => l.trim()).filter(Boolean)].join('\n')).join('\n\n\n');

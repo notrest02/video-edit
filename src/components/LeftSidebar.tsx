@@ -316,14 +316,21 @@ export const LeftSidebar: React.FC = () => {
       const seqName = st.sequence?.name || 'ad';
       const base = seqName.replace(/[_\s-]*0?\d+$/, '') || seqName;
       const lead = 3 / Math.max(1, fps);
+      // 이미 있는 구간에 사람이 고른(또는 음성 만들기가 넣은) 후킹이 있으면 그대로 둔다 — 경계만 다시 잡는다
+      const prevHooks = new Map(
+        (st.sequences.find((q) => q.id === st.activeSequenceId)?.adSegments || []).filter((g) => g.hook).map((g) => [g.name, g.hook])
+      );
       setAdSegments(
-        runs.map((r, i) => ({
-          id: `seg_${Date.now()}_${i}`,
-          name: `${base}_${String(r.variant + 1).padStart(2, '0')}`,
-          start: i === 0 ? 0 : Math.max(0, r.start - lead),
-          end: i === runs.length - 1 ? r.end : Math.max(0, runs[i + 1].start - lead),
-          hook: r.hook,
-        }))
+        runs.map((r, i) => {
+          const name = `${base}_${String(r.variant + 1).padStart(2, '0')}`;
+          return {
+            id: `seg_${Date.now()}_${i}`,
+            name,
+            start: i === 0 ? 0 : Math.max(0, r.start - lead),
+            end: i === runs.length - 1 ? r.end : Math.max(0, runs[i + 1].start - lead),
+            hook: prevHooks.get(name) ?? r.hook,
+          };
+        })
       );
     }
   };

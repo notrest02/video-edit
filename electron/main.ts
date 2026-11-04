@@ -14,6 +14,23 @@ import { analyzeMedia } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
 import { factsFromVideos, generateScripts, parseOrder, planVersions, type ScriptGenParams } from './scriptGenerator';
 import { docxToText } from './docxText';
+import {
+  adjustedPreview,
+  clearTypecastKey,
+  getSubscription,
+  hasTypecastKey,
+  listVoices,
+  synthesize,
+  testAndSaveKey,
+} from './typecastService';
+import {
+  clearElevenKey,
+  getElevenSubscription,
+  hasElevenKey,
+  listElevenVoices,
+  synthesizeEleven,
+  testAndSaveElevenKey,
+} from './elevenlabsService';
 import { analyzeText, cancelTextAnalyze } from './textDetector';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
@@ -338,6 +355,62 @@ ipcMain.handle('scriptGen:fromVideos', async (e, params: Parameters<typeof facts
   factsFromVideos(resolvedFfmpegPath, params, (msg) => e.sender.send('scriptGen:progress', msg))
 );
 ipcMain.handle('scriptGen:plan', async (_e, params: Parameters<typeof planVersions>[0]) => planVersions(params));
+
+// ---------- Typecast 음성 만들기 (키는 메인 프로세스에만) ----------
+ipcMain.handle('typecast:keyStatus', () => ({ hasKey: hasTypecastKey() }));
+ipcMain.handle('typecast:saveKey', async (_e, key: string) => testAndSaveKey(key));
+ipcMain.handle('typecast:clearKey', () => {
+  clearTypecastKey();
+  return { hasKey: false };
+});
+ipcMain.handle('typecast:subscription', () => getSubscription());
+ipcMain.handle('typecast:voices', async (_e, filter: { gender?: string; age?: string }) => listVoices(filter));
+ipcMain.handle('typecast:preview', async (_e, p: { url: string; tempo: number; pitch: number }) => adjustedPreview(resolvedFfmpegPath, p));
+ipcMain.handle('typecast:synthesize', async (e, params: Parameters<typeof synthesize>[0]) => {
+  const results = await synthesize(params, (msg) => e.sender.send('typecast:progress', msg));
+  // 만든 파일을 바로 미디어로 쓸 수 있게 길이 등을 읽어 같이 돌려준다
+  const withAssets = [];
+  for (const r of results) {
+    let asset = null;
+    if (r.ok && r.audioPath) {
+      try {
+        asset = await probeMediaFile(r.audioPath);
+      } catch {
+        asset = null;
+      }
+    }
+    withAssets.push({ ...r, asset });
+  }
+  return withAssets;
+});
+
+// ---------- ElevenLabs 음성 만들기 (키는 메인 프로세스에만) ----------
+ipcMain.handle('eleven:keyStatus', () => ({ hasKey: hasElevenKey() }));
+ipcMain.handle('eleven:saveKey', async (_e, key: string) => testAndSaveElevenKey(key));
+ipcMain.handle('eleven:clearKey', () => {
+  clearElevenKey();
+  return { hasKey: false };
+});
+ipcMain.handle('eleven:subscription', () => getElevenSubscription());
+ipcMain.handle('eleven:voices', async (_e, filter: { gender?: string; age?: string }) => listElevenVoices(filter));
+ipcMain.handle('eleven:synthesize', async (e, params: Parameters<typeof synthesizeEleven>[1]) => {
+  const results = await synthesizeEleven(resolvedFfmpegPath, params, (msg) => e.sender.send('typecast:progress', msg));
+  const withAssets = [];
+  for (const r of results) {
+    let asset = null;
+    if (r.ok && r.audioPath) {
+      try {
+        asset = await probeMediaFile(r.audioPath);
+      } catch {
+        asset = null;
+      }
+    }
+    withAssets.push({ ...r, asset });
+  }
+  return withAssets;
+});
+// 음성 저장 폴더 기본값용: 폴더가 있는지
+ipcMain.handle('fs:exists', (_e, p: string) => fs.existsSync(p));
 // 클라이언트 오더 파일(.txt/.docx) 열어서 글자만
 ipcMain.handle('dialog:openOrderFile', async () => {
   if (!mainWindow) return null;
@@ -1167,6 +1240,14 @@ ipcMain.handle(
         return ',' + parts.join(',');
       };
 
+      // 프레임 단위로 맞춘 켜짐/꺼짐 시각. 앞 클립 끝(예: 22.4166)과 다음 클립 시작(22.4167)을 소수로 따로 반올림하면
+      // 그 사이 프레임(22.41667)이 어느 쪽에도 안 들어가 검은 화면 1프레임이 생겼다 (2026-11-04).
+      // → 시작·끝을 가장 가까운 프레임 번호로 바꾸고, 반 프레임 앞을 경계로 쓴다: 프레임 n 은 [n-0.5, n+0.5) 안에 딱 하나
+      const frameOf = (t: number) => Math.round(t * fps);
+      const edge = (f: number) => ((f - 0.5) / fps).toFixed(5);
+      const enableFrames = (start: number, end: number) => `between(t,${edge(frameOf(start))},${edge(frameOf(end))})`;
+      const startAt = (t: number) => (frameOf(t) / fps).toFixed(5);
+
       let inputIdx = 2;
       let currentVideoLabel = '[0:v]';
       const audioMixLabels: string[] = ['[1:a]'];
@@ -1190,7 +1271,7 @@ ipcMain.handle(
         //  (클립 시작이 프레임 경계와 미세하게 어긋날 때, AI 자동 배치에서 자주) → 마지막 프레임을 2프레임 복제해 메움.
         //  보이는 구간은 아래 overlay enable 이 정하므로 다음 장면이 비치지는 않음 (2026-11-02)
         filterParts.push(
-          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB${vScaled}`
+          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${startAt(clip.startTime)}/TB${vScaled}`
         );
         // 블러 마스크: 클립 화면을 흐리게 한 복사본을 마스크 모양(흰 곳)만 원래 화면 위에 덮음
         let clipLabel = vScaled;
@@ -1210,7 +1291,7 @@ ipcMain.handle(
             inputArgs.push('-framerate', String(fps), '-start_number', '0', '-i', path.join(dir, 'm_%05d.png'));
             const mIdx = inputIdx++;
             filterParts.push(
-              `[${mIdx}:v]format=gray,scale=${width}:${height},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${clip.startTime.toFixed(4)}/TB[mk_${tag}]`
+              `[${mIdx}:v]format=gray,scale=${width}:${height},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${startAt(clip.startTime)}/TB[mk_${tag}]`
             );
             maskSrc = `[mk_${tag}]`;
           } else {
@@ -1227,7 +1308,7 @@ ipcMain.handle(
           // 보이는 구간이 있으면 그 동안만 (장면마다 바뀌는 자막)
           const en =
             mk.from !== undefined || mk.to !== undefined
-              ? `:enable='between(t,${(clip.startTime + (mk.from ?? 0)).toFixed(4)},${(clip.startTime + (mk.to ?? clip.duration)).toFixed(4)})'`
+              ? `:enable='${enableFrames(clip.startTime + (mk.from ?? 0), clip.startTime + (mk.to ?? clip.duration))}'`
               : '';
           filterParts.push(`[mo_${tag}][ma_${tag}]overlay=format=auto${en}[mm_${tag}]`);
           clipLabel = `[mm_${tag}]`;
@@ -1269,9 +1350,8 @@ ipcMain.handle(
           ox = `(W-w)/2+(${ffExpr(kf.posX, clip.posX ?? 0, T)})`;
           oy = `(H-h)/2+(${ffExpr(kf.posY, clip.posY ?? 0, T)})`;
         }
-        const endT = (clip.startTime + clip.duration).toFixed(4);
         filterParts.push(
-          `${currentVideoLabel}${clipLabel}overlay=x='${ox}':y='${oy}':eval=frame:enable='between(t,${clip.startTime.toFixed(4)},${endT})':eof_action=pass${vOut}`
+          `${currentVideoLabel}${clipLabel}overlay=x='${ox}':y='${oy}':eval=frame:enable='${enableFrames(clip.startTime, clip.startTime + clip.duration)}':eof_action=pass${vOut}`
         );
         currentVideoLabel = vOut;
 
@@ -1318,9 +1398,9 @@ ipcMain.handle(
           }
           inputArgs.push('-framerate', String(fps), '-start_number', '0', '-i', path.join(dir, 'f_%05d.png'));
           const sIdx = inputIdx++;
-          filterParts.push(`[${sIdx}:v]format=rgba,tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${sub.startTime.toFixed(4)}/TB[vsubsrc_${i}]`);
+          filterParts.push(`[${sIdx}:v]format=rgba,tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${startAt(sub.startTime)}/TB[vsubsrc_${i}]`);
           filterParts.push(
-            `${currentVideoLabel}[vsubsrc_${i}]overlay=0:0:enable='between(t,${sub.startTime.toFixed(4)},${sub.endTime.toFixed(4)})':eof_action=pass${sOut}`
+            `${currentVideoLabel}[vsubsrc_${i}]overlay=0:0:enable='${enableFrames(sub.startTime, sub.endTime)}':eof_action=pass${sOut}`
           );
         } else {
           const base64Data = sub.pngDataUrl.replace(/^data:image\/png;base64,/, '');
@@ -1329,7 +1409,7 @@ ipcMain.handle(
           inputArgs.push('-i', pngPath);
           const sIdx = inputIdx++;
           filterParts.push(
-            `${currentVideoLabel}[${sIdx}:v]overlay=0:0:enable='between(t,${sub.startTime.toFixed(4)},${sub.endTime.toFixed(4)})'${sOut}`
+            `${currentVideoLabel}[${sIdx}:v]overlay=0:0:enable='${enableFrames(sub.startTime, sub.endTime)}'${sOut}`
           );
         }
         currentVideoLabel = sOut;

@@ -21,7 +21,16 @@ export type ShotDesc = {
   parts: Array<{ from: number; to: number; desc: string }>;
   note: string;
 };
-type FileCache = { version: 1; path: string; duration: number; shots: Shot[]; descs: ShotDesc[] | null; sheet: string };
+type FileCache = {
+  version: 1;
+  path: string;
+  duration: number;
+  shots: Shot[];
+  descs: ShotDesc[] | null;
+  sheet: string;
+  /** 앞뒤 '표지'를 잘라낸 쓸 수 있는 구간 (예: 더우인 영상 첫 0.1초 제목 카드). 없으면 아직 안 봄 */
+  edges?: { intro: number; outro: number };
+};
 
 const THRESH = 0.15;
 const MERGE = 0.4;
@@ -33,9 +42,49 @@ const cacheDir = () => {
   return d;
 };
 
-function cacheKey(p: string): string {
+/** 예전 방식(경로+크기+수정시각) — 이름만 다른 복사본(예: "영상 (1).mp4")을 다른 영상으로 봐서 다시 분석했다 */
+function legacyKey(p: string): string {
   const st = fs.statSync(p);
   return crypto.createHash('sha1').update(`${path.resolve(p).toLowerCase()}|${st.size}|${st.mtimeMs}`).digest('hex').slice(0, 16);
+}
+
+/** 영상 내용 기준 (크기 + 앞·뒤 1MB) — 이름이나 위치가 달라도 같은 영상이면 같은 분석을 쓴다 (2026-11-04) */
+function contentKey(p: string): string {
+  const size = fs.statSync(p).size;
+  const n = Math.min(size, 1 << 20);
+  const fd = fs.openSync(p, 'r');
+  try {
+    const head = Buffer.alloc(n);
+    const tail = Buffer.alloc(n);
+    fs.readSync(fd, head, 0, n, 0);
+    fs.readSync(fd, tail, 0, n, Math.max(0, size - n));
+    return 'c' + crypto.createHash('sha1').update(String(size)).update(head).update(tail).digest('hex').slice(0, 15);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** 저장 위치. 예전 방식으로 저장된 분석이 있으면 새 이름으로 옮겨 온다 (다시 분석하지 않게) */
+function cacheKey(p: string): string {
+  const key = contentKey(p);
+  const dir = cacheDir();
+  const json = path.join(dir, `${key}.json`);
+  if (!fs.existsSync(json)) {
+    const old = legacyKey(p);
+    const oldJson = path.join(dir, `${old}.json`);
+    const oldJpg = path.join(dir, `${old}.jpg`);
+    try {
+      if (fs.existsSync(oldJpg)) fs.copyFileSync(oldJpg, path.join(dir, `${key}.jpg`));
+      if (fs.existsSync(oldJson)) {
+        const c = JSON.parse(fs.readFileSync(oldJson, 'utf8')) as FileCache;
+        c.sheet = path.join(dir, `${key}.jpg`);
+        fs.writeFileSync(json, JSON.stringify(c));
+      }
+    } catch {
+      /* 옮기기 실패하면 새로 분석한다 */
+    }
+  }
+  return key;
 }
 
 function run(ffmpegPath: string, args: string[]): Promise<string> {
@@ -79,6 +128,48 @@ async function detectShots(ffmpegPath: string, file: string, duration: number, p
     end: r(b),
     dur: r(b - a),
   }));
+}
+
+/**
+ * 영상 맨 앞·맨 뒤의 아주 짧은 '표지' 찾기. 샷 나누기는 0.4초보다 짧은 조각을 앞 샷에 붙여 버려서
+ * 더우인 영상의 첫 0.1초 제목 카드(예: '浴室台面救星')가 첫 샷에 섞였고, 자동 배치가 그 샷을 0.05초부터 쓰면
+ * 제목 카드가 1~2프레임 번쩍였다 (2026-11-04). → 첫 1초 안 / 끝 1초 안의 뚜렷한 화면 전환은 표지 경계로 보고 그 바깥만 쓴다.
+ * 1프레임(1/30초) 여유를 더 둔다.
+ */
+const EDGE_WINDOW = 1.0;
+const EDGE_THRESH = 0.3;
+const EDGE_MARGIN = 0.04;
+async function detectEdges(ffmpegPath: string, file: string, duration: number): Promise<{ intro: number; outro: number }> {
+  const scan = async (args: string[]) => {
+    const log = await run(ffmpegPath, ['-hide_banner', ...args, '-vf', "scale=160:-2,select='gte(scene,0)',metadata=print", '-an', '-f', 'null', '-']);
+    const pts = [...log.matchAll(/pts_time:([\d.]+)/g)].map((m) => Number(m[1]));
+    const sc = [...log.matchAll(/scene_score=([\d.]+)/g)].map((m) => Number(m[1]));
+    return pts.map((t, i) => ({ t, s: sc[i] ?? 0 })).filter((x) => x.s >= EDGE_THRESH);
+  };
+  let intro = 0;
+  let outro = duration;
+  if (duration > EDGE_WINDOW * 3) {
+    // 앞: 첫 1초 안 마지막 뚜렷한 전환 (0.4초보다 앞이면 표지로 봄)
+    const head = (await scan(['-t', String(EDGE_WINDOW), '-i', file])).filter((x) => x.t > 0.01 && x.t < MIN_SHOT);
+    if (head.length) intro = head[head.length - 1].t + EDGE_MARGIN;
+    // 뒤: 끝 1초 안 전환 뒤 남은 길이가 0.4초보다 짧으면 끝 카드로 봄
+    const from = Math.max(0, duration - EDGE_WINDOW);
+    const tail = (await scan(['-ss', from.toFixed(3), '-i', file])).filter((x) => duration - (from + x.t) < MIN_SHOT && from + x.t < duration - 0.01);
+    if (tail.length) outro = from + tail[0].t - EDGE_MARGIN;
+  }
+  return { intro: +intro.toFixed(3), outro: +outro.toFixed(3) };
+}
+
+/** 표지 밖으로 샷 범위 좁히기 (첫 샷 시작·마지막 샷 끝만 바뀜 → 샷 id·AI 설명은 그대로) */
+function applyEdges(shots: Shot[], edges: { intro: number; outro: number }): Shot[] {
+  const r = (x: number) => Math.round(x * 100) / 100;
+  return shots
+    .map((s) => {
+      const start = Math.max(s.start, edges.intro);
+      const end = Math.min(s.end, edges.outro);
+      return { ...s, start: r(start), end: r(end), dur: r(end - start) };
+    })
+    .filter((s) => s.dur > 0.05);
 }
 
 async function makeSheet(ffmpegPath: string, file: string, duration: number, out: string) {
@@ -171,10 +262,17 @@ export async function analyzeMedia(
 ): Promise<{ shots: Shot[]; descs: ShotDesc[]; usage: UsageTotal; analyzedFiles: number }> {
   const usage: UsageTotal = { input: 0, output: 0 };
   const entries: Array<{ cachePath: string; cache: FileCache }> = [];
+  const seen = new Set<string>();
   for (let i = 0; i < media.length; i++) {
     const m = media[i];
     const prefix = String(i + 1);
     const key = cacheKey(m.path);
+    // 같은 영상이 이름만 다르게 두 번 있으면 (예: "영상 (1).mp4") 한 번만 쓴다 — 같은 장면이 두 번 나와 중복 배치되지 않게
+    if (seen.has(key)) {
+      onProgress(`같은 영상이 두 번 있어 하나만 씁니다: ${path.basename(m.path)}`);
+      continue;
+    }
+    seen.add(key);
     const cachePath = path.join(cacheDir(), `${key}.json`);
     let cache: FileCache | null = null;
     if (fs.existsSync(cachePath)) {
@@ -190,6 +288,16 @@ export async function analyzeMedia(
       const sheet = path.join(cacheDir(), `${key}.jpg`);
       await makeSheet(ffmpegPath, m.path, m.duration, sheet);
       cache = { version: 1, path: m.path, duration: m.duration, shots, descs: null, sheet };
+      fs.writeFileSync(cachePath, JSON.stringify(cache));
+    }
+    // 앞뒤 표지 잘라내기 — 예전에 저장된 분석도 한 번만 확인해서 저장 (ffmpeg 만, AI 호출 없음)
+    if (!cache.edges) {
+      try {
+        cache.edges = await detectEdges(ffmpegPath, m.path, m.duration);
+      } catch {
+        cache.edges = { intro: 0, outro: m.duration };
+      }
+      cache.shots = applyEdges(cache.shots, cache.edges);
       fs.writeFileSync(cachePath, JSON.stringify(cache));
     }
     // 이번 미디어 목록 순서로 id 다시 매김 (캐시엔 'x-NN' 형태로 저장)

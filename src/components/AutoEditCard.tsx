@@ -1,11 +1,12 @@
 /**
  * STEP 3 'AI 자동 배치' 카드: Claude API 키, 폴더에서 영상 가져오기, 후킹 지정(선택), 실행
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Clapperboard, FolderOpen, Loader2, Wand2 } from 'lucide-react';
 import { ClaudeKeyBox, useClaudeKey } from './ClaudeKeyBox';
 import { useEditorStore } from '../store/useEditorStore';
-import type { MediaAsset } from '../types/editor';
+import type { AdSegment, MediaAsset } from '../types/editor';
+import { videoNumbers } from '../utils/scriptGen';
 
 const box = 'bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs';
 const input =
@@ -38,6 +39,13 @@ export const AutoEditCard: React.FC = () => {
   const segs = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.adSegments) || [];
   const setAdSegments = useEditorStore((s) => s.setAdSegments);
   const multi = segs.length > 1;
+  // 구간별 후킹: 영상 번호는 대본 만들기와 같은 규칙, 저장은 경로까지 (번호가 헷갈리지 않게)
+  const nums = useMemo(() => videoNumbers(videos), [videos]);
+  const hookVideo = (h: NonNullable<AdSegment['hook']>) =>
+    (h.path && videos.find((v) => v.path.replace(/\\/g, '/').toLowerCase() === h.path!.replace(/\\/g, '/').toLowerCase())) ||
+    videos.find((v) => nums.get(v.id) === h.fileNo);
+  const setSegHook = (id: string, hook: AdSegment['hook']) =>
+    setAdSegments(segs.map((g) => (g.id === id ? { ...g, hook: hook ? { ...hook, sec: Math.max(1, hook.to - hook.from) } : null } : g)));
 
   // 재생헤드 위치에서 광고 구간 나누기 (구간이 없으면 시퀀스 전체를 둘로)
   const splitAtPlayhead = () => {
@@ -177,15 +185,61 @@ export const AutoEditCard: React.FC = () => {
           </span>
         </div>
         {multi && (
-          <div className="bg-[#14161a] border border-[#2e3440] rounded p-1.5 space-y-0.5 max-h-24 overflow-y-auto">
-            {segs.map((g) => (
-              <div key={g.id} className="text-[10px] text-[#cccccc] flex justify-between gap-2">
-                <span className="truncate">{g.name}</span>
-                <span className="text-[#888888] shrink-0">
-                  {g.start.toFixed(1)}~{g.end.toFixed(1)}초 · {g.hook ? `후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : '후킹 AI 선택'}
-                </span>
-              </div>
-            ))}
+          <div className="bg-[#14161a] border border-[#2e3440] rounded p-1.5 space-y-1.5 max-h-72 overflow-y-auto">
+            <div className="text-[10px] text-[#888888]">광고 구간마다 후킹 장면을 고를 수 있어요. 비워 두면 AI가 골라요.</div>
+            {segs.map((g) => {
+              const hv = g.hook ? hookVideo(g.hook) : undefined;
+              return (
+                <div key={g.id} className="space-y-1 border-t border-[#262b35] pt-1 first:border-t-0 first:pt-0">
+                  <div className="text-[10px] text-[#cccccc] flex justify-between gap-2">
+                    <span className="truncate font-semibold">{g.name}</span>
+                    <span className="text-[#888888] shrink-0">
+                      {g.start.toFixed(1)}~{g.end.toFixed(1)}초
+                    </span>
+                  </div>
+                  <div className="flex gap-1 items-center">
+                    <select
+                      value={hv?.id || ''}
+                      onChange={(e) => {
+                        const v = videos.find((x) => x.id === e.target.value);
+                        setSegHook(
+                          g.id,
+                          v
+                            ? { sec: 3, fileNo: nums.get(v.id) ?? 0, from: g.hook?.from ?? 0, to: g.hook?.to ?? 3, note: '', path: v.path }
+                            : null
+                        );
+                      }}
+                      className={`${input} flex-1 min-w-0`}
+                    >
+                      <option value="">후킹: AI가 고름</option>
+                      {videos.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {nums.get(v.id)}번 {v.name}
+                        </option>
+                      ))}
+                    </select>
+                    {g.hook && (
+                      <>
+                        <input
+                          value={g.hook.from}
+                          onChange={(e) => setSegHook(g.id, { ...g.hook!, from: Number(e.target.value) || 0 })}
+                          className={`${input} !w-12 shrink-0 text-center`}
+                          title="시작 초"
+                        />
+                        <span className="text-[#777777]">~</span>
+                        <input
+                          value={g.hook.to}
+                          onChange={(e) => setSegHook(g.id, { ...g.hook!, to: Number(e.target.value) || 0 })}
+                          className={`${input} !w-12 shrink-0 text-center`}
+                          title="끝 초"
+                        />
+                        <span className="text-[10px] text-[#777777]">초</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -200,7 +254,7 @@ export const AutoEditCard: React.FC = () => {
         </label>
         {useHook && (
           <div className="flex gap-1 items-center">
-            <select value={hookAssetId} onChange={(e) => setHookAssetId(e.target.value)} className={`${input} flex-1`}>
+            <select value={hookAssetId} onChange={(e) => setHookAssetId(e.target.value)} className={`${input} flex-1 min-w-0`}>
               <option value="">영상 선택</option>
               {videos.map((v) => (
                 <option key={v.id} value={v.id}>
@@ -208,9 +262,9 @@ export const AutoEditCard: React.FC = () => {
                 </option>
               ))}
             </select>
-            <input value={hookFrom} onChange={(e) => setHookFrom(e.target.value)} className={`${input} w-12`} title="시작 초" />
+            <input value={hookFrom} onChange={(e) => setHookFrom(e.target.value)} className={`${input} !w-12 shrink-0 text-center`} title="시작 초" />
             <span className="text-[#777777]">~</span>
-            <input value={hookTo} onChange={(e) => setHookTo(e.target.value)} className={`${input} w-12`} title="끝 초" />
+            <input value={hookTo} onChange={(e) => setHookTo(e.target.value)} className={`${input} !w-12 shrink-0 text-center`} title="끝 초" />
             <span className="text-[10px] text-[#777777]">초</span>
           </div>
         )}

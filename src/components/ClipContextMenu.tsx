@@ -51,6 +51,11 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
   const st = useEditorStore.getState();
   const isText = clip.type === 'text';
   const cur = clipSpeed(clip);
+  // 여러 개 선택한 상태에서 그중 하나를 우클릭하면 선택한 영상 클립 전체에 적용
+  const frameTargets =
+    st.selectedClipIds.length > 1 && st.selectedClipIds.includes(clipId)
+      ? st.clips.filter((c) => st.selectedClipIds.includes(c.id) && c.type === 'video').map((c) => c.id)
+      : [clipId];
   const run = (fn: () => void) => {
     fn();
     onClose();
@@ -58,7 +63,7 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
 
   // 화면 밖으로 나가지 않게 위치 보정
   const W = 250;
-  const H = isText ? 60 : 300;
+  const H = isText ? 60 : 380;
   const left = Math.min(x, window.innerWidth - W - 8);
   const top = Math.min(y, window.innerHeight - H - 8);
 
@@ -145,6 +150,27 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
           <div className="px-3 pb-1 text-[9px] text-[#777777]">
             {Math.round(MIN_CLIP_SPEED * 100)}~{Math.round(MAX_CLIP_SPEED * 100)}% · 뒤 클립과는 겹치지 않게 맞춰요
           </div>
+          <div className="h-px bg-[#3a3a3a] my-1" />
+        </>
+      )}
+      {clip.type === 'video' && (
+        <>
+          <button
+            onClick={() => run(() => st.fitClipsToFrame(frameTargets, 'fill'))}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+            title="원본 비율이 달라 위아래·양옆에 검은 띠가 보일 때: 화면에 꽉 차게 키웁니다 (가장자리가 조금 잘림)"
+          >
+            <span>시퀀스 화면에 채우기</span>
+            {frameTargets.length > 1 && <span className="text-[#888888]">{frameTargets.length}개</span>}
+          </button>
+          <button
+            onClick={() => run(() => st.fitClipsToFrame(frameTargets, 'fit'))}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+            title="원래 크기(화면 안에 다 보이게, 100%)로 되돌립니다"
+          >
+            <span>화면에 맞추기 (원래 크기)</span>
+            {frameTargets.length > 1 && <span className="text-[#888888]">{frameTargets.length}개</span>}
+          </button>
           <div className="h-px bg-[#3a3a3a] my-1" />
         </>
       )}

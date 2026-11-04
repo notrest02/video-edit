@@ -190,6 +190,8 @@ interface EditorState {
   splitClipAtTime: (clipId: string, splitTime: number) => void;
   /** 클립 속도 변경 (1 = 100%). 길이가 바뀌며, 뒤 클립과 겹치지 않게 맞춤 */
   setClipSpeed: (clipId: string, speed: number) => void;
+  /** 영상 클립 크기: 'fill' = 시퀀스 화면에 꽉 차게(검은 띠 없음, 가장자리 조금 잘림), 'fit' = 원래(화면 안에 맞춤, 100%) */
+  fitClipsToFrame: (clipIds: string[], mode: 'fill' | 'fit') => void;
   /** 클립 길이를 지정 길이(초) / 다음 클립까지 / 인디케이터까지 맞추도록 속도 조절 */
   fitClipLength: (clipId: string, target: number | 'next-clip' | 'playhead') => void;
   rippleCloseGaps: () => void;
@@ -223,6 +225,16 @@ interface EditorState {
    */
   splitVariantsIntoSequences: (
     ranges: Array<{ variant: number; start: number; end: number; hook: SequenceItem['autoEditHook']; name?: string }>
+  ) => string;
+  /**
+   * STEP 0 음성 만들기 뒤: 시퀀스 하나(seqName)를 새로 만들고 A1 트랙에 버전 음성을 순서대로 이어 놓는다.
+   * 버전마다 광고 구간(<제품>_01 …)과 그 버전 후킹을 표시 → 자동 배치·구간별 내보내기가 그대로 쓴다.
+   * 시퀀스에 전체 대본(script)도 기억 → 시퀀스를 열면 STEP 2 대본 칸이 그 대본으로 바뀐다.
+   */
+  createVoiceSequences: (
+    items: Array<{ name: string; audio: Omit<MediaAsset, 'id'>; script: string; hook: SequenceItem['autoEditHook'] }>,
+    size: { width: number; height: number; fps: number },
+    seqName: string
   ) => string;
   /**
    * AI 자동 배치: 미디어의 영상들을 분석(캐시)하고, 타임라인 자막 경계로 컷 자리를 만들어 Claude 가 장면을 고른 뒤
@@ -260,6 +272,18 @@ export const MIN_TRACK_HEIGHT = 24;
 export const MAX_TRACK_HEIGHT = 260;
 export const getTrackHeightPx = (track: TimelineTrack) =>
   track.height ?? (track.type === 'audio' ? 84 : 44);
+
+/**
+ * 영상이 시퀀스 화면에 꽉 차는 크기(%). 미리보기·내보내기 모두 '화면 안에 맞춘 크기'를 100% 로 보고 그 위에 scale 을 곱한다.
+ * 비율이 다르면 (예: 3:4 원본을 9:16 시퀀스에) 짧은 쪽이 채워질 때까지 키움 → 검은 띠 없음. 크기 정보가 없으면 100.
+ */
+export function fillScale(vw?: number, vh?: number, sw?: number, sh?: number): number {
+  if (!vw || !vh || !sw || !sh) return 100;
+  const fit = Math.min(sw / vw, sh / vh);
+  const cover = Math.max(sw / vw, sh / vh);
+  const s = (cover / fit) * 100;
+  return s < 100.5 ? 100 : Math.ceil(s * 10) / 10;
+}
 
 export function createDefaultTracks(): TimelineTrack[] {
   return [
@@ -793,6 +817,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         isPlaying: false,
         past: [],
         future: [],
+        // 대본 만들기로 생긴 시퀀스는 그 버전 대본을 기억한다 → STEP 2 대본 칸을 그 대본으로
+        ...(target.script ? { scriptText: target.script } : {}),
         statusMessage: `'${target.name}' (${target.width}×${target.height}) 시퀀스를 열었습니다.`,
       });
     },
@@ -2230,6 +2256,32 @@ export const useEditorStore = create<EditorState>((set, get) => {
       });
     },
 
+    fitClipsToFrame: (clipIds, mode) => {
+      const { clips, assets, sequence } = get();
+      const ids = new Set(clipIds);
+      const targets = clips.filter((c) => ids.has(c.id) && c.type === 'video');
+      if (!targets.length) return;
+      pushHistory();
+      let changed = 0;
+      const next = clips.map((c) => {
+        if (!ids.has(c.id) || c.type !== 'video') return c;
+        const a = assets.find((x) => x.id === c.assetId) || assets.find((x) => x.path === c.sourcePath);
+        const scale = mode === 'fill' ? fillScale(a?.width, a?.height, sequence.width, sequence.height) : 100;
+        if (Math.abs((c.scale ?? 100) - scale) < 1e-3) return c;
+        changed++;
+        return { ...c, scale };
+      });
+      set({
+        clips: next,
+        sequences: syncActiveSequenceData(get().tracks, next),
+        isDirty: true,
+        statusMessage:
+          mode === 'fill'
+            ? `영상 클립 ${changed}개를 시퀀스 화면에 꽉 차게 키웠습니다 (가장자리가 조금 잘릴 수 있어요).`
+            : `영상 클립 ${changed}개를 원래 크기(화면 안에 맞춤)로 되돌렸습니다.`,
+      });
+    },
+
     setClipSpeed: (clipId, speed) => {
       const target = get().clips.find((c) => c.id === clipId);
       if (!target || target.type === 'text') return;
@@ -2907,6 +2959,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
           //  예전엔 내보낸 mp4 에 원본 소리가 나왔음. 2026-11-02 수정)
           muted: true,
           speed: c.speed && Math.abs(c.speed - 1) > 1e-3 ? Number(c.speed.toFixed(3)) : undefined,
+          // 원본 비율이 시퀀스와 달라 검은 띠가 생기면 꽉 차게 (사용자 2026-11-04)
+          ...(fillScale(asset.width, asset.height, get().sequence.width, get().sequence.height) > 100
+            ? { scale: fillScale(asset.width, asset.height, get().sequence.width, get().sequence.height) }
+            : {}),
         });
       }
       const nextClips = [...clips, ...added];
@@ -2970,6 +3026,61 @@ export const useEditorStore = create<EditorState>((set, get) => {
       return msg;
     },
 
+    createVoiceSequences: (items, size, seqName) => {
+      if (!items.length) return '만들 음성이 없습니다.';
+      const st = get();
+      const saved = st.activeSequenceId ? syncActiveSequenceData(st.tracks, st.clips, undefined, st.currentTime) : st.sequences;
+      const assets = get().addAssets(items.map((it) => it.audio));
+      // 같은 이름의 시퀀스가 이미 있으면 (2), (3)… 을 붙인다
+      const taken = new Set(saved.map((s) => s.name));
+      let name = seqName;
+      for (let k = 2; taken.has(name); k++) name = `${seqName} (${k})`;
+      const clips: TimelineClip[] = [];
+      const segs: AdSegment[] = [];
+      let t = 0;
+      items.forEach((it, i) => {
+        const asset = assets[i];
+        const dur = Number(asset.duration.toFixed(4));
+        clips.push({
+          id: `clip_a_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+          trackId: 'track-a1',
+          type: 'audio',
+          name: asset.name,
+          startTime: Number(t.toFixed(4)),
+          duration: dur,
+          sourceStart: 0,
+          sourcePath: asset.path,
+          assetId: asset.id,
+          volume: 1.0,
+          muted: false,
+        });
+        segs.push({ id: `seg_${Date.now()}_${i}`, name: it.name, start: Number(t.toFixed(4)), end: Number((t + dur).toFixed(4)), hook: it.hook ?? null });
+        t += dur;
+      });
+      const made = {
+        id: `seq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        width: size.width,
+        height: size.height,
+        fps: size.fps,
+        fitMode: 'contain',
+        isCustom: true,
+        tracks: createDefaultTracks(),
+        clips,
+        currentTime: 0,
+        inPoint: null,
+        outPoint: null,
+        autoEditHook: items.length === 1 ? items[0].hook : null,
+        adSegments: items.length > 1 ? segs : undefined,
+        script: items.map((it) => it.script).join('\n\n\n'),
+      } as SequenceItem;
+      set({ sequences: [...saved, made], openSequenceIds: [...get().openSequenceIds, made.id], isDirty: true });
+      get().selectSequence(made.id);
+      const msg = `시퀀스 '${name}'를 만들고 음성 ${items.length}개를 A1 트랙에 순서대로 놓았습니다 (광고 구간: ${segs.map((g) => g.name).join(', ')})`;
+      set({ statusMessage: msg });
+      return msg;
+    },
+
     runAutoEdit: async ({ product, hook, onProgress }) => {
       const say = (m: string) => {
         set({ statusMessage: m });
@@ -2993,6 +3104,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const savedSegs = st.sequences.find((s) => s.id === st.activeSequenceId)?.adSegments || [];
       const resolveHook = (h: AdSegment['hook']) => {
         if (!h) return null;
+        // 경로가 저장돼 있으면 (구간별 후킹 지정, 음성 만들기) 그 영상
+        const byPath = h.path ? media.find((v) => v.path.replace(/\\/g, '/').toLowerCase() === h.path!.replace(/\\/g, '/').toLowerCase()) : undefined;
+        if (byPath) return { path: byPath.path, from: h.from, to: h.to };
         const byName = media.find((v) => new RegExp(`^${h.fileNo}(\\D|$)`).test(v.name));
         const a = byName || media[h.fileNo - 1];
         return a ? { path: a.path, from: h.from, to: h.to } : null;

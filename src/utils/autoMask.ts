@@ -8,6 +8,8 @@ import type { AutoTextTrack, BlurMask, MaskPoint, TimelineClip } from '../types/
 
 /** 여백 기본값: 글자 상자 높이(세로쓰기면 폭)의 25% — 넓히면 두 줄 큰 글자에서 배경까지 가림 */
 export const DEFAULT_MARGIN = 0.25;
+/** 글자 찾기 간격(electron/textDetector.ts STEP 0.2초) + 1프레임 여유: 마스크를 이만큼 먼저 시작 */
+export const TEXT_LEAD = 0.25;
 const rectPoints = (x0: number, y0: number, x1: number, y1: number): MaskPoint[] => [
   [x0, y0],
   [x1, y0],
@@ -119,7 +121,9 @@ export function tracksToMasks(
     }
     const inside = [...byT.values()].sort((a, b) => a.t - b.t);
     if (!inside.length) continue;
-    const from = Math.max(0, (tr.start - s0) / sp);
+    // 글자 찾기는 0.2초 간격이라, 글자는 처음 잡힌 순간보다 최대 0.2초 먼저 나타난다 → 그만큼 앞당겨 가림
+    // (안 그러면 첫 1~4프레임 동안 한자가 보였다가 가려짐, 사용자 2026-11-04)
+    const from = Math.max(0, (tr.start - TEXT_LEAD - s0) / sp);
     const to = Math.min(clip.duration, (tr.end - s0) / sp);
     // 움직임 판단: 위치(가운데)가 화면 3% 넘게 실제로 옮겨갈 때만 키프레임.
     // 크기만 줄었다 늘었다 하면(자막 길이 차이 등) 가장 큰 영역 하나로 쭉 가림 (사용자 2026-11-03)
