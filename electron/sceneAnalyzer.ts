@@ -30,9 +30,17 @@ type FileCache = {
   sheet: string;
   /** 앞뒤 '표지'를 잘라낸 쓸 수 있는 구간 (예: 더우인 영상 첫 0.1초 제목 카드). 없으면 아직 안 봄 */
   edges?: { intro: number; outro: number };
+  /** 샷 경계 정밀 보정 버전 (2: 짧은 조각 병합 금지 + 겹침 전환/연속 컷 구간 통째 제외 + 경계 여유 프레임) */
+  cutRefinedVersion?: number;
 };
 
 const THRESH = 0.15;
+const SOFT_PEAK = 0.11;
+const SOFT_SUM = 0.16;
+const CLUSTER_FLOOR = 0.04;
+const CLUSTER_GAP = 0.05;
+const CUT_PAD = 0.02;
+const CUT_REFINED_VERSION = 2;
 const MERGE = 0.4;
 const MIN_SHOT = 0.4;
 
@@ -101,23 +109,44 @@ async function detectShots(ffmpegPath: string, file: string, duration: number, p
   const log = await run(ffmpegPath, ['-hide_banner', '-i', file, '-vf', "scale=160:-2,select='gte(scene,0)',metadata=print", '-an', '-f', 'null', '-']);
   const pts = [...log.matchAll(/pts_time:([\d.]+)/g)].map((m) => Number(m[1]));
   const sc = [...log.matchAll(/scene_score=([\d.]+)/g)].map((m) => Number(m[1]));
-  const cuts: Array<[number, number]> = [];
+  // 1) 인접 프레임(<=0.05초) 중 변화량이 있는 프레임을 전환 구간(클러스터)으로 묶는다.
+  //    단일 프레임 확 바뀌는 컷(max>=0.15)뿐 아니라 2~5프레임에 걸쳐 겹치며 바뀌는 디졸브/점프컷(max>=0.11, 합>=0.16)도 잡는다.
+  const raw: Array<{ start: number; end: number; max: number; sum: number }> = [];
   pts.forEach((t, i) => {
     const s = sc[i] ?? 0;
-    if (s < THRESH || t < MIN_SHOT || t > duration - MIN_SHOT) return;
-    const last = cuts[cuts.length - 1];
-    if (last && t - last[0] < MERGE) {
-      if (s > last[1]) cuts[cuts.length - 1] = [t, s];
-      return;
+    if (s < CLUSTER_FLOOR) return;
+    const last = raw[raw.length - 1];
+    if (last && t - last.end <= CLUSTER_GAP) {
+      last.end = t;
+      last.max = Math.max(last.max, s);
+      last.sum += s;
+    } else {
+      raw.push({ start: t, end: t, max: s, sum: s });
     }
-    cuts.push([t, s]);
   });
-  const bounds = [0, ...cuts.map((c) => c[0]), duration];
+  const cuts = raw.filter((c) => c.max >= THRESH || (c.max >= SOFT_PEAK && c.sum >= SOFT_SUM));
+  // 2) 0.4초(MERGE) 안에 전환이 연달아 나오면 그 사이 짧은 조각을 앞/뒤 샷에 붙이지 않고 전환 구간 전체([첫 시작, 끝])를 통째로 뺀다.
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const c of cuts) {
+    const last = merged[merged.length - 1];
+    if (last && c.start - last.end < MERGE) {
+      last.end = c.end;
+    } else {
+      merged.push({ start: c.start, end: c.end });
+    }
+  }
+  // 3) 전환 구간 바깥만 깨끗한 샷으로 취하고, 0.4초(MIN_SHOT) 미만 조각(앞/뒤 표지나 중간 번쩍임)은 옆 샷에 절대 합치지 않고 버린다.
+  //    반올림으로 전환 프레임이 걸치지 않도록 시작은 올림(+여유), 끝은 내림(-여유) 처리한다.
   const spans: Array<[number, number]> = [];
-  for (let i = 0; i + 1 < bounds.length; i++) {
-    const [a, b] = [bounds[i], bounds[i + 1]];
-    if (spans.length && b - a < MIN_SHOT) spans[spans.length - 1][1] = b;
-    else spans.push([a, b]);
+  for (let i = 0; i <= merged.length; i++) {
+    const prevCut = i > 0 ? merged[i - 1] : null;
+    const nextCut = i < merged.length ? merged[i] : null;
+    const rawA = prevCut ? prevCut.end : 0;
+    const rawB = nextCut ? nextCut.start : duration;
+    if (rawB - rawA < MIN_SHOT) continue;
+    const a = prevCut ? Math.ceil((rawA + CUT_PAD) * 100) / 100 : 0;
+    const b = nextCut ? Math.floor((rawB - CUT_PAD) * 100) / 100 : Math.floor(duration * 100) / 100;
+    if (b - a >= MIN_SHOT - 0.05) spans.push([a, b]);
   }
   const r = (x: number) => Math.round(x * 100) / 100;
   return spans.map(([a, b], k) => ({
@@ -128,6 +157,28 @@ async function detectShots(ffmpegPath: string, file: string, duration: number, p
     end: r(b),
     dur: r(b - a),
   }));
+}
+
+/** 기존 AI 설명(descs)을 새로 정밀 분할된 샷 목록에 시간 겹침 기준으로 매핑 (AI 재호출 방지) */
+function remapDescsToShots(oldShots: Shot[], oldDescs: ShotDesc[] | null, newShots: Shot[]): ShotDesc[] | null {
+  if (!oldDescs || !oldDescs.length) return null;
+  const byOldId = new Map(oldDescs.map((d) => [d.id, d]));
+  return newShots.map((ns) => {
+    let bestOld: Shot | null = null;
+    let bestOv = -1;
+    for (const os of oldShots) {
+      const ov = Math.min(ns.end, os.end) - Math.max(ns.start, os.start);
+      if (ov > bestOv) {
+        bestOv = ov;
+        bestOld = os;
+      }
+    }
+    const od = bestOld ? byOldId.get(bestOld.id) : undefined;
+    if (!od) return { id: ns.id, desc: '(설명 없음)', place: '', motion: 'low', parts: [], note: '' };
+    const parts = (od.parts || []).filter((p) => p.to > ns.start + 0.05 && p.from < ns.end - 0.05);
+    const partDesc = parts.length === 1 && oldShots.some((os) => os.id === bestOld?.id && os.dur > ns.dur + 0.5) ? parts[0].desc : od.desc;
+    return { ...od, id: ns.id, desc: partDesc, parts };
+  });
 }
 
 /**
@@ -287,18 +338,35 @@ export async function analyzeMedia(
       const shots = await detectShots(ffmpegPath, m.path, m.duration, 'x');
       const sheet = path.join(cacheDir(), `${key}.jpg`);
       await makeSheet(ffmpegPath, m.path, m.duration, sheet);
-      cache = { version: 1, path: m.path, duration: m.duration, shots, descs: null, sheet };
+      const edges = await detectEdges(ffmpegPath, m.path, m.duration).catch(() => ({ intro: 0, outro: m.duration }));
+      cache = {
+        version: 1,
+        path: m.path,
+        duration: m.duration,
+        shots: applyEdges(shots, edges),
+        descs: null,
+        sheet,
+        edges,
+        cutRefinedVersion: CUT_REFINED_VERSION,
+      };
       fs.writeFileSync(cachePath, JSON.stringify(cache));
     }
-    // 앞뒤 표지 잘라내기 — 예전에 저장된 분석도 한 번만 확인해서 저장 (ffmpeg 만, AI 호출 없음)
-    if (!cache.edges) {
+    // 예전 캐시도 새 정밀 샷 분할(디졸브/연속컷 제외 + 짧은 조각 병합 금지 + 앞뒤 표지 제거)로 한 번 보정 (ffmpeg 만, AI 재호출 없음)
+    if (cache.cutRefinedVersion !== CUT_REFINED_VERSION || !cache.edges) {
       try {
-        cache.edges = await detectEdges(ffmpegPath, m.path, m.duration);
+        onProgress(`장면 경계 정밀 보정 중 (${i + 1}/${media.length}): ${path.basename(m.path)}`);
+        const edges = cache.edges || (await detectEdges(ffmpegPath, m.path, m.duration).catch(() => ({ intro: 0, outro: m.duration })));
+        const refined = applyEdges(await detectShots(ffmpegPath, m.path, m.duration, 'x'), edges);
+        if (refined.length > 0) {
+          cache.descs = remapDescsToShots(cache.shots, cache.descs, refined);
+          cache.shots = refined;
+        }
+        cache.edges = edges;
+        cache.cutRefinedVersion = CUT_REFINED_VERSION;
+        fs.writeFileSync(cachePath, JSON.stringify(cache));
       } catch {
-        cache.edges = { intro: 0, outro: m.duration };
+        /* 보정 실패 시 기존 캐시 유지 */
       }
-      cache.shots = applyEdges(cache.shots, cache.edges);
-      fs.writeFileSync(cachePath, JSON.stringify(cache));
     }
     // 이번 미디어 목록 순서로 id 다시 매김 (캐시엔 'x-NN' 형태로 저장)
     const renum = (id: string) => id.replace(/^[^-]+-/, `${prefix}-`);

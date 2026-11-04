@@ -16,7 +16,7 @@ const SENT_END = /([.?!…]["'”’]*|요)$/; // '~다'는 '때마다' 같은 �
 const CUT_LEAD_FRAMES = 3;
 const MIN_SPEED = 0.8;
 const MIN_SPEED_HARD = 0.6;
-const EDGE = 0.05;
+const EDGE = 0.06;
 
 const lastWord = (t: string) => (t || '').trim().split(/\s+/).pop() || '';
 
@@ -99,9 +99,9 @@ const overlap = (path: string, t0: number, t1: number, avoid: Array<[string, num
 
 /** 후킹: 지정 구간 안 샷만 순서대로. 모자라면 나누되(1초 이상 조각) 자막 전환이면 조금 선호 */
 export function hookPieces(slot: AutoEditSlot, hs: HookSpec, shots: AutoEditShot[], caps: number[]): PlanClip[] {
-  const seg = shots.filter((x) => x.path === hs.path && x.end > hs.from && x.start < hs.to).sort((a, b) => a.start - b.start);
+  const seg = shots.filter((x) => x.path === hs.path && x.end - EDGE > hs.from && x.start + EDGE < hs.to).sort((a, b) => a.start - b.start);
   let src = seg
-    .map((x) => ({ x, a0: Math.max(x.start, hs.from), a1: Math.min(x.end, hs.to + 0.5) }))
+    .map((x) => ({ x, a0: Math.max(x.start + EDGE, hs.from), a1: Math.min(x.end - EDGE, hs.to + 0.5) }))
     .filter((s) => s.a1 - s.a0 >= 0.3);
   if (src.length > 1 && src[0].a1 - src[0].a0 < 0.5) src = src.slice(1); // 지정 시각이 샷 끝자락이면 다음 샷부터
   if (!src.length) return [];
@@ -121,7 +121,7 @@ export function hookPieces(slot: AutoEditSlot, hs: HookSpec, shots: AutoEditShot
         let pen = 0;
         const sps = pick.map((j, k) => {
           const dur = edges[k + 1] - edges[k];
-          const sp = Math.min(2, (src[j].a1 - src[j].a0 - 0.1) / dur);
+          const sp = Math.min(2, (src[j].a1 - src[j].a0) / dur);
           pen += dur * (Math.max(0, 0.6 - sp) * 10 + Math.max(0, 0.8 - sp) * 2);
           return sp;
         });
@@ -135,9 +135,7 @@ export function hookPieces(slot: AutoEditSlot, hs: HookSpec, shots: AutoEditShot
   return b.pick.map((j, k) => {
     const { x, a0 } = src[j];
     const sp = Math.max(0.3, Math.floor(b.sps[k] * 100) / 100);
-    const dur = b.edges[k + 1] - b.edges[k];
-    const srcIn = a0 + (a0 <= x.start + 0.01 ? EDGE : 0);
-    return { path: x.path, file: x.file, start: b.edges[k], end: b.edges[k + 1], srcIn, speed: sp, shot: x.id, text: slot.text, hook: true };
+    return { path: x.path, file: x.file, start: b.edges[k], end: b.edges[k + 1], srcIn: a0, speed: sp, shot: x.id, text: slot.text, hook: true };
   });
 }
 
