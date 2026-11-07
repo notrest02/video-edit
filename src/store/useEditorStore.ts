@@ -14,7 +14,7 @@ import {
   TrackType,
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
-import { buildSlotsFromCaptions, fitAssignment, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
+import { auditPlan, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
 import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
@@ -22,6 +22,7 @@ import {
   alignScriptLinesToExistingCaptions,
   reformatSubtitleClipsByLineMode,
   type CaptionSplitRequest,
+  buildCaptionsFromWordTimestamps,
   sanitizeSubtitleClipsNonOverlapping,
   splitWordsByPauses,
 } from '../utils/scriptAligner';
@@ -207,6 +208,7 @@ interface EditorState {
       start: number;
       end: number;
       voiceEnd?: number;
+      sentenceGroupId?: string;
       needsReview?: boolean;
       alignConfidence?: number;
     }>
@@ -232,7 +234,13 @@ interface EditorState {
    * 시퀀스에 전체 대본(script)도 기억 → 시퀀스를 열면 STEP 2 대본 칸이 그 대본으로 바뀐다.
    */
   createVoiceSequences: (
-    items: Array<{ name: string; audio: Omit<MediaAsset, 'id'>; script: string; hook: SequenceItem['autoEditHook'] }>,
+    items: Array<{
+      name: string;
+      audio: Omit<MediaAsset, 'id'>;
+      script: string;
+      hook: SequenceItem['autoEditHook'];
+      words?: Array<{ text: string; start: number; end: number }>;
+    }>,
     size: { width: number; height: number; fps: number },
     seqName: string
   ) => string;
@@ -416,43 +424,111 @@ async function buildCaptionAudioLookup(clips: TimelineClip[], tracks: TimelineTr
   }
   if (sources.length === 0) return undefined;
 
-  const loaded: Array<{ clip: TimelineClip; pcm: Float32Array }> = [];
+  // 무음 제거 등으로 오디오가 여러 조각(#1, #2...)으로 잘려 있을 때도
+  // 원본 파일당 ffmpeg 추출을 1번만 수행하고 트랙 단위 연속 PCM 버퍼로 합쳐서
+  // 조각 경계에 걸친 자막도 끊김 없이 1번의 모델 호출로 초고속 정렬되도록 처리
+  const bySource = new Map<string, { minSrc: number; maxSrc: number }>();
   for (const c of sources) {
-    const key = clipAudioKey(c.sourcePath!, c.sourceStart, c.duration);
+    const p = c.sourcePath!;
+    const cur = bySource.get(p);
+    const s0 = Math.max(0, c.sourceStart);
+    const s1 = s0 + c.duration;
+    if (!cur) bySource.set(p, { minSrc: s0, maxSrc: s1 });
+    else {
+      cur.minSrc = Math.min(cur.minSrc, s0);
+      cur.maxSrc = Math.max(cur.maxSrc, s1);
+    }
+  }
+
+  const sourcePcmMap = new Map<string, { baseSrc: number; pcm: Float32Array }>();
+  for (const [filePath, span] of bySource) {
+    const dur = Math.max(0.05, span.maxSrc - span.minSrc);
+    const key = clipAudioKey(filePath, span.minSrc, dur);
     let job = captionPcmCache.get(key);
     if (!job) {
       job = api
-        .extractAudioFloat32({ filePath: c.sourcePath!, sourceStart: c.sourceStart, duration: c.duration })
+        .extractAudioFloat32({ filePath, sourceStart: span.minSrc, duration: dur })
         .then((pcm) => (pcm && pcm.length > 0 ? pcm : null))
         .catch(() => null);
       captionPcmCache.set(key, job);
     }
     const pcm = await job;
-    if (pcm) loaded.push({ clip: c, pcm });
+    if (pcm) sourcePcmMap.set(filePath, { baseSrc: span.minSrc, pcm });
   }
-  if (loaded.length === 0) return undefined;
-  loaded.sort(
-    (a, b) => (trackOrder.get(a.clip.trackId) ?? 99) - (trackOrder.get(b.clip.trackId) ?? 99)
-  );
+
+  // 트랙별로 클립 조각들을 하나의 타임라인 연속 버퍼로 조립
+  const byTrack = new Map<string, TimelineClip[]>();
+  for (const c of sources) {
+    if (!sourcePcmMap.has(c.sourcePath!)) continue;
+    const arr = byTrack.get(c.trackId) || [];
+    arr.push(c);
+    byTrack.set(c.trackId, arr);
+  }
+
+  const loadedTracks: Array<{ trackId: string; startTime: number; duration: number; pcm: Float32Array; key: string }> = [];
+  for (const [trackId, tClips] of byTrack) {
+    tClips.sort((a, b) => a.startTime - b.startTime);
+    const minT = tClips[0].startTime;
+    const maxT = Math.max(...tClips.map((c) => c.startTime + c.duration));
+    const totalDur = Math.max(0.05, maxT - minT);
+    if (tClips.length === 1) {
+      const c = tClips[0];
+      const srcInfo = sourcePcmMap.get(c.sourcePath!)!;
+      const offsetSamples = Math.max(0, Math.round((c.sourceStart - srcInfo.baseSrc) * 16000));
+      const lenSamples = Math.round(c.duration * 16000);
+      const slice =
+        offsetSamples === 0 && lenSamples >= srcInfo.pcm.length
+          ? srcInfo.pcm
+          : srcInfo.pcm.subarray(offsetSamples, Math.min(srcInfo.pcm.length, offsetSamples + lenSamples));
+      loadedTracks.push({
+        trackId,
+        startTime: c.startTime,
+        duration: c.duration,
+        pcm: slice,
+        key: clipAudioKey(c.sourcePath!, c.sourceStart, c.duration),
+      });
+    } else {
+      const stitched = new Float32Array(Math.ceil(totalDur * 16000));
+      const sigParts: string[] = [];
+      for (const c of tClips) {
+        const srcInfo = sourcePcmMap.get(c.sourcePath!)!;
+        const srcOff = Math.max(0, Math.round((c.sourceStart - srcInfo.baseSrc) * 16000));
+        const len = Math.min(Math.round(c.duration * 16000), srcInfo.pcm.length - srcOff);
+        const dstOff = Math.max(0, Math.round((c.startTime - minT) * 16000));
+        if (len > 0 && dstOff + len <= stitched.length) {
+          stitched.set(srcInfo.pcm.subarray(srcOff, srcOff + len), dstOff);
+        }
+        sigParts.push(`${c.startTime.toFixed(2)}:${c.sourceStart.toFixed(2)}:${c.duration.toFixed(2)}`);
+      }
+      loadedTracks.push({
+        trackId,
+        startTime: minT,
+        duration: totalDur,
+        pcm: stitched,
+        key: `stitched_${trackId}_${tClips.length}_${sigParts.slice(0, 6).join(',')}_${totalDur.toFixed(2)}`,
+      });
+    }
+  }
+
+  if (loadedTracks.length === 0) return undefined;
+  loadedTracks.sort((a, b) => (trackOrder.get(a.trackId) ?? 99) - (trackOrder.get(b.trackId) ?? 99));
 
   return (start: number, end: number) => {
-    // 자막 구간을 가장 많이 덮는 음성 클립 (같으면 위쪽 오디오 트랙 우선)
-    let best: { clip: TimelineClip; pcm: Float32Array } | null = null;
+    let best: (typeof loadedTracks)[number] | null = null;
     let bestCover = 0;
-    for (const l of loaded) {
-      const cover =
-        Math.min(end, l.clip.startTime + l.clip.duration) - Math.max(start, l.clip.startTime);
+    for (const l of loadedTracks) {
+      const cover = Math.min(end, l.startTime + l.duration) - Math.max(start, l.startTime);
       if (cover > bestCover + 0.05) {
         best = l;
         bestCover = cover;
       }
     }
-    if (!best || bestCover < (end - start) * 0.6) return null;
+    if (!best || bestCover < (end - start) * 0.5) return null;
     return {
       pcm: best.pcm,
       sampleRate: 16000,
-      timelineOffset: best.clip.startTime,
-      key: clipAudioKey(best.clip.sourcePath!, best.clip.sourceStart, best.clip.duration),
+      timelineOffset: best.startTime,
+      key: best.key,
     };
   };
 }
@@ -2635,7 +2711,27 @@ export const useEditorStore = create<EditorState>((set, get) => {
         }
       }
 
-      const nextClips = [...remainingClips, ...generatedClips];
+      // 같은 원본에서 쪼개진 클립들의 번호(#1, #2, #3...)를 시간순으로 깔끔하게 다시 매김
+      const rawNextClips = [...remainingClips, ...generatedClips];
+      const baseKeyOf = (c: TimelineClip) => `${c.trackId}::${c.sourcePath || ''}::${c.name.replace(/\s*#\d+$/, '')}`;
+      const targetBaseKeys = new Set(targets.map(baseKeyOf));
+      const groupedByBase = new Map<string, TimelineClip[]>();
+      for (const c of rawNextClips) {
+        const bk = baseKeyOf(c);
+        if (!targetBaseKeys.has(bk)) continue;
+        const arr = groupedByBase.get(bk) || [];
+        arr.push(c);
+        groupedByBase.set(bk, arr);
+      }
+      const renumberedIds = new Map<string, string>();
+      for (const [, arr] of groupedByBase) {
+        if (arr.length <= 1) continue;
+        arr.sort((a, b) => a.startTime - b.startTime);
+        const cleanBase = arr[0].name.replace(/\s*#\d+$/, '');
+        arr.forEach((c, idx) => renumberedIds.set(c.id, `${cleanBase} #${idx + 1}`));
+      }
+      const nextClips = rawNextClips.map((c) => (renumberedIds.has(c.id) ? { ...c, name: renumberedIds.get(c.id)! } : c));
+
       let nextSequences = syncActiveSequenceData(tracks, nextClips);
       // 광고 구간 띠도 무음을 뺀 만큼 같이 당기고 줄임 (자막과 같은 시간 변환)
       const mapSeg = mapTimeForSegments;
@@ -2658,7 +2754,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({
         clips: nextClips,
         sequences: nextSequences,
-        selectedClipId: generatedClips[0]?.id || null,
+        selectedClipId: null,
+        selectedClipIds: [],
         statusMessage: `무음 구간이 제거되어 영상(V) 및 음성(A) 클립이 ${segments.length}개의 유음 컷으로 동시에 분할되었습니다!${captionNote}`,
       });
     },
@@ -2748,7 +2845,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           startTime: sStart,
           duration: sDur,
           voiceEndTime: sVoiceEnd,
-          sentenceGroupId: `sent_grp_${batchStamp}_${idx}`,
+          sentenceGroupId: seg.sentenceGroupId || `sent_grp_${batchStamp}_${idx}`,
           sourceStart: 0,
           volume: 1,
           muted: false,
@@ -3043,14 +3140,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const taken = new Set(saved.map((s) => s.name));
       let name = seqName;
       for (let k = 2; taken.has(name); k++) name = `${seqName} (${k})`;
-      const clips: TimelineClip[] = [];
+      let clips: TimelineClip[] = [];
       const segs: AdSegment[] = [];
+      const batchStamp = Date.now();
+      let captionCount = 0;
       let t = 0;
       items.forEach((it, i) => {
         const asset = assets[i];
         const dur = Number(asset.duration.toFixed(4));
-        clips.push({
-          id: `clip_a_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+        const audioClip: TimelineClip = {
+          id: `clip_a_${batchStamp}_${i}_${Math.random().toString(36).slice(2, 6)}`,
           trackId: 'track-a1',
           type: 'audio',
           name: asset.name,
@@ -3061,12 +3160,55 @@ export const useEditorStore = create<EditorState>((set, get) => {
           assetId: asset.id,
           volume: 1.0,
           muted: false,
-        });
-        segs.push({ id: `seg_${Date.now()}_${i}`, name: it.name, start: Number(t.toFixed(4)), end: Number((t + dur).toFixed(4)), hook: it.hook ?? null });
+        };
+        clips.push(audioClip);
+
+        // 단어 타임스탬프(.timestamps.json)가 있으면 C1 자막 트랙까지 한 번에 자동 생성
+        if (it.words && it.words.length > 0) {
+          const capSegs = buildCaptionsFromWordTimestamps(it.words, [audioClip], {
+            mode: st.captionLineMode,
+            maxCharsPerLine: st.captionMaxCharsPerLine,
+          });
+          capSegs.forEach((seg, cIdx) => {
+            const sStart = Number(Math.max(0, seg.start).toFixed(4));
+            const sDur = Number(Math.max(0.2, seg.end - seg.start).toFixed(4));
+            const sVoiceEnd = Number(
+              Math.max(sStart + 0.15, Math.min(sStart + sDur, seg.voiceEnd ?? seg.end)).toFixed(4)
+            );
+            clips.push({
+              id: `sub_ai_${batchStamp}_${i}_${cIdx}_${Math.random().toString(36).slice(2, 5)}`,
+              trackId: 'track-c1',
+              type: 'text',
+              name: seg.text.replace(/\r?\n/g, ' ').slice(0, 18),
+              startTime: sStart,
+              duration: sDur,
+              voiceEndTime: sVoiceEnd,
+              sentenceGroupId: seg.sentenceGroupId || `sent_grp_${batchStamp}_${i}_${cIdx}`,
+              sourceStart: 0,
+              volume: 1,
+              muted: false,
+              text: seg.text,
+              originalSttText: seg.text,
+              fontSize: 40,
+              fontColor: '#ffffff',
+              backgroundColor: '#000000',
+              backgroundOpacity: 0.65,
+              strokeColor: '#000000',
+              positionY: 86,
+            });
+            captionCount++;
+          });
+        }
+
+        segs.push({ id: `seg_${batchStamp}_${i}`, name: it.name, start: Number(t.toFixed(4)), end: Number((t + dur).toFixed(4)), hook: it.hook ?? null });
         t += dur;
       });
+      if (captionCount > 0) {
+        clips = sanitizeSubtitleClipsNonOverlapping(clips, size.fps);
+      }
+      const fullScript = items.map((it) => it.script).join('\n\n\n');
       const made = {
-        id: `seq_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        id: `seq_${batchStamp}_${Math.random().toString(36).slice(2, 6)}`,
         name,
         width: size.width,
         height: size.height,
@@ -3080,11 +3222,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
         outPoint: null,
         autoEditHook: items.length === 1 ? items[0].hook : null,
         adSegments: items.length > 1 ? segs : undefined,
-        script: items.map((it) => it.script).join('\n\n\n'),
+        script: fullScript,
       } as SequenceItem;
-      set({ sequences: [...saved, made], openSequenceIds: [...get().openSequenceIds, made.id], isDirty: true });
+      set({ sequences: [...saved, made], openSequenceIds: [...get().openSequenceIds, made.id], scriptText: fullScript, isDirty: true });
       get().selectSequence(made.id);
-      const msg = `시퀀스 '${name}'를 만들고 음성 ${items.length}개를 A1 트랙에 순서대로 놓았습니다 (광고 구간: ${segs.map((g) => g.name).join(', ')})`;
+      const msg = `시퀀스 '${name}'를 만들고 음성 ${items.length}개(A1)${captionCount > 0 ? `와 자막 ${captionCount}개(C1)` : ''}를 한 번에 배치했습니다! 바로 STEP 3(무음 제거 · AI 자동 배치)로 넘어갈 수 있습니다.`;
       set({ statusMessage: msg });
       return msg;
     },
@@ -3114,13 +3256,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         if (!h) return null;
         // 경로가 저장돼 있으면 (구간별 후킹 지정, 음성 만들기) 그 영상
         const byPath = h.path ? media.find((v) => v.path.replace(/\\/g, '/').toLowerCase() === h.path!.replace(/\\/g, '/').toLowerCase()) : undefined;
-        if (byPath) return { path: byPath.path, from: h.from, to: h.to };
+        if (byPath) return { path: byPath.path, from: h.from, to: h.to, sec: h.sec };
         const byName = media.find((v) => new RegExp(`^${h.fileNo}(\\D|$)`).test(v.name));
         const a = byName || media[h.fileNo - 1];
-        return a ? { path: a.path, from: h.from, to: h.to } : null;
+        return a ? { path: a.path, from: h.from, to: h.to, sec: h.sec } : null;
       };
       const hookAssetOne = hook ? st.assets.find((a) => a.id === hook.assetId) : undefined;
-      const segs: Array<{ name: string; start: number; end: number; hook: { path: string; from: number; to: number } | null }> =
+      const segs: Array<{ name: string; start: number; end: number; hook: { path: string; from: number; to: number; sec?: number } | null }> =
         savedSegs.length > 1
           ? savedSegs.map((g) => ({ name: g.name, start: g.start, end: g.end, hook: resolveHook(g.hook) }))
           : [{ name: '', start: 0, end: total, hook: hookAssetOne && hook ? { path: hookAssetOne.path, from: hook.from, to: hook.to } : null }];
@@ -3141,13 +3283,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const usedOther = usedRangesFromClips(otherClips, an.shots);
         const allClips: AutoEditPlan['clips'] = [];
         const warnings: string[] = [];
+        const issues: string[] = [];
         for (let gi = 0; gi < segs.length; gi++) {
           const g = segs[gi];
           const segCaps = caps
             .filter((c) => c.startTime >= g.start - 0.02 && c.startTime < g.end - 0.02)
-            .map((c) => ({ ...c, startTime: c.startTime - g.start }));
+            .map((c) => ({ ...c, startTime: c.startTime - g.start, voiceEndTime: c.voiceEndTime === undefined ? undefined : c.voiceEndTime - g.start }));
           if (!segCaps.length) continue;
-          const slots = buildSlotsFromCaptions(segCaps, g.end - g.start, { hi, fps: st.fps }).map((s) => ({
+          // 후킹 지정 길이 + 그 구간에서 실제로 쓸 수 있는 원본 길이 → 후킹이 첫 문장 끝까지 덮을지 정함
+          // 후킹 길이 = 대본 지정 초("3초 : n번 a~b초"의 3초). a~b 는 장면을 가져올 범위일 뿐 길이가 아님 (편집자 정답 32개 모두 3.0초)
+          const hookOpts = g.hook ? { hookSec: g.hook.sec || g.hook.to - g.hook.from, hookCap: hookCapacity(g.hook, an.shots) } : {};
+          const slots = buildSlotsFromCaptions(segCaps, g.end - g.start, { hi, fps: st.fps, ...hookOpts }).map((s) => ({
             ...s,
             start: s.start + g.start,
             end: s.end + g.start,
@@ -3162,7 +3308,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
           );
           const avoid = [...usedOther.ranges, ...usedPrev.ranges];
           const capTimes = caps.map((c) => c.startTime);
-          const hookOnly = g.hook ? fitAssignment(slots.slice(0, 1), [], an.shots, g.hook, avoid, capTimes) : null;
+          // 후킹 지정 구간에서 장면을 못 찾으면(초를 잘못 적었거나 영상이 없음) 첫 컷도 AI가 고르게 → 빈 화면 방지
+          let segHook = g.hook;
+          if (segHook && !hookPieces(slots[0], segHook, an.shots, capTimes).length) {
+            warnings.push(`⚠️ ${g.name || '광고'}: 후킹 지정 구간에서 쓸 장면을 찾지 못해 AI가 첫 컷을 고름 (영상·초 확인)`);
+            segHook = null;
+            slots[0].hook = false;
+          }
+          const hookOnly = segHook ? fitAssignment(slots.slice(0, 1), [], an.shots, segHook, avoid, capTimes) : null;
           const hookUsed = (hookOnly?.clips || []).map((c) => ({
             shot: c.shot || '',
             from: +c.srcIn.toFixed(2),
@@ -3179,9 +3332,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
           });
           usage.input += res.usage.input;
           usage.output += res.usage.output;
-          const fitted = fitAssignment(slots, res.assign, an.shots, g.hook, avoid, capTimes);
+          const fitted = fitAssignment(slots, res.assign, an.shots, segHook, avoid, capTimes);
           allClips.push(...fitted.clips);
           warnings.push(...fitted.warnings.map((w) => (segs.length > 1 ? `${g.name}: ${w}` : w)));
+          // 결과 검사기: 절대 선(빈 화면·너무 느림·장면 경계·반복·꼬리 컷…)을 결과만 보고 다시 확인
+          const segCapsAbs = caps.filter((c) => c.startTime >= g.start - 0.02 && c.startTime < g.end - 0.02);
+          for (const it of auditPlan(slots, fitted.clips, an.shots, { hi, fps: st.fps, caps: segCapsAbs, descs: an.descs }))
+            issues.push(`${it.level === 'error' ? '❌' : '⚠️'} ${segs.length > 1 ? `${g.name}: ` : ''}${it.msg}`);
         }
         // 3) 타임라인 배치 → 자막을 컷에 맞추기
         await get().importAutoEditPlan({ format: 'auto-edit-plan/v1', duration: total, clips: allClips });
@@ -3192,7 +3349,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const msg =
           `AI 자동 배치 완료${segs.length > 1 ? ` (광고 ${segs.length}개)` : ''}: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
           `(새로 분석한 영상 ${an.analyzedFiles}개, 사용량 약 $${cost.toFixed(3)})` +
-          (fitted.warnings.length ? ` · 참고: ${fitted.warnings.slice(0, 3).join(' / ')}` : '');
+          (issues.length ? ` · 검사 결과 확인 필요 ${issues.length}개: ${issues.join(' / ')}` : ' · 검사 결과 문제 없음') +
+          (fitted.warnings.length ? ` · 참고(자동으로 바꾼 것): ${fitted.warnings.join(' / ')}` : '');
+        if (issues.length || fitted.warnings.length) console.warn('[자동 배치 검사]', { issues, warnings: fitted.warnings });
         say(msg);
         return msg;
       } catch (err) {

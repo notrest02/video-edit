@@ -329,6 +329,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
             audio: r.asset!,
             script: [ver.hookSpec.trim(), ...ver.lines.map((l) => l.trim()).filter(Boolean)].join('\n'),
             hook: m && vid ? { sec: Number(m[1]), fileNo, from: Number(m[3]), to: Number(m[4]), note: m[5].trim(), path: vid.path } : null,
+            words: r.words || [],
           };
         });
         createVoiceSequences(seqItems, size, base);
@@ -339,7 +340,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
       const provLabel = provider === 'typecast' ? 'Typecast' : 'ElevenLabs';
       setProgress(
         `${provLabel} 음성 ${ok.length}/${res.length}개를 만들었어요${
-          makeSeqs && ok.length ? ` · 시퀀스 '${base}' 하나에 순서대로 놓고 광고 구간을 표시했어요` : ' · 미디어에 올렸어요'
+          makeSeqs && ok.length ? ` · 시퀀스 '${base}'에 음성(A1)과 자막(C1), 광고 구간까지 한 번에 배치했어요` : ' · 미디어에 올렸어요'
         } · 약 ${used.toLocaleString()}자. 저장 위치: ${folder}`
       );
       setStatusMessage(`${provLabel} 음성 ${ok.length}개 완료`);
@@ -726,7 +727,7 @@ export const VoiceGenPanel: React.FC<Props> = ({ versions, product, videos }) =>
           </div>
           <label className="flex items-center gap-1.5 text-[11px] text-[#dddddd] cursor-pointer">
             <input type="checkbox" checked={makeSeqs} onChange={(e) => setMakeSeqs(e.target.checked)} className="accent-[#2d8ceb]" />
-            시퀀스({base}) 하나에 음성을 순서대로 놓고 광고 구간({base}_01 …) 표시
+            시퀀스({base})에 음성(A1) + 자막(C1) + 광고 구간({base}_01 …) 한 번에 배치
           </label>
 
           <button

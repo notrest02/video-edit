@@ -99,6 +99,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     minSilenceDuration: number;
     paddingMs: number;
   }) => ipcRenderer.invoke('ai:detectSilence', params),
+  readVoiceTimestamps: (audioPath: string) => ipcRenderer.invoke('ai:readVoiceTimestamps', audioPath),
   extractAudioFloat32: (params: {
     filePath: string;
     sourceStart: number;

@@ -2084,3 +2084,145 @@ export function sanitizeSubtitleClipsNonOverlapping(
 
   return [...nonTextClips, ...sanitizedTextClips];
 }
+
+/**
+ * AI 음성 생성(.timestamps.json)의 단어별 시간표(words)를 타임라인 오디오 클립(통짜 또는 무음 제거로 쪼개진 #1, #2... 조각들)의
+ * sourceStart / duration / speed 에 맞춰 타임라인 절대 시간으로 매핑하고,
+ * 현재 줄 표시 모드(single-line / double-line)와 maxCharsPerLine 에 맞춰 즉시 자막 세그먼트 배열을 생성합니다.
+ */
+export function buildCaptionsFromWordTimestamps(
+  words: Array<{ text: string; start: number; end: number }>,
+  audioClips: Array<{ startTime: number; duration: number; sourceStart: number; speed?: number }>,
+  options: {
+    mode: CaptionLineMode;
+    maxCharsPerLine: number;
+  }
+): WordTimestamp[] {
+  if (!words || words.length === 0 || !audioClips || audioClips.length === 0) return [];
+  const sortedClips = [...audioClips].sort((a, b) => a.startTime - b.startTime);
+
+  type MappedWord = { text: string; start: number; end: number };
+  const mappedWords: MappedWord[] = [];
+
+  for (const w of words) {
+    const cleanText = (w.text || '').trim();
+    if (!cleanText) continue;
+    const wStart = Number(w.start) || 0;
+    const wEnd = Math.max(wStart + 0.04, Number(w.end) || wStart + 0.1);
+    const wMid = (wStart + wEnd) * 0.5;
+
+    // 1) 이 단어가 속한 오디오 클립 조각 찾기 (최대 겹침 우선, 없으면 중심점이 가장 가까운 조각)
+    let bestClip: (typeof sortedClips)[number] | null = null;
+    let bestOverlap = -1;
+    let nearestClip = sortedClips[0];
+    let nearestDist = Infinity;
+
+    for (const c of sortedClips) {
+      const sp = c.speed && c.speed > 0 ? c.speed : 1;
+      const srcA = c.sourceStart;
+      const srcB = c.sourceStart + c.duration * sp;
+      const overlap = Math.min(wEnd, srcB) - Math.max(wStart, srcA);
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestClip = c;
+      }
+      const dist = wMid < srcA ? srcA - wMid : wMid > srcB ? wMid - srcB : 0;
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearestClip = c;
+      }
+    }
+
+    const chosen = bestOverlap > 0.005 ? bestClip! : nearestDist <= 0.25 ? nearestClip : null;
+    if (!chosen) continue;
+
+    const sp = chosen.speed && chosen.speed > 0 ? chosen.speed : 1;
+    const relStart = Math.max(0, (wStart - chosen.sourceStart) / sp);
+    const relEnd = Math.min(chosen.duration, Math.max(relStart + 0.04, (wEnd - chosen.sourceStart) / sp));
+    let tlStart = chosen.startTime + relStart;
+    let tlEnd = chosen.startTime + relEnd;
+
+    if (mappedWords.length > 0) {
+      const prev = mappedWords[mappedWords.length - 1];
+      if (tlStart < prev.end - 0.01) tlStart = prev.end;
+      if (tlEnd < tlStart + 0.04) tlEnd = tlStart + 0.04;
+    }
+
+    mappedWords.push({ text: cleanText, start: tlStart, end: tlEnd });
+  }
+
+  if (mappedWords.length === 0) return [];
+
+  // 2) 문장 단위로 먼저 묶은 뒤, 문장 안에서 splitWordsByPauses 로 호흡/글자수에 맞춰 줄 나눔
+  const sentences: MappedWord[][] = [];
+  let curSent: MappedWord[] = [];
+  for (const mw of mappedWords) {
+    curSent.push(mw);
+    if (/[.?!…]["'”’]*$/.test(mw.text)) {
+      sentences.push(curSent);
+      curSent = [];
+    }
+  }
+  if (curSent.length > 0) sentences.push(curSent);
+
+  const batchStamp = Date.now();
+  const rawChunks: Array<{ text: string; start: number; voiceEnd: number; sentenceGroupId: string }> = [];
+
+  sentences.forEach((sentWords, sIdx) => {
+    const grpId = `sent_grp_ts_${batchStamp}_${sIdx}`;
+    const wTexts = sentWords.map((w) => w.text);
+    const wGaps = sentWords.map((w, k) => (k === 0 ? null : Math.max(0, w.start - sentWords[k - 1].end)));
+    const breaks = splitWordsByPauses(wTexts, wGaps, options.maxCharsPerLine || 13);
+    const edges = [0, ...breaks, sentWords.length];
+
+    const lines: Array<{ text: string; start: number; voiceEnd: number }> = [];
+    for (let k = 0; k + 1 < edges.length; k++) {
+      const slice = sentWords.slice(edges[k], edges[k + 1]);
+      if (!slice.length) continue;
+      lines.push({
+        text: slice.map((x) => x.text).join(' '),
+        start: slice[0].start,
+        voiceEnd: slice[slice.length - 1].end,
+      });
+    }
+
+    if (options.mode === 'single-line') {
+      for (const ln of lines) {
+        rawChunks.push({ ...ln, sentenceGroupId: grpId });
+      }
+    } else {
+      for (let i = 0; i < lines.length; i += 2) {
+        if (i + 1 < lines.length) {
+          rawChunks.push({
+            text: `${lines[i].text}\n${lines[i + 1].text}`,
+            start: lines[i].start,
+            voiceEnd: lines[i + 1].voiceEnd,
+            sentenceGroupId: grpId,
+          });
+        } else {
+          rawChunks.push({ ...lines[i], sentenceGroupId: grpId });
+        }
+      }
+    }
+  });
+
+  // 3) 인접 자막 사이 짧은 간격(<= 0.65초)은 앞 자막 끝을 다음 자막 시작까지 자연스럽게 이어 깜빡임 방지
+  return rawChunks.map((ch, idx) => {
+    const next = rawChunks[idx + 1];
+    let end = ch.voiceEnd;
+    if (next && next.start > ch.voiceEnd && next.start - ch.voiceEnd <= 0.65) {
+      end = next.start;
+    } else if (next) {
+      end = Math.min(next.start, ch.voiceEnd + 0.12);
+    } else {
+      end = ch.voiceEnd + 0.12;
+    }
+    return {
+      text: ch.text,
+      start: Number(ch.start.toFixed(4)),
+      end: Number(Math.max(ch.start + 0.16, end).toFixed(4)),
+      voiceEnd: Number(ch.voiceEnd.toFixed(4)),
+      sentenceGroupId: ch.sentenceGroupId,
+    };
+  });
+}

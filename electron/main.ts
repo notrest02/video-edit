@@ -366,20 +366,54 @@ ipcMain.handle('typecast:clearKey', () => {
 ipcMain.handle('typecast:subscription', () => getSubscription());
 ipcMain.handle('typecast:voices', async (_e, filter: { gender?: string; age?: string }) => listVoices(filter));
 ipcMain.handle('typecast:preview', async (_e, p: { url: string; tempo: number; pitch: number }) => adjustedPreview(resolvedFfmpegPath, p));
+function readVoiceTimestampsHelper(audioOrJsonPath?: string): {
+  found: boolean;
+  text: string;
+  duration: number;
+  words: Array<{ text: string; start: number; end: number }>;
+} {
+  if (!audioOrJsonPath) return { found: false, text: '', duration: 0, words: [] };
+  const candidates = audioOrJsonPath.endsWith('.timestamps.json')
+    ? [audioOrJsonPath]
+    : [audioOrJsonPath.replace(/\.[^.\\/]+$/, '.timestamps.json'), `${audioOrJsonPath}.timestamps.json`];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        const d = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        if (Array.isArray(d.words) && d.words.length > 0) {
+          return {
+            found: true,
+            text: typeof d.text === 'string' ? d.text : '',
+            duration: typeof d.duration === 'number' ? d.duration : 0,
+            words: d.words,
+          };
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+  return { found: false, text: '', duration: 0, words: [] };
+}
+
+ipcMain.handle('ai:readVoiceTimestamps', async (_e, audioPath: string) => readVoiceTimestampsHelper(audioPath));
+
 ipcMain.handle('typecast:synthesize', async (e, params: Parameters<typeof synthesize>[0]) => {
   const results = await synthesize(params, (msg) => e.sender.send('typecast:progress', msg));
-  // 만든 파일을 바로 미디어로 쓸 수 있게 길이 등을 읽어 같이 돌려준다
+  // 만든 파일을 바로 미디어로 쓸 수 있게 길이와 단어 시간표(.timestamps.json)를 읽어 같이 돌려준다
   const withAssets = [];
   for (const r of results) {
     let asset = null;
+    let words: Array<{ text: string; start: number; end: number }> = [];
     if (r.ok && r.audioPath) {
       try {
         asset = await probeMediaFile(r.audioPath);
       } catch {
         asset = null;
       }
+      words = readVoiceTimestampsHelper(r.timestampsPath || r.audioPath).words;
     }
-    withAssets.push({ ...r, asset });
+    withAssets.push({ ...r, asset, words });
   }
   return withAssets;
 });
@@ -398,14 +432,16 @@ ipcMain.handle('eleven:synthesize', async (e, params: Parameters<typeof synthesi
   const withAssets = [];
   for (const r of results) {
     let asset = null;
+    let words: Array<{ text: string; start: number; end: number }> = [];
     if (r.ok && r.audioPath) {
       try {
         asset = await probeMediaFile(r.audioPath);
       } catch {
         asset = null;
       }
+      words = readVoiceTimestampsHelper(r.timestampsPath || r.audioPath).words;
     }
-    withAssets.push({ ...r, asset });
+    withAssets.push({ ...r, asset, words });
   }
   return withAssets;
 });
@@ -832,7 +868,7 @@ ipcMain.handle('media:probe', async (_event, filePath: string) => {
   return await probeMediaFile(filePath);
 });
 
-// 4. AI Silence Detection (FFmpeg silencedetect)
+// 4. AI Silence Detection (타임라인 파형과 동일한 20ms 정규화 엔벨로프 + 미세 숨소리 브릿징 기반)
 ipcMain.handle(
   'ai:detectSilence',
   async (
@@ -849,75 +885,137 @@ ipcMain.handle(
     const { filePath, sourceStart, duration, noiseDb, minSilenceDuration, paddingMs } = params;
 
     return new Promise((resolve, reject) => {
+      const samplesPerSec = 50; // 20ms per bucket (타임라인 파형 렌더러와 동일)
+      const sampleRate = 8000;
+      const samplesPerBucket = Math.floor(sampleRate / samplesPerSec); // 160 samples
+
       const args = [
-        '-ss', String(sourceStart),
-        '-t', String(duration),
+        '-ss', String(Math.max(0, sourceStart || 0)),
+        '-t', String(Math.max(0.05, duration)),
         '-i', filePath,
-        '-af', `silencedetect=noise=${noiseDb}dB:d=${minSilenceDuration}`,
-        '-f', 'null',
-        '-',
+        '-vn',
+        '-ac', '1',
+        '-ar', String(sampleRate),
+        '-f', 's16le',
+        'pipe:1',
       ];
 
       const proc = spawn(resolvedFfmpegPath, args);
-      let stderrLog = '';
+      const chunks: Buffer[] = [];
 
-      proc.stderr.on('data', (chunk) => {
-        stderrLog += chunk.toString();
+      proc.stdout.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
       });
 
       proc.on('close', () => {
-        const silences: Array<{ start: number; end: number }> = [];
-        const startRegex = /silence_start:\s*([0-9.]+)/g;
-        const endRegex = /silence_end:\s*([0-9.]+)/g;
-
-        const starts: number[] = [];
-        const ends: number[] = [];
-        let m: RegExpExecArray | null;
-
-        while ((m = startRegex.exec(stderrLog)) !== null) {
-          starts.push(parseFloat(m[1]));
-        }
-        while ((m = endRegex.exec(stderrLog)) !== null) {
-          ends.push(parseFloat(m[1]));
+        const buffer = Buffer.concat(chunks);
+        const totalSamples = Math.floor(buffer.byteLength / 2);
+        if (totalSamples === 0) {
+          resolve({ silences: [], speechSegments: [{ start: 0, end: duration }] });
+          return;
         }
 
-        for (let i = 0; i < starts.length; i++) {
-          const s = Math.max(0, starts[i]);
-          const e = i < ends.length ? Math.min(duration, ends[i]) : duration;
-          if (e > s) {
-            silences.push({ start: s, end: e });
+        const bucketCount = Math.ceil(totalSamples / samplesPerBucket);
+        const rawPeaks = new Float32Array(bucketCount);
+        const rawRms = new Float32Array(bucketCount);
+
+        for (let b = 0; b < bucketCount; b++) {
+          const startSample = b * samplesPerBucket;
+          const endSample = Math.min(totalSamples, startSample + samplesPerBucket);
+          let maxAbs = 0;
+          let sumSq = 0;
+          const count = endSample - startSample;
+
+          for (let s = startSample; s < endSample; s++) {
+            const val = Math.abs(buffer.readInt16LE(s * 2)) / 32768;
+            if (val > maxAbs) maxAbs = val;
+            sumSq += val * val;
+          }
+
+          rawPeaks[b] = maxAbs;
+          rawRms[b] = count > 0 ? Math.sqrt(sumSq / count) : 0;
+        }
+
+        // 타임라인 초록 파형(media:getAudioWaveform)과 동일한 98 퍼센타일 정규화 스케일
+        const sortedPeaks = Float32Array.from(rawPeaks).sort();
+        const p98 = sortedPeaks[Math.floor(sortedPeaks.length * 0.98)] || 0.5;
+        const normScale = Math.max(0.04, Math.min(1, p98));
+
+        // 기본값 -32dB 일 때 타임라인 파형상 바닥(0 근처)으로 보이는 구간과 일치하도록 게이트 설정
+        const gate = 0.048 * Math.pow(10, (noiseDb + 32) / 20);
+        const absThresh = Math.pow(10, noiseDb / 20);
+
+        const isSilent = new Uint8Array(bucketCount);
+        for (let b = 0; b < bucketCount; b++) {
+          const normPeak = rawPeaks[b] / normScale;
+          const normRms = (rawRms[b] / normScale) * 1.45;
+          if (Math.min(normPeak, normRms) <= gate || rawRms[b] <= absThresh) {
+            isSilent[b] = 1;
           }
         }
 
-        // Convert silences into active speech segments with padding
-        // AI 음성처럼 이미 0.15~0.2초로 줄어든 짧은 무음을 자를 때 양쪽 패딩(70ms*2 + 병합 40ms = 180ms)이 무음을 삼키지 않도록 상한 적용
+        // 무음 골짜기 한가운데 낀 짧은 AI 숨소리/입소리(<= 4버킷 = 80ms)는 발화가 아닌 무음으로 이어줌
+        for (let b = 1; b < bucketCount - 1; b++) {
+          if (!isSilent[b] && isSilent[b - 1]) {
+            let endB = b;
+            while (
+              endB < bucketCount &&
+              !isSilent[endB] &&
+              endB - b <= 4 &&
+              rawRms[endB] / normScale <= gate * 1.6 &&
+              rawPeaks[endB] / normScale < 0.22
+            ) {
+              endB++;
+            }
+            if (endB < bucketCount && isSilent[endB]) {
+              for (let k = b; k < endB; k++) isSilent[k] = 1;
+            }
+          }
+        }
+
+        const silences: Array<{ start: number; end: number }> = [];
+        let sStart = -1;
+        for (let b = 0; b <= bucketCount; b++) {
+          if (b < bucketCount && isSilent[b]) {
+            if (sStart < 0) sStart = b;
+          } else if (sStart >= 0) {
+            const s = sStart / samplesPerSec;
+            const e = Math.min(duration, b / samplesPerSec);
+            if (e - s >= minSilenceDuration - 1e-4) {
+              silences.push({ start: Number(s.toFixed(4)), end: Number(e.toFixed(4)) });
+            }
+            sStart = -1;
+          }
+        }
+
+        // 무음 구간을 유음(발화) 구간으로 변환 (짧은 무음이 패딩 때문에 다시 합쳐지지 않도록 상한 제한)
         const rawPadSec = (paddingMs ?? 70) / 1000;
-        const padSec = Math.min(rawPadSec, Math.max(0.02, minSilenceDuration * 0.22));
-        const mergeGapSec = Math.min(0.03, Math.max(0.01, minSilenceDuration * 0.1));
         const speechSegments: Array<{ start: number; end: number }> = [];
         let cursor = 0;
 
         for (const sil of silences) {
+          const silDur = sil.end - sil.start;
+          const padSec = Math.min(rawPadSec, Math.max(0.015, silDur * 0.22));
           const segStart = Math.max(0, cursor);
           const segEnd = Math.min(duration, sil.start + padSec);
           if (segEnd - segStart >= 0.08) {
-            speechSegments.push({ start: segStart, end: segEnd });
+            speechSegments.push({ start: Number(segStart.toFixed(4)), end: Number(segEnd.toFixed(4)) });
           }
           cursor = Math.max(cursor, sil.end - padSec);
         }
 
         if (duration - cursor >= 0.08) {
-          speechSegments.push({ start: cursor, end: duration });
+          speechSegments.push({ start: Number(cursor.toFixed(4)), end: Number(duration.toFixed(4)) });
         }
 
-        // Merge overlapping speech segments if padding caused overlap
+        // 패딩으로 겹친 경우만 병합 (감지된 무음 구간이 도로 합쳐지지 않도록 15ms 이하만 병합)
         const merged: Array<{ start: number; end: number }> = [];
         for (const seg of speechSegments) {
           if (merged.length === 0) {
             merged.push({ ...seg });
           } else {
             const prev = merged[merged.length - 1];
-            if (seg.start <= prev.end + mergeGapSec) {
+            if (seg.start <= prev.end + 0.015) {
               prev.end = Math.max(prev.end, seg.end);
             } else {
               merged.push({ ...seg });

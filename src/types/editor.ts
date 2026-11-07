@@ -100,7 +100,15 @@ export type AutoEditShotDesc = {
   parts: Array<{ from: number; to: number; desc: string }>;
   note: string;
 };
-export type AutoEditSlot = { slot: number; start: number; end: number; dur: number; text: string; hook: boolean; captionStart: number };
+export type AutoEditSlot = {
+  slot: number; start: number; end: number; dur: number; text: string; hook: boolean; captionStart: number;
+  /** 이 컷이 들어 있는 문장 전체 (AI가 문장 뜻을 보고 고르게) */
+  sentence?: string;
+  /** 앞 컷과 같은 문장이 이어짐 (문장 중간에서 시작) */
+  cont?: boolean;
+  /** 다음 컷 대사 (장소 말이 다음에 나오는지 보려고) */
+  next?: string;
+};
 
 export interface AutoEditPlan {
   format: 'auto-edit-plan/v1';
@@ -248,6 +256,7 @@ export interface WordTimestamp {
   start: number; // 타임라인 절대 시간 (초)
   end: number;   // 타임라인 절대 시간 (초)
   voiceEnd?: number; // 무음 연장 전 실제 음성 발화가 끝나는 타임라인 절대 시간 (초)
+  sentenceGroupId?: string;
   needsReview?: boolean;
   alignConfidence?: number;
 }
@@ -345,7 +354,7 @@ declare global {
         slots: AutoEditSlot[];
         hookUsed: Array<{ shot: string; from: number; to: number }>;
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
-      }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; why: string }>; usage: { input: number; output: number } }>;
+      }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; alt?: string; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
       /** STEP 0 대본 만들기 (Claude Haiku: 생성 + 검수) */
       scriptGenGenerate?: (params: ScriptGenRequest) => Promise<{
@@ -401,6 +410,7 @@ declare global {
           duration?: number;
           credits?: number;
           asset: Omit<MediaAsset, 'id'> | null;
+          words?: Array<{ text: string; start: number; end: number }>;
         }>
       >;
       onTypecastProgress?: (callback: (msg: string) => void) => () => void;
@@ -435,6 +445,7 @@ declare global {
           duration?: number;
           credits?: number;
           asset: Omit<MediaAsset, 'id'> | null;
+          words?: Array<{ text: string; start: number; end: number }>;
         }>
       >;
       fileExists?: (p: string) => Promise<boolean>;
@@ -484,6 +495,12 @@ declare global {
       }) => Promise<{
         silences: Array<{ start: number; end: number }>;
         speechSegments: Array<{ start: number; end: number }>;
+      }>;
+      readVoiceTimestamps?: (audioPath: string) => Promise<{
+        found: boolean;
+        text: string;
+        duration: number;
+        words: Array<{ text: string; start: number; end: number }>;
       }>;
       extractAudioFloat32: (params: {
         filePath: string;

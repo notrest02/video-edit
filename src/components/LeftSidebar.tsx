@@ -18,6 +18,7 @@ import { AutoEditCard } from './AutoEditCard';
 import { ScriptGenCard } from './ScriptGenCard';
 import {
   CaptionDiffItem,
+  buildCaptionsFromWordTimestamps,
   compareAndCorrectCaptionsWithScript,
   parseScriptBlocks,
   splitSentenceIntoNaturalChunks,
@@ -142,60 +143,123 @@ export const LeftSidebar: React.FC = () => {
       setStatusMessage('먼저 시퀀스 타임라인에 오디오 또는 비디오 클립을 넣어주세요.');
       return;
     }
-    if (!(await ensureAlignModel())) return;
+
+    // 무음 제거로 쪼개진 클립들(#1, #2...)을 같은 원본 파일(sourcePath) 단위로 묶어서
+    // 1) .timestamps.json 이 있으면 Whisper 없이 0.1초 만에 매핑 생성 (방법 2)
+    // 2) 일반 음성이면 잘린 조각들을 하나의 연속 버퍼로 이어 붙여 Whisper + 발음 정렬을 딱 1번만 실행 (방법 1)
+    const groups: Array<{ sourcePath: string; clips: typeof targetAudioClips }> = [];
+    for (const c of targetAudioClips) {
+      if (!c.sourcePath) continue;
+      const last = groups[groups.length - 1];
+      if (last && last.sourcePath === c.sourcePath && last.clips[0].trackId === c.trackId) {
+        last.clips.push(c);
+      } else {
+        groups.push({ sourcePath: c.sourcePath, clips: [c] });
+      }
+    }
+    if (groups.length === 0) return;
 
     setIsProcessing(true);
     try {
       const generatedSegments: WordTimestamp[] = [];
+      let usedTimestampsCount = 0;
+      let alignModelChecked = false;
 
-      for (let i = 0; i < targetAudioClips.length; i++) {
-        const clip = targetAudioClips[i];
-        if (!clip.sourcePath) continue;
+      for (let gIdx = 0; gIdx < groups.length; gIdx++) {
+        const group = groups[gIdx];
+        const gClips = [...group.clips].sort((a, b) => a.startTime - b.startTime);
+        const firstClip = gClips[0];
+        const cleanName = firstClip.name.replace(/\s*#\d+$/, '');
+
+        // [방법 2] 음성 클립 옆에 .timestamps.json 이 있는지 먼저 확인 → 있으면 Whisper 건너뛰고 즉시 생성
+        const tsInfo = await window.electronAPI.readVoiceTimestamps?.(group.sourcePath);
+        if (tsInfo?.found && tsInfo.words.length > 0) {
+          setProgressText(`[${gIdx + 1}/${groups.length}] '${cleanName}' 저장된 AI 음성 시간표(.timestamps.json)로 즉시 매핑 중...`);
+          const mappedSegs = buildCaptionsFromWordTimestamps(tsInfo.words, gClips, {
+            mode: captionLineMode,
+            maxCharsPerLine: captionMaxCharsPerLine,
+          });
+          generatedSegments.push(...mappedSegs);
+          usedTimestampsCount++;
+          continue;
+        }
+
+        // [방법 1] 일반 녹음/외부 음성: 정렬 모델 확인 후, 여러 조각(#1, #2...)이어도 원본에서 1번만 추출해 이어 붙여 Whisper 1회 실행
+        if (!alignModelChecked) {
+          if (!(await ensureAlignModel())) return;
+          alignModelChecked = true;
+        }
+
+        const minSrc = Math.max(0, Math.min(...gClips.map((c) => c.sourceStart)));
+        const maxSrc = Math.max(...gClips.map((c) => c.sourceStart + c.duration * (c.speed && c.speed > 0 ? c.speed : 1)));
+        const srcSpanDur = Math.max(0.05, maxSrc - minSrc);
 
         setProgressText(
-          `[${i + 1}/${targetAudioClips.length}] '${clip.name}' 16kHz 오디오 파형 추출 중...`
+          `[${gIdx + 1}/${groups.length}] '${cleanName}'${gClips.length > 1 ? ` (조각 ${gClips.length}개 통합)` : ''} 16kHz 오디오 파형 추출 중...`
         );
-        const pcmFloat32 = await window.electronAPI.extractAudioFloat32({
-          filePath: clip.sourcePath,
-          sourceStart: clip.sourceStart,
-          duration: clip.duration,
+        const rawSourcePcm = await window.electronAPI.extractAudioFloat32({
+          filePath: group.sourcePath,
+          sourceStart: minSrc,
+          duration: srcSpanDur,
         });
 
-        // 한줄/두줄 변환 시스템이 언제든 즉시 5ms 파형 절벽 스냅을 사용할 수 있도록 파형 캐시 보장
-        if (clip.sourcePath && clip.sourceStart === 0) {
-          const normKey = normalizeAudioPath(clip.sourcePath);
-          if (!rendererWaveformCache.has(normKey)) {
-            const { visualPeaks, samplesPerSec } = computeVisualWaveformPeaks(pcmFloat32, 16000, 200);
-            const peaksArr = Array.from(visualPeaks);
-            const wfObj = { peaks: peaksArr, rms: peaksArr, samplesPerSec };
-            rendererWaveformCache.set(normKey, wfObj);
-            rendererWaveformCache.set(clip.sourcePath, wfObj);
+        const groupStart = gClips[0].startTime;
+        const groupEnd = Math.max(...gClips.map((c) => c.startTime + c.duration));
+        const groupDur = Math.max(0.05, groupEnd - groupStart);
+
+        let pcmFloat32: Float32Array;
+        if (gClips.length === 1) {
+          pcmFloat32 = rawSourcePcm;
+          if (firstClip.sourcePath && firstClip.sourceStart === 0) {
+            const normKey = normalizeAudioPath(firstClip.sourcePath);
+            if (!rendererWaveformCache.has(normKey)) {
+              const { visualPeaks, samplesPerSec } = computeVisualWaveformPeaks(pcmFloat32, 16000, 200);
+              const peaksArr = Array.from(visualPeaks);
+              const wfObj = { peaks: peaksArr, rms: peaksArr, samplesPerSec };
+              rendererWaveformCache.set(normKey, wfObj);
+              rendererWaveformCache.set(firstClip.sourcePath, wfObj);
+            }
+          }
+        } else {
+          // 무음 제거로 나뉜 조각들을 타임라인 위치에 맞춰 하나의 연속 버퍼로 조립 (Whisper 1회 호출)
+          pcmFloat32 = new Float32Array(Math.ceil(groupDur * 16000));
+          for (const c of gClips) {
+            const srcOff = Math.max(0, Math.round((c.sourceStart - minSrc) * 16000));
+            const len = Math.min(Math.round(c.duration * 16000), rawSourcePcm.length - srcOff);
+            const dstOff = Math.max(0, Math.round((c.startTime - groupStart) * 16000));
+            if (len > 0 && dstOff + len <= pcmFloat32.length) {
+              pcmFloat32.set(rawSourcePcm.subarray(srcOff, srcOff + len), dstOff);
+            }
           }
         }
 
-        // 1. 로컬 Whisper 로 받아쓰기
-        let baseSegments: WordTimestamp[] = await transcribeWithLocalWhisper(pcmFloat32, clip.startTime, {
+        // 1. 로컬 Whisper 로 받아쓰기 (조각 수와 무관하게 그룹당 딱 1회)
+        let baseSegments: WordTimestamp[] = await transcribeWithLocalWhisper(pcmFloat32, groupStart, {
           modelId: localWhisperModel,
           language: 'korean',
           maxCharsPerLine: captionMaxCharsPerLine,
           onProgress: (msg) => setProgressText(msg),
         });
 
-        // 3. 받아쓴 글자를 음성에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정
+        // 2. 받아쓴 글자를 음성에 강제 정렬해 자막 시작/끝을 실제 발음 위치로 보정 (그룹당 딱 1회)
         if (window.electronAPI.alignWordSpans && baseSegments.length > 0) {
-          setProgressText(`'${clip.name}' 자막 위치 정밀 보정 중...`);
+          setProgressText(`'${cleanName}' 자막 위치 정밀 보정 중...`);
           const rel = baseSegments.map((sg) => ({
             ...sg,
-            start: sg.start - clip.startTime,
-            end: sg.end - clip.startTime,
-            voiceEnd: (sg.voiceEnd ?? sg.end) - clip.startTime,
+            start: sg.start - groupStart,
+            end: sg.end - groupStart,
+            voiceEnd: (sg.voiceEnd ?? sg.end) - groupStart,
             inBreath: false,
           }));
+          const alignKey =
+            gClips.length === 1
+              ? clipAudioKey(firstClip.sourcePath!, firstClip.sourceStart, firstClip.duration)
+              : `stitched_step1_${group.sourcePath}_${gClips.length}_${groupStart.toFixed(2)}_${groupDur.toFixed(2)}`;
           const r = await refineCaptionsByFullAlignment(
             pcmFloat32,
             16000,
             rel,
-            alignCaptionsToClip(clipAudioKey(clip.sourcePath, clip.sourceStart, clip.duration))
+            alignCaptionsToClip(alignKey)
           );
           if (!r.available) {
             setStatusMessage('자막 위치 맞춤 모델을 사용할 수 없어 자막을 만들지 않았습니다.');
@@ -203,9 +267,9 @@ export const LeftSidebar: React.FC = () => {
           }
           baseSegments = r.captions.map(({ inBreath: _ib, ...c }) => ({
             ...c,
-            start: c.start + clip.startTime,
-            end: c.end + clip.startTime,
-            voiceEnd: c.voiceEnd + clip.startTime,
+            start: c.start + groupStart,
+            end: c.end + groupStart,
+            voiceEnd: c.voiceEnd + groupStart,
           }));
         }
         generatedSegments.push(...baseSegments);
@@ -218,7 +282,9 @@ export const LeftSidebar: React.FC = () => {
 
       addRawAiCaptions(generatedSegments);
       setStatusMessage(
-        `받아쓰기 자막 ${generatedSegments.length}개를 만들고 실제 발음 위치에 맞췄습니다.`
+        usedTimestampsCount === groups.length
+          ? `AI 음성 시간표(.timestamps.json)로 오타 없는 자막 ${generatedSegments.length}개를 즉시 생성했습니다! (STEP 2 오타 변환 생략 가능)`
+          : `자막 ${generatedSegments.length}개를 만들고 실제 발음 위치에 맞췄습니다.`
       );
     } catch (err: any) {
       setStatusMessage(`AI 캡션 생성 오류: ${err.message}`);
@@ -335,10 +401,11 @@ export const LeftSidebar: React.FC = () => {
     }
   };
 
-  // 무음 구간 자동 컷 편집 (선택된 클립들 또는 트랙의 전체 오디오 클립 모두 처리)
+  // 무음 구간 자동 컷 편집 (여러 개를 다중 선택한 경우만 선택 클립 대상, 단일/미선택 시에는 트랙 전체 오디오 클립을 모두 처리해 #1만 잘리는 현상 방지)
   const handleAutoSilenceCut = async () => {
     if (!window.electronAPI) return;
-    const targets = targetAudioClips.filter((c) => c.sourcePath);
+    const pool = selectedMediaClips.length > 1 ? selectedMediaClips : allAudioOrVideoClips;
+    const targets = pool.filter((c) => c.sourcePath);
     if (targets.length === 0) {
       setStatusMessage('무음 구간을 분석할 오디오/비디오 클립을 먼저 시퀀스에 배치해 주세요.');
       return;
@@ -364,7 +431,7 @@ export const LeftSidebar: React.FC = () => {
           paddingMs,
         });
 
-        if (result.speechSegments.length > 1 || result.silences.length > 0) {
+        if (result.speechSegments.length > 1) {
           replaceClipWithSegments(latestClip.id, result.speechSegments, rippleAfterSilence);
           cutClipCount++;
           totalSegments += result.speechSegments.length;
