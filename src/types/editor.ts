@@ -92,13 +92,20 @@ export type ScriptGenRequest = {
 };
 
 export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number };
-export type AutoEditShotDesc = {
+type AutoEditShotView = { subject?: string; talk?: boolean; stage?: string };
+export type AutoEditShotDesc = AutoEditShotView & {
   id: string;
   desc: string;
   place: string;
   motion: 'high' | 'low';
-  parts: Array<{ from: number; to: number; desc: string }>;
+  parts: Array<AutoEditShotView & { from: number; to: number; desc: string }>;
   note: string;
+  mood?: string;
+  framing?: string;
+  key?: number;
+  group?: string;
+  firstFrame?: string;
+  issues?: string;
 };
 export type AutoEditSlot = {
   slot: number; start: number; end: number; dur: number; text: string; hook: boolean; captionStart: number;
@@ -108,6 +115,8 @@ export type AutoEditSlot = {
   cont?: boolean;
   /** 다음 컷 대사 (장소 말이 다음에 나오는지 보려고) */
   next?: string;
+  /** 대본을 쓸 때 이 문장의 근거로 본 장면 id (지금 미디어 기준). 있으면 1순위 후보 */
+  basis?: string[];
 };
 
 export interface AutoEditPlan {
@@ -210,6 +219,9 @@ export interface TimelineClip {
   originalSttText?: string; // 대본 교체 전 AI STT 원문 (비교 확인용)
   sentenceGroupId?: string; // 한줄/두줄 재구성 시 원본 문장 그룹 식별용 ID
   voiceEndTime?: number;    // 무음 연장 전 실제 음성 발화가 끝나는 타임라인 절대 시간 (초)
+  /** 자막을 영상 컷에 맞추느라 시작을 앞(+)으로 당긴 양(초). 실제 목소리 시작 = startTime + snapLead.
+   *  자동 배치는 이 값으로 목소리 시작을 기준 삼아 컷 자리를 계산 → 몇 번을 돌려도 컷·자막이 밀리지 않음 (2026-11-08) */
+  snapLead?: number;
 
   // 기본 폰트 및 텍스트 모양
   fontFamily?: string;
@@ -295,6 +307,9 @@ export type AlignModelStatus =
   | { state: 'verifying'; file: string }
   | { state: 'failed'; message: string };
 
+/** 대본 문장 하나 + 그 문장을 쓸 때 본 원본 장면들 (경로 + 원본 초) */
+export type ScriptBasisEntry = { text: string; scenes: Array<{ path: string; from: number; to: number }> };
+
 export interface ProjectFileData {
   version: number;
   savedAt: string;
@@ -312,6 +327,8 @@ export interface ProjectFileData {
   snapEnabled?: boolean;
   linkedSelection?: boolean;
   scriptText?: string;
+  /** 대본 만들기(STEP 0)가 저장한 문장별 근거 장면 — 자동 배치가 1순위로 씀 */
+  scriptBasis?: ScriptBasisEntry[];
   captionLineMode?: string;
   captionMaxCharsPerLine?: number;
   autoSplitOnCaptionGenerate?: boolean;
@@ -354,11 +371,11 @@ declare global {
         slots: AutoEditSlot[];
         hookUsed: Array<{ shot: string; from: number; to: number }>;
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
-      }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; alt?: string; why: string }>; usage: { input: number; output: number } }>;
+      }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; alt?: string; focus?: string; fit?: string; why: string }>; usage: { input: number; output: number } }>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
       /** STEP 0 대본 만들기 (Claude Haiku: 생성 + 검수) */
       scriptGenGenerate?: (params: ScriptGenRequest) => Promise<{
-        versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[]; warnings: string[] }>;
+        versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[]; warnings: string[]; basis?: Array<Array<{ path: string; from: number; to: number }>> }>;
         fixes: Array<{ version: number; before: string; after: string; reason: string }>;
         usage: { input: number; output: number };
         exampleCount: number;

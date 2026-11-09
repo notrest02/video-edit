@@ -23,6 +23,8 @@ import {
   type ScriptMode,
   type ScriptTone,
   type ScriptVersion,
+  type ScriptBasisScene,
+  parseSceneRefs,
 } from '../src/utils/scriptGen';
 
 type ConcreteMode = Exclude<ScriptMode, 'auto'>;
@@ -169,7 +171,7 @@ export async function parseOrder(order: string): Promise<OrderParseResult> {
     version_count: number;
     seconds: number;
     notes: string;
-  }>({ system: ORDER_SYSTEM, text: `## 클라이언트 오더\n${order.trim()}`, schema: ORDER_SCHEMA, maxTokens: 16000 });
+  }>({ system: ORDER_SYSTEM, text: `## 클라이언트 오더\n${order.trim()}`, schema: ORDER_SCHEMA });
   const d = r.data;
   return {
     product: d.product.trim(),
@@ -218,7 +220,10 @@ async function sceneList(
     bounds.push({ no, start: s.start, end: s.end });
     const d = descOf.get(s.id);
     const parts = d?.parts?.length ? ` / 세부: ${d.parts.map((x) => `${x.from}~${x.to}초 ${x.desc}`).join('; ')}` : '';
-    lines.push(`${no}번 영상 ${s.start}~${s.end}초 (${s.dur}초, 움직임 ${d?.motion === 'high' ? '많음' : '적음'}): ${d?.desc || '(설명 없음)'}${d?.place ? ` [${d.place}]` : ''}${parts}`);
+    const view = [d?.subject ? `주인공 ${d.subject}` : '', d?.stage ? `단계 ${d.stage}` : '', d?.talk ? '카메라 보고 말함' : '', d?.mood ? `분위기 ${d.mood}` : '']
+      .filter(Boolean)
+      .join(', ');
+    lines.push(`${no}번 영상 ${s.start}~${s.end}초 (${s.dur}초, 움직임 ${d?.motion === 'high' ? '많음' : '적음'}): ${d?.desc || '(설명 없음)'}${d?.place ? ` [${d.place}]` : ''}${view ? ` {${view}}` : ''}${parts}`);
   }
   const head = media.map((m) => `${m.no}번 영상: 파일 이름 "${m.name}" (${m.duration.toFixed(1)}초)`).join('\n');
   return { text: `${head}\n\n장면(샷) 목록 — 화면 전환 없이 이어지는 구간:\n${lines.join('\n')}`, bounds, usage: r.usage };
@@ -279,7 +284,6 @@ export async function factsFromVideos(
     text: `제품 이름(알려 준 경우): ${p.product.trim() || '(모름)'}\n\n## 장면 분석 (참고)\n${scenes.text}\n\n영상 ${p.media.length}개의 장면표와 장면 분석을 보고 정리해라.`,
     images,
     schema: VIDEO_FACTS_SCHEMA,
-    maxTokens: 16000,
   });
   const d = r.data;
   return {
@@ -349,7 +353,6 @@ export async function planVersions(
 - 버전이 3개 이상이면 그중 하나는 제품의 가장 큰 매력(사실 목록의 '매력:' 또는 신뢰도·디자인 같은 핵심)을 중심으로.`,
     text: `## 제품 정보\n${factsBlock(p)}\n\n${fixed.some(Boolean) ? `## 사람이 정해 둔 것\n${fixed.filter(Boolean).join('\n')}\n\n` : ''}버전 ${n}개를 기획해라.`,
     schema: PLAN_SCHEMA,
-    maxTokens: 16000,
   });
   const valid = (k: number) => Number.isInteger(k) && k >= 1 && k <= p.sellingPoints.length;
   const versions = Array.from({ length: n }, (_, i) => {
@@ -416,6 +419,11 @@ ${modeBlock}
 - 후킹 구간은 장면 하나(샷 하나)의 시작~끝 안에 들어가야 한다. 장면이 바뀌는 순간이 구간 안에 들어가면 다음 장면이 잠깐 비쳐 어색하다. 3초 이상인 장면 중에서 고르고, 없으면 가장 긴 장면 전체를 쓴다.
 - 영상이 없으면 "3초 : 1번 0~3초".
 
+[근거 장면] (영상이 있을 때)
+- line_scenes 는 lines 와 같은 순서, 같은 개수로 쓴다. 그 문장을 쓸 때 보고 쓴 장면을 '장면(샷) 목록'에서 "n번 a~b초" 형식으로 적는다
+  (여러 개면 "; "로 이어서, 문장의 핵심(주인공·동작·장소)이 실제로 보이는 장면만). 나중에 영상을 붙일 때 이 장면을 먼저 쓴다.
+- 특정 장면 없이 쓴 문장(구매 권유 등)은 "" 로 둔다. 영상이 없으면 모두 "".
+
 [검사]
 - 다 쓴 뒤 문장마다 뜻이 맞는지(특히 "안 남는다/남는다" 같은 부정 표현이 뒤집히지 않았는지), 사실과 맞는지, 맡은 소구점을 다 다뤘는지, 글자 수가 맞는지 검사하고 고친다. 고친 점은 self_check 에 적는다.`;
 }
@@ -430,12 +438,13 @@ const GEN_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['hook_type', 'angle', 'hook_spec', 'lines', 'self_check'],
+        required: ['hook_type', 'angle', 'hook_spec', 'lines', 'line_scenes', 'self_check'],
         properties: {
           hook_type: { type: 'string' },
           angle: { type: 'string', description: '이 버전의 이야기 한 줄' },
           hook_spec: { type: 'string', description: '예: 3초 : 2번 4~7초' },
           lines: { type: 'array', items: { type: 'string' }, description: '문장 하나씩' },
+          line_scenes: { type: 'array', items: { type: 'string' }, description: 'lines 와 같은 순서·개수. 그 문장의 근거 장면 "n번 a~b초" (없으면 "")' },
           self_check: { type: 'string' },
         },
       },
@@ -524,7 +533,7 @@ export async function generateScripts(
 
   // 버전이 많으면 한 번에 다 쓰다가 답이 잘릴 수 있어 BATCH 개씩 나눠 쓴다. 뒤 묶음은 앞에서 쓴 이야기·첫 문장을 보고 겹치지 않게
   const BATCH = 8;
-  const versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[] }> = [];
+  const versions: Array<{ hookType: string; angle: string; hookSpec: string; lines: string[]; basis: ScriptBasisScene[][] }> = [];
   for (let a = 0; a < n; a += BATCH) {
     const b = Math.min(n, a + BATCH);
     const count = b - a;
@@ -553,17 +562,22 @@ ${mediaBlock}${prev}
 
     onProgress(n > BATCH ? `AI가 대본을 쓰는 중... (${a + 1}~${b} / ${n}개)` : `AI가 대본 ${n}개를 쓰는 중...`);
     const gen = await claudeJson<{
-      versions: Array<{ hook_type: string; angle: string; hook_spec: string; lines: string[]; self_check: string }>;
+      versions: Array<{ hook_type: string; angle: string; hook_spec: string; lines: string[]; line_scenes?: string[]; self_check: string }>;
     }>({ system: buildSystem(p.seconds, mode, count), text, schema: GEN_SCHEMA });
     add(gen.usage);
-    gen.data.versions.slice(0, count).forEach((v, k) =>
+    gen.data.versions.slice(0, count).forEach((v, k) => {
+      // 문장과 근거 장면을 같은 순서로 묶은 뒤 빈 문장을 뺀다 (순서가 어긋나지 않게)
+      const pairs = v.lines
+        .map((l, i) => ({ line: l.trim(), basis: parseSceneRefs(v.line_scenes?.[i] || '', p.media) }))
+        .filter((x) => x.line);
       versions.push({
         hookType: v.hook_type || hookTypes[a + k],
         angle: v.angle,
         hookSpec: v.hook_spec,
-        lines: v.lines.map((l) => l.trim()).filter(Boolean),
-      })
-    );
+        lines: pairs.map((x) => x.line),
+        basis: pairs.map((x) => x.basis),
+      });
+    });
   }
 
   onProgress('AI가 대본을 검수하는 중...');
@@ -591,20 +605,21 @@ ${mediaBlock}${prev}
 
   const out: ScriptVersion[] = versions.map((v, i) => {
     let removed = false;
-    const lines = v.lines
-      .map((l) => {
-        const c = cleanLine(l);
-        removed ||= c.removed;
-        return c.line;
-      })
-      .filter(Boolean);
+    const cleaned = v.lines.map((l, k) => {
+      const c = cleanLine(l);
+      removed ||= c.removed;
+      return { line: c.line, basis: v.basis[k] || [] };
+    });
+    const kept = cleaned.filter((x) => x.line);
+    const lines = kept.map((x) => x.line);
+    const basis = kept.map((x) => x.basis);
     const warnings = checkVersion({ hookSpec: v.hookSpec, lines }, p.media, p.seconds, {
       shots: scenes.bounds,
       mustInclude: p.mustInclude,
       points: pointsOf(i),
     });
     if (removed) warnings.unshift('ㅋㅋ·이모지 같은 글자를 자동으로 지웠어요');
-    return { ...v, lines, warnings };
+    return { ...v, lines, basis, warnings };
   });
   return { versions: out, fixes, usage, exampleCount: ex.count, mode, shots: scenes.bounds };
 }

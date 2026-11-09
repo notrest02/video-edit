@@ -55,6 +55,17 @@ export async function testClaudeKey(key?: string): Promise<{ ok: boolean; messag
 
 export type UsageTotal = { input: number; output: number };
 
+/** 답이 최대 길이에 걸려 잘림 (호출한 쪽이 나눠서 다시 물어볼 수 있게 따로 구분) */
+export class TruncatedError extends Error {
+  /** 잘린 답에도 비용이 들었으므로 사용량을 같이 넘김 */
+  usage: UsageTotal;
+  constructor(usage: UsageTotal = { input: 0, output: 0 }) {
+    super('응답이 너무 길어 잘렸습니다.');
+    this.name = 'TruncatedError';
+    this.usage = usage;
+  }
+}
+
 /**
  * 이미지 + 글 → JSON (구조화 출력). 이미지는 jpg 파일 경로.
  * 반환: 파싱된 JSON 과 토큰 사용량
@@ -77,14 +88,15 @@ export async function claudeJson<T>(params: {
   content.push({ type: 'text', text: params.text });
   const stream = client().messages.stream({
     model: CLAUDE_MODEL,
-    max_tokens: params.maxTokens ?? 32000,
+    // Haiku 는 답 전에 생각을 먼저 하고 그 생각도 이 한도에 포함된다 → 넉넉히 (실제로 쓴 만큼만 비용). 스트리밍이라 길어도 끊기지 않음
+    max_tokens: params.maxTokens ?? 64000,
     system: params.system,
     messages: [{ role: 'user', content }],
     output_config: { format: { type: 'json_schema', schema: params.schema } },
   });
   const msg = await stream.finalMessage();
   if (msg.stop_reason === 'refusal') throw new Error('모델이 요청을 거절했습니다.');
-  if (msg.stop_reason === 'max_tokens') throw new Error('응답이 너무 길어 잘렸습니다.');
+  if (msg.stop_reason === 'max_tokens') throw new TruncatedError({ input: msg.usage.input_tokens, output: msg.usage.output_tokens });
   const text = msg.content.map((b) => (b.type === 'text' ? b.text : '')).join('');
   return {
     data: JSON.parse(text) as T,

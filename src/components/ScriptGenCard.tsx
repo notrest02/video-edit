@@ -314,6 +314,10 @@ export const ScriptGenCard: React.FC<{ onSendToScript: (text: string) => void }>
         media,
         examplePaths: form.examplePaths,
       });
+      // 문장별 근거 장면을 프로젝트에 저장 → STEP 3 자동 배치가 그 문장 자리에 이 장면을 먼저 씀
+      useEditorStore.getState().addScriptBasis(
+        r.versions.flatMap((v) => v.lines.map((text, k) => ({ text, scenes: v.basis?.[k] || [] })))
+      );
       const perVersion = form.versions.map((s) => (r.mode === 'samebody' ? points : s.points.map((k) => points[k - 1]).filter(Boolean)));
       setResult({
         ...r,

@@ -13,13 +13,34 @@ import path from 'path';
 import { claudeJson, type UsageTotal } from './claudeService';
 
 export type Shot = { id: string; file: string; path: string; start: number; end: number; dur: number };
-export type ShotDesc = {
+/** 샷 하나(또는 그 안의 부분)를 화면 기준으로 본 정보 — 대본 만들기와 자동 배치가 같이 쓴다 */
+export type ShotView = {
+  /** 화면의 주인공: 화면에서 가장 크게·눈에 띄게 보이는 것 (예: 인형, 빨래, 제품, 손 동작, 사람 얼굴) */
+  subject?: string;
+  /** 인물이 카메라를 보며 말하거나 설명하는 장면 */
+  talk?: boolean;
+  /** 단계: 문제상황 / 준비 / 실제사용 / 완성모습 / 기타 */
+  stage?: string;
+};
+export type ShotDesc = ShotView & {
   id: string;
   desc: string;
   place: string;
   motion: 'high' | 'low';
-  parts: Array<{ from: number; to: number; desc: string }>;
+  parts: Array<ShotView & { from: number; to: number; desc: string }>;
   note: string;
+  /** 분위기: 햇빛, 바깥 풍경 보임, 깔끔/어수선 등 */
+  mood?: string;
+  /** 구도: 가까이 / 중간 / 넓게 */
+  framing?: string;
+  /** 핵심 순간 (원본 초): 이 샷에서 가장 중요한 순간 (예: 인형이 놓이는 순간) */
+  key?: number;
+  /** 비슷한 장면 묶음 이름: 같은 장소·같은 동작이라 비슷해 보이는 샷끼리 같은 이름 (영상이 달라도) */
+  group?: string;
+  /** 첫 화면 모습 (이 샷이 시작될 때 화면이 어떻게 보이는지) */
+  firstFrame?: string;
+  /** 쓰기 어려운 점: 큰 자막·워터마크 위치/크기, 흔들림, 흐림, 화면 전환 효과 등. 없으면 "" */
+  issues?: string;
 };
 type FileCache = {
   version: 1;
@@ -32,7 +53,12 @@ type FileCache = {
   edges?: { intro: number; outro: number };
   /** 샷 경계 정밀 보정 버전 (2: 짧은 조각 병합 금지 + 겹침 전환/연속 컷 구간 통째 제외 + 경계 여유 프레임) */
   cutRefinedVersion?: number;
+  /** 장면 설명 항목 버전 (2: 주인공·카메라 보고 말함·단계·분위기·구도·핵심 순간·비슷한 장면 묶음·첫 화면·쓰기 어려운 점) */
+  descVersion?: number;
 };
+
+/** 장면 설명 항목이 바뀌면 올림 → 예전 설명은 다음에 쓸 때 한 번만 다시 설명 (썸네일 시트·샷 나누기는 그대로 재사용) */
+export const DESC_VERSION = 2;
 
 const THRESH = 0.15;
 const SOFT_PEAK = 0.11;
@@ -255,8 +281,9 @@ export async function ensureSheet(ffmpegPath: string, file: string, duration: nu
   return sheet;
 }
 
-const DESC_SYSTEM =`당신은 숏폼(세로 9:16) 제품 광고 편집자다. 원본 촬영 영상의 샷(화면 전환 없이 이어지는 구간)마다 화면 내용을 한국어로 적는다.
-썸네일 시트는 원본 영상 하나를 0.5초 간격으로 펼친 것이고, 칸 왼쪽 아래 노란 숫자 = 원본 초다. 샷 목록의 시작~끝 초로 칸을 찾아 실제로 보고 적을 것.`;
+const DESC_SYSTEM = `당신은 숏폼(세로 9:16) 제품 광고 편집자다. 원본 촬영 영상의 샷(화면 전환 없이 이어지는 구간)마다 화면 내용을 한국어로 적는다.
+썸네일 시트는 원본 영상 하나를 0.5초 간격으로 펼친 것이고, 칸 왼쪽 아래 노란 숫자 = 원본 초다. 샷 목록의 시작~끝 초로 칸을 찾아 실제로 보고 적을 것.
+이 정보는 나중에 대본 문장마다 맞는 장면을 고를 때 쓰인다. 설명에 잠깐 스치는 물건을 넣지 말고, 화면에 실제로 크게 보이는 것을 기준으로 적는다.`;
 
 const DESC_TEXT = (product: string, shots: Shot[]) => `제품: ${product || '(미지정)'}
 샷 목록 (id, 파일, 시작~끝 초):
@@ -266,8 +293,26 @@ ${shots.map((s) => `${s.id}\t${s.file}\t${s.start}~${s.end}`).join('\n')}
 - desc: 화면에 보이는 것과 **동작** (예: "흡착판 헤드를 벽에 대고 손으로 꾹 눌러 붙임", "걸린 슬리퍼에 샤워기로 물을 뿌려 물이 아래로 떨어짐")
 - place: 장소/상황
 - motion: high(동작이 뚜렷함) / low(거의 정지, 같은 구도)
-- parts: 샷 안에서 동작이 바뀌면 [{from, to, desc}] (원본 초). 없으면 []
-- note: 화면에 박힌 자막/글자, 흔들림 등 참고할 점. 없으면 ""`;
+- subject: 화면의 주인공 = 화면에서 가장 크게, 가장 오래 보이는 것 하나 (예: "인형", "빨래(옷·양말)", "제품(거치대)", "손 동작", "사람(얼굴)").
+  잠깐 스치거나 구석에 작게 보이는 것은 주인공이 아니다. 인형이 거치대 위에 작게 있고 화면 대부분이 빨래면 주인공은 "빨래".
+- talk: 인물이 카메라를 보며 말하거나 설명하는 장면이면 true (브이로그식으로 카메라에 대고 이야기하며 걷는 장면 포함). 아니면 false
+- stage: 문제상황(불편·지저분함 등 문제가 보임) / 준비(꺼내기·들고 가기·설치 전) / 실제사용(제품을 실제로 쓰는 동작) / 완성모습(설치·사용이 끝나 정돈된 모습) / 기타 중 하나
+- mood: 분위기 (예: "햇빛 들어옴, 바깥 풍경 보임", "실내 조명, 깔끔", "어수선") 짧게
+- framing: 가까이(손·제품 확대) / 중간 / 넓게(공간 전체) 중 하나
+- key: 이 샷에서 가장 중요한 순간의 원본 초 (예: 인형이 거치대에 놓이는 순간, 흡착판을 꾹 누르는 순간). 샷 시작~끝 사이 숫자
+- group: 비슷한 장면 묶음 이름. 같은 장소·같은 동작이라 연달아 붙이면 같은 장면처럼 보이는 샷끼리 같은 이름을 쓴다 (영상이 달라도).
+  예: "타일벽에 거치대 눌러 붙이기", "발코니 창밖 빨래 걸기". 비슷한 샷이 없으면 그 샷만의 이름
+- firstFrame: 샷이 시작될 때 첫 화면 모습 한 줄 (예: "흰 타일벽에 검은 거치대, 손이 왼쪽에서 들어옴")
+- issues: 쓰기 어려운 점 (화면에 박힌 큰 자막·워터마크의 위치와 크기, 흔들림, 흐림, 화면 전환 효과·제목 카드). 없으면 ""
+- parts: 샷 안에서 동작이 바뀌면 [{from, to, desc, subject, talk, stage}] (원본 초). 부분마다 주인공·말함·단계가 다를 수 있으니 따로 적는다.
+  예: 0~4초 카메라 보며 말하며 대야 들고 걸어감(talk true, stage 준비) / 4~7.7초 양말을 거치대에 거는 손(talk false, stage 실제사용). 바뀌지 않으면 []
+- note: 그 밖에 참고할 점. 없으면 ""`;
+
+const VIEW_PROPS = {
+  subject: { type: 'string' },
+  talk: { type: 'boolean' },
+  stage: { type: 'string', enum: ['문제상황', '준비', '실제사용', '완성모습', '기타'] },
+};
 
 const DESC_SCHEMA = {
   type: 'object',
@@ -281,18 +326,25 @@ const DESC_SCHEMA = {
           desc: { type: 'string' },
           place: { type: 'string' },
           motion: { type: 'string', enum: ['high', 'low'] },
+          ...VIEW_PROPS,
+          mood: { type: 'string' },
+          framing: { type: 'string', enum: ['가까이', '중간', '넓게'] },
+          key: { type: 'number' },
+          group: { type: 'string' },
+          firstFrame: { type: 'string' },
+          issues: { type: 'string' },
           parts: {
             type: 'array',
             items: {
               type: 'object',
-              properties: { from: { type: 'number' }, to: { type: 'number' }, desc: { type: 'string' } },
-              required: ['from', 'to', 'desc'],
+              properties: { from: { type: 'number' }, to: { type: 'number' }, desc: { type: 'string' }, ...VIEW_PROPS },
+              required: ['from', 'to', 'desc', 'subject', 'talk', 'stage'],
               additionalProperties: false,
             },
           },
           note: { type: 'string' },
         },
-        required: ['id', 'desc', 'place', 'motion', 'parts', 'note'],
+        required: ['id', 'desc', 'place', 'motion', 'subject', 'talk', 'stage', 'mood', 'framing', 'key', 'group', 'firstFrame', 'issues', 'parts', 'note'],
         additionalProperties: false,
       },
     },
@@ -375,7 +427,8 @@ export async function analyzeMedia(
     entries.push({ cachePath, cache });
   }
 
-  const todo = entries.filter((e) => !e.cache.descs);
+  // 설명이 없거나 예전 항목으로 적힌 영상만 다시 설명 (샷 나누기·썸네일은 재사용)
+  const todo = entries.filter((e) => !e.cache.descs || (e.cache.descVersion ?? 1) < DESC_VERSION);
   if (todo.length > 0) {
     onProgress(`AI가 장면 ${todo.reduce((n, e) => n + e.cache.shots.length, 0)}개를 보는 중 (영상 ${todo.length}개)...`);
     const shots = todo.flatMap((e) => e.cache.shots);
@@ -392,6 +445,7 @@ export async function analyzeMedia(
       e.cache.descs = e.cache.shots.map(
         (s) => byId.get(s.id) || { id: s.id, desc: '(설명 없음)', place: '', motion: 'low', parts: [], note: '' }
       );
+      e.cache.descVersion = DESC_VERSION;
       const stored = { ...e.cache, shots: e.cache.shots.map((s) => ({ ...s, id: s.id.replace(/^[^-]+-/, 'x-') })), descs: e.cache.descs.map((d) => ({ ...d, id: d.id.replace(/^[^-]+-/, 'x-') })) };
       fs.writeFileSync(e.cachePath, JSON.stringify(stored));
     }

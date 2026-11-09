@@ -12,9 +12,11 @@ import {
   TimelineClip,
   TimelineTrack,
   TrackType,
+  ScriptBasisEntry,
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
-import { auditPlan, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
+import { voiceStartCaption, withSnapLead } from '../utils/snapLead';
+import { auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
 import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
@@ -74,6 +76,8 @@ interface EditorState {
   // AI Settings
   localWhisperModel: string;
   scriptText: string;
+  /** 대본 만들기가 저장한 문장별 근거 장면 (프로젝트에 저장) */
+  scriptBasis: ScriptBasisEntry[];
   captionLineMode: CaptionLineMode;
   captionMaxCharsPerLine: number;
   autoSplitOnCaptionGenerate: boolean;
@@ -123,6 +127,8 @@ interface EditorState {
   setStatusMessage: (msg: string | null) => void;
   setLocalWhisperModel: (model: string) => void;
   setScriptText: (text: string) => void;
+  /** 근거 장면 추가 (같은 문장은 새 것으로 바꿈) */
+  addScriptBasis: (entries: ScriptBasisEntry[]) => void;
   setCaptionLineMode: (mode: CaptionLineMode) => void;
   setCaptionMaxCharsPerLine: (maxChars: number) => void;
   setAutoSplitOnCaptionGenerate: (auto: boolean) => void;
@@ -751,6 +757,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     localWhisperModel: LOCAL_WHISPER_MODEL,
     scriptText: DEFAULT_SAMPLE_SCRIPT,
+    scriptBasis: [],
     captionLineMode: 'single-line',
     captionMaxCharsPerLine: 13,
     autoSplitOnCaptionGenerate: false,
@@ -1206,6 +1213,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
     setStatusMessage: (statusMessage) => set({ statusMessage }),
     setLocalWhisperModel: (localWhisperModel) => set({ localWhisperModel }),
     setScriptText: (scriptText) => set({ scriptText }),
+    addScriptBasis: (entries) => {
+      const key = (t: string) => t.replace(/[^가-힣a-zA-Z0-9]/g, '');
+      const add = entries.filter((e) => e.scenes.length && key(e.text));
+      const keys = new Set(add.map((e) => key(e.text)));
+      set({ scriptBasis: [...get().scriptBasis.filter((e) => !keys.has(key(e.text))), ...add], isDirty: true });
+    },
     setCaptionLineMode: (captionLineMode) => set({ captionLineMode }),
     setCaptionMaxCharsPerLine: (captionMaxCharsPerLine) =>
       set({ captionMaxCharsPerLine: Math.max(6, Math.min(30, captionMaxCharsPerLine)) }),
@@ -1390,6 +1403,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         startTime: secondStart,
         duration: secondDur,
         voiceEndTime: target.voiceEndTime ?? Number((secondStart + secondDur).toFixed(4)),
+        snapLead: undefined,
       };
 
       const nextClips: TimelineClip[] = [];
@@ -2800,7 +2814,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           closeMicroGaps: true,
           alignClipdominantSubtitles: true,
         });
-        combinedClips = res.updatedClips;
+        combinedClips = withSnapLead(combinedClips, res.updatedClips);
         snapSummary = res.summary;
       }
 
@@ -3241,7 +3255,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const st = get();
       if (!st.activeSequenceId) return '먼저 시퀀스를 만들거나 열어 주세요.';
       if (!(await api.claudeKeyStatus?.())?.hasKey) return 'Claude API 키를 먼저 입력해 주세요.';
-      const caps = st.clips.filter((c) => c.type === 'text' && (c.text || '').trim()).sort((a, b) => a.startTime - b.startTime);
+      // 컷 자리 계산 기준 = 실제 목소리 시작 (자막을 컷에 맞춰 당긴 양 snapLead 를 되돌림) → 다시 돌려도 밀리지 않음
+      const caps = st.clips
+        .filter((c) => c.type === 'text' && (c.text || '').trim())
+        .map(voiceStartCaption)
+        .sort((a, b) => a.startTime - b.startTime);
       if (caps.length === 0) return '자막이 없습니다. 음성으로 자막 생성(STEP 1)과 오타 변환(STEP 2)을 먼저 해 주세요.';
       const audio = st.clips.filter((c) => c.type === 'audio');
       const total = Math.max(
@@ -3301,6 +3319,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
             captionStart: s.captionStart + g.start,
           }));
           if (!g.hook) slots[0].hook = false; // 후킹 지정이 없으면 첫 컷도 AI 가 고름
+          // 대본 만들기가 저장한 문장별 근거 장면 → 이 자리의 1순위 후보 (R25)
+          for (const sl of slots) sl.basis = basisShotIds(sl, st.scriptBasis, an.shots);
           const prevNonHook = allClips.filter((c) => !c.hook);
           const usedPrev = usedRangesFromClips(
             prevNonHook.map((c) => ({ type: 'video' as const, sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })),
@@ -3315,7 +3335,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             segHook = null;
             slots[0].hook = false;
           }
-          const hookOnly = segHook ? fitAssignment(slots.slice(0, 1), [], an.shots, segHook, avoid, capTimes) : null;
+          const hookOnly = segHook ? fitAssignment(slots.slice(0, 1), [], an.shots, segHook, avoid, capTimes, an.descs) : null;
           const hookUsed = (hookOnly?.clips || []).map((c) => ({
             shot: c.shot || '',
             from: +c.srcIn.toFixed(2),
@@ -3332,7 +3352,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
           });
           usage.input += res.usage.input;
           usage.output += res.usage.output;
-          const fitted = fitAssignment(slots, res.assign, an.shots, segHook, avoid, capTimes);
+          const fitted = fitAssignment(slots, res.assign, an.shots, segHook, avoid, capTimes, an.descs);
+          // AI가 '맞는 장면 없음(대체)'이라고 한 자리 → 확인 목록에
+          for (const a of res.assign) {
+            if (a.fit !== '대체') continue;
+            const sl = slots.find((x) => x.slot === a.slot);
+            if (sl) issues.push(`⚠️ ${segs.length > 1 ? `${g.name}: ` : ''}${sl.start.toFixed(2)}초 「${sl.text}」 딱 맞는 장면이 없어 대체함 (핵심: ${a.focus || '-'})`);
+          }
           allClips.push(...fitted.clips);
           warnings.push(...fitted.warnings.map((w) => (segs.length > 1 ? `${g.name}: ${w}` : w)));
           // 결과 검사기: 절대 선(빈 화면·너무 느림·장면 경계·반복·꼬리 컷…)을 결과만 보고 다시 확인
@@ -3366,12 +3392,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const threshold = customThresholdFrames ?? snapThresholdFrames;
       pushHistory();
 
-      const { updatedClips, summary } = snapSubtitleClipsToMediaCuts(clips, {
+      const { updatedClips: snapped, summary } = snapSubtitleClipsToMediaCuts(clips, {
         thresholdFrames: threshold,
         fps,
         closeMicroGaps: true,
         alignClipdominantSubtitles: true,
       });
+      const updatedClips = withSnapLead(clips, snapped);
 
       set({
         clips: updatedClips,
@@ -3448,6 +3475,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         snapEnabled,
         linkedSelection,
         scriptText,
+        scriptBasis,
         captionLineMode,
         captionMaxCharsPerLine,
         autoSplitOnCaptionGenerate,
@@ -3475,6 +3503,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         snapEnabled,
         linkedSelection,
         scriptText,
+        scriptBasis,
         captionLineMode,
         captionMaxCharsPerLine,
         autoSplitOnCaptionGenerate,
@@ -3667,6 +3696,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         selectedTrackId: null,
         selectedBinItem: null,
         scriptText: data.scriptText || '',
+        scriptBasis: Array.isArray(data.scriptBasis) ? data.scriptBasis : [],
         captionLineMode: data.captionLineMode || 'preserve',
         captionMaxCharsPerLine: data.captionMaxCharsPerLine || 13,
         autoSplitOnCaptionGenerate: data.autoSplitOnCaptionGenerate ?? true,
@@ -3718,6 +3748,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         past: [],
         future: [],
         scriptText: '',
+        scriptBasis: [],
         statusMessage: '새 프로젝트가 생성되었습니다.',
       });
     },

@@ -68,6 +68,8 @@ export type ScriptVersion = {
   hookSpec: string;
   lines: string[];
   warnings: string[];
+  /** lines 와 같은 순서: 문장마다 근거 장면 (영상을 보고 쓴 경우만) */
+  basis?: ScriptBasisScene[][];
 };
 
 /** 줄 목록 → 한 줄에 하나씩 (앞의 번호·기호 떼고, 빈 줄 빼고) */
@@ -174,4 +176,21 @@ export function videoNumbers(videos: Array<{ id: string; name: string }>): Map<s
 /** 고객 대본과 같은 형식: 버전마다 후킹 지정 줄 + 대사, 버전 사이 빈 줄 (STEP 2 대본 칸이 그대로 읽음) */
 export function scriptToText(versions: Array<Pick<ScriptVersion, 'hookSpec' | 'lines'>>): string {
   return versions.map((v) => [v.hookSpec.trim(), ...v.lines.map((l) => l.trim()).filter(Boolean)].join('\n')).join('\n\n\n');
+}
+
+/** 대본 문장의 근거 장면 (대본을 쓸 때 AI가 보고 쓴 원본 장면). 영상 번호 대신 파일 경로로 저장 → 미디어 순서가 바뀌어도 같은 장면 */
+export type ScriptBasisScene = { path: string; from: number; to: number };
+
+/** "2번 4.5~7초; 3번 0~2초" → 근거 장면들 (영상 번호 → 경로) */
+export function parseSceneRefs(text: string, media: Array<{ no: number; path: string }>): ScriptBasisScene[] {
+  const out: ScriptBasisScene[] = [];
+  // "2번 4.5~7초" 또는 장면 목록 형식 그대로 "2번 영상 4.5~7초" 둘 다
+  const re = /(\d+)\s*번\s*(?:영상\s*)?(\d+(?:\.\d+)?)\s*초?\s*~\s*(\d+(?:\.\d+)?)/g;
+  for (const m of (text || '').matchAll(re)) {
+    const v = media.find((x) => x.no === Number(m[1]));
+    const from = Number(m[2]);
+    const to = Number(m[3]);
+    if (v && to > from) out.push({ path: v.path, from, to });
+  }
+  return out;
 }

@@ -173,7 +173,7 @@ export function buildSlotsFromCaptions(
   for (let j = n - 1; j > 0; j = prevIdx[j]) idx.push(j);
   const times = [0, pts[0].t, ...idx.reverse().map((k) => pts[k].t)];
   const lead = (t: number) =>
-    t <= 0 || t >= total - 1e-6 ? t : Math.max(0, (Math.round(t * opts.fps) - CUT_LEAD_FRAMES) / opts.fps);
+    t <= 0 || t >= total - 1e-6 ? t : Math.max(0, (Math.round(t * opts.fps + 0.001) - CUT_LEAD_FRAMES) / opts.fps); // +0.001: 반 프레임 경계에서 소수점 오차로 반올림이 뒤집히지 않게
   const slots: AutoEditSlot[] = [];
   for (let k = 0; k + 1 < times.length; k++) {
     const [a, b] = [times[k], times[k + 1]];
@@ -272,13 +272,15 @@ export function hookPieces(slot: AutoEditSlot, hs: HookSpec, shots: AutoEditShot
  */
 export function fitAssignment(
   slots: AutoEditSlot[],
-  assign: Array<{ slot: number; shot: string; in: number; alt?: string }>,
+  assign: Array<{ slot: number; shot: string; in: number; alt?: string; focus?: string }>,
   shots: AutoEditShot[],
   hook: HookSpec | null,
   avoidIn: Array<[string, number, number]>,
-  caps: number[]
+  caps: number[],
+  descs?: AutoEditShotDesc[]
 ): { clips: PlanClip[]; warnings: string[] } {
   const byId = new Map(shots.map((s) => [s.id, s]));
+  const descById = new Map((descs || []).map((d) => [d.id, d]));
   const amap = new Map(assign.map((a) => [a.slot, a]));
   const avoid = [...avoidIn];
   const usedHere: Array<[string, number, number]> = []; // 이 광고 안에서 쓴 원본 구간
@@ -290,8 +292,13 @@ export function fitAssignment(
   let afterHook = false;
   type Place = { sh: AutoEditShot; t0: number; sp: number; ok: boolean };
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
+  // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
+  const shotNo = (id: string) => Number(id.split('-').pop());
+  const jumpsSameVideo = (sh: AutoEditShot) =>
+    !!prev && prev.path === sh.path && prev.shot !== sh.id && !(prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1);
   const place = (sh: AutoEditShot, D: number, wantIn: number): Place => {
     if (afterHook && hookShots.has(sh.id)) return { sh, t0: sh.start + EDGE, sp: 1, ok: false };
+    if (jumpsSameVideo(sh)) return { sh, t0: sh.start + EDGE, sp: 1, ok: false };
     const s0 = sh.start + EDGE;
     const s1 = sh.end - EDGE;
     if (prev && prev.shot === sh.id) {
@@ -300,10 +307,19 @@ export function fitAssignment(
       return { sh, t0, sp, ok: sp >= MIN_SPEED_HARD };
     }
     if (s1 - s0 >= D) {
-      const want = Math.min(Math.max(wantIn || s0, s0), s1 - D);
+      // 핵심 순간(분석의 key)이 있으면 그 순간이 컷 안(앞뒤 0.15초 여유)에 들어가는 시작점만 고려
+      const key = descById.get(sh.id)?.key;
+      let lo = s0;
+      let hiT = s1 - D;
+      if (typeof key === 'number' && key > s0 && key < s1) {
+        const lo2 = Math.max(lo, key - D + 0.15);
+        const hi2 = Math.min(hiT, key - 0.15);
+        if (lo2 <= hi2) [lo, hiT] = [lo2, hi2];
+      }
+      const want = Math.min(Math.max(wantIn || lo, lo), hiT);
       let bestT = want;
       let bestKey: [number, number, number] = [Infinity, Infinity, Infinity];
-      for (let t = s0; t <= s1 - D + 1e-6; t += 0.05) {
+      for (let t = lo; t <= hiT + 1e-6; t += 0.05) {
         const key: [number, number, number] = [
           Math.round(overlap(sh.path, t, t + D, usedHere) * 10),
           Math.round(overlap(sh.path, t, t + D, avoid) * 10),
@@ -320,7 +336,7 @@ export function fitAssignment(
     return { sh, t0: s0, sp, ok: sp >= MIN_SPEED_HARD && overlap(sh.path, s0, s1, usedHere) <= 0.2 };
   };
   const why = (sh: AutoEditShot | undefined, p: Place | null) =>
-    !sh ? '없는 장면' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : '이미 이 광고에서 씀';
+    !sh ? '없는 장면' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : jumpsSameVideo(sh) ? '앞 컷과 같은 영상의 다른 부분' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : '이미 이 광고에서 씀';
   const put = (s: AutoEditSlot, p: Place) => {
     const D = s.end - s.start;
     const c: PlanClip = { path: p.sh.path, file: p.sh.file, start: s.start, end: s.end, srcIn: p.t0, speed: p.sp, shot: p.sh.id, text: s.text, hook: s.hook };
@@ -343,7 +359,7 @@ export function fitAssignment(
         }
         hookShots = new Set(pieces.map((p) => p.shot || ''));
         afterHook = true;
-        prev = null;
+        prev = pieces[pieces.length - 1];
         continue;
       }
       warnings.push('⚠️ 후킹 지정 구간에서 쓸 장면을 찾지 못함 (영상·초 확인) → 다른 장면으로 채움');
@@ -356,21 +372,33 @@ export function fitAssignment(
       continue;
     }
     const alt = a?.alt ? byId.get(a.alt) : undefined;
-    const p2 = alt && alt !== first ? place(alt, D, alt.start + EDGE) : null;
-    if (p2?.ok) {
-      warnings.push(`컷 ${s.slot}: AI 1순위 ${a?.shot || '-'}(${why(first, p1)}) → 2순위 ${alt!.id}`);
-      put(s, p2);
-      continue;
-    }
-    // 코드가 대신 고름: 1순위(또는 바로 앞 컷)와 같은 영상에서 이어지는 장면 → 같은 영상 → 나머지(긴 장면부터)
+    // 1순위를 못 쓰면: AI가 적은 문장의 핵심(focus)과 화면 주인공(subject)이 맞는 장면이 먼저 (예: 핵심 '인형' → 주인공이 인형인 장면)
+    //  같은 맞음 정도 안에서는 AI 2순위 → 1순위(또는 바로 앞 컷)와 같은 영상에서 이어지는 장면 → 같은 영상 → 나머지(긴 장면부터)
     const ref = first || (prev ? byId.get((prev as PlanClip).shot || '') : undefined);
-    const rank = (x: AutoEditShot) =>
-      ref && x.path === ref.path ? (x.start >= ref.start ? x.start - ref.start : 1000 + ref.start - x.start) : 1e6 - x.dur;
-    const tried = new Set([first?.id, alt?.id]);
-    const pool = shots.filter((x) => !tried.has(x.id)).sort((x, y) => rank(x) - rank(y));
-    const p3 = pool.map((x) => place(x, D, x.start + EDGE)).find((p) => p.ok);
+    const words = (a?.focus || '').split(/[\s,·()/]+/).map((w) => w.replace(/(을|를|이|가|은|는|에|로|으로|과|와|의|도)$/, '')).filter((w) => w.length >= 2);
+    const focusRank = (x: AutoEditShot) => {
+      const d = descById.get(x.id);
+      if (!d || !words.length) return 1;
+      const hit = (t?: string) => words.some((w) => (t || '').includes(w));
+      // 주인공 + 장소가 맞으면 가장 먼저, 그다음 주인공만, 장소·설명만, 아무것도 안 맞음
+      if (hit(d.subject) && hit(d.place)) return 0;
+      if (hit(d.subject)) return 0.5;
+      if (hit(d.place) || hit(d.desc)) return 1;
+      return 2;
+    };
+    const near = (x: AutoEditShot) =>
+      x === alt ? -1 : ref && x.path === ref.path ? (x.start >= ref.start ? x.start - ref.start : 1000 + ref.start - x.start) : 1e6 - x.dur;
+    const basisSet = new Set(s.basis || []); // 대본 근거 장면은 가장 먼저 (R25)
+    const rank = (x: AutoEditShot) => (basisSet.has(x.id) ? -1 : focusRank(x)) * 1e7 + near(x);
+    const pool = shots.filter((x) => x !== first).sort((x, y) => rank(x) - rank(y));
+    const p3 = pool.map((x) => place(x, D, x === alt ? x.start + EDGE : x.start + EDGE)).find((p) => p.ok);
+    const p2 = alt && alt !== first ? place(alt, D, alt.start + EDGE) : null;
     if (p3) {
-      warnings.push(`컷 ${s.slot}: ${a ? `AI가 고른 ${a.shot}(${why(first, p1)})` : 'AI 답 없음'} → ${p3.sh.id} 로 대신함 (확인 권장)`);
+      warnings.push(
+        p3.sh === alt
+          ? `컷 ${s.slot}: AI 1순위 ${a?.shot || '-'}(${why(first, p1)}) → 2순위 ${alt!.id}`
+          : `컷 ${s.slot}: ${a ? `AI가 고른 ${a.shot}(${why(first, p1)})` : 'AI 답 없음'} → ${p3.sh.id} 로 대신함${words.length && focusRank(p3.sh) === 0 ? ` (핵심 '${a?.focus}' 장면)` : ''} (확인 권장)`
+      );
       put(s, p3);
       continue;
     }
@@ -484,12 +512,29 @@ export function auditPlan(
   }
   flush();
   // 바로 앞 컷과 같은 영상·같은 장소에서 시간을 건너뛰어 붙임 → 두 컷 첫 화면이 비슷해 보임
+  // 같은 영상의 다른 부분을 연달아 (장면 분석이 없어도 확인, 규칙 R13). 이어 쓰기·바로 다음 장면은 괜찮음
+  const sameVideoJump = new Set<number>();
+  for (let i = 1; i < cs.length; i++) {
+    const [a, b] = [cs[i - 1], cs[i]];
+    if (!a.shot || !b.shot || a.shot === b.shot || a.path !== b.path) continue;
+    if (Number(b.shot.split('-').pop()) === Number(a.shot.split('-').pop()) + 1) continue;
+    sameVideoJump.add(i);
+    out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 앞 컷과 같은 영상의 다른 부분을 연달아 씀 (같은 컷이 두 번 나온 것처럼 보일 수 있음)` });
+  }
   if (opts.descs?.length) {
     const place = new Map(opts.descs.map((d) => [d.id, d.place]));
     const descOf = new Map(opts.descs.map((d) => [d.id, d.desc]));
+    const groupOf = new Map(opts.descs.map((d) => [d.id, d.group || '']));
     for (let i = 1; i < cs.length; i++) {
       const [a, b] = [cs[i - 1], cs[i]];
-      if (a.path !== b.path || !a.shot || !b.shot || a.shot === b.shot) continue;
+      if (!a.shot || !b.shot || a.shot === b.shot || sameVideoJump.has(i)) continue;
+      // 새 분석(비슷한 장면 묶음)이 있으면 그걸로 판단: 영상이 달라도 같은 묶음이면 비슷해 보임
+      const ga = groupOf.get(a.shot);
+      if (ga && ga === groupOf.get(b.shot)) {
+        out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 앞 컷과 비슷한 장면(「${ga}」)이 연달아 나옴 (첫 화면이 비슷해 보일 수 있음)` });
+        continue;
+      }
+      if (ga || a.path !== b.path) continue;
       const aOut = a.srcIn + (a.end - a.start) * a.speed;
       const jump = b.srcIn - aOut;
       const pa = place.get(a.shot);
@@ -520,6 +565,46 @@ export function auditPlan(
     }
   }
   return out.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * 대본 만들기가 저장한 '근거 장면'(문장 → 원본 경로·초) 중 이 컷 자리의 문장에 해당하는 것을 찾아, 지금 미디어의 샷 id 로 바꿈 (규칙 R25)
+ *  문장 찾기: 글자만 남겨 비교. 자리의 문장(sentence) 안에 대본 문장이 들어 있거나 아주 비슷하고, 그중 자리 대사와 가장 많이 겹치는 것
+ */
+export function basisShotIds(
+  slot: Pick<AutoEditSlot, 'text' | 'sentence'>,
+  entries: Array<{ text: string; scenes: Array<{ path: string; from: number; to: number }> }>,
+  shots: AutoEditShot[]
+): string[] {
+  if (!entries?.length) return [];
+  const key = (t: string) => (t || '').replace(/[^가-힣a-zA-Z0-9]/g, '');
+  const tk = key(slot.text);
+  const sk = key(slot.sentence || slot.text);
+  if (!tk) return [];
+  let best: (typeof entries)[number] | null = null;
+  let bestScore = 0;
+  for (const e of entries) {
+    const ek = key(e.text);
+    if (!ek || !e.scenes?.length) continue;
+    const inSentence = sk.includes(ek) || ek.includes(sk) || descSim(ek, sk) >= 0.7;
+    if (!inSentence) continue;
+    const score = descSim(ek, tk) + (ek.includes(tk) ? 0.5 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = e;
+    }
+  }
+  if (!best || bestScore < 0.4) return [];
+  const norm = (p: string) => p.split('\\').join('/').toLowerCase();
+  const ids: string[] = [];
+  for (const sc of best.scenes) {
+    for (const sh of shots) {
+      if (norm(sh.path) !== norm(sc.path)) continue;
+      const ov = Math.min(sh.end, sc.to) - Math.max(sh.start, sc.from);
+      if (ov >= Math.min(0.3, (sh.end - sh.start) * 0.5) && !ids.includes(sh.id)) ids.push(sh.id);
+    }
+  }
+  return ids;
 }
 
 /** 다른 시퀀스(같은 원본으로 만든 다른 광고)에서 쓴 원본 구간 → 샷 id 별 사용 구간 */

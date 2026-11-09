@@ -103,6 +103,31 @@ export const AutoEditCard: React.FC = () => {
     setFolder(null);
   };
 
+  // 장면 분석만 (자동 배치 없이): 새 영상·예전 항목으로 설명된 영상만 AI가 다시 보고 저장. 결과는 대본 만들기·자동 배치가 같이 씀
+  const analyzeOnly = async () => {
+    const api = window.electronAPI;
+    if (!api?.autoEditAnalyze) return;
+    setBusy(true);
+    setProgress('장면 분석 시작...');
+    const off = api.onAutoEditProgress?.((m) => setProgress(m));
+    try {
+      const an = await api.autoEditAnalyze({ media: videos.map((v) => ({ path: v.path, duration: v.duration })), product });
+      // Haiku 5.5 단가: 입력 $0.10 / 출력 $0.50 (100만 토큰당)
+      const cost = (an.usage.input * 0.1 + an.usage.output * 0.5) / 1e6;
+      const msg =
+        an.analyzedFiles > 0
+          ? `장면 분석 완료: 영상 ${an.analyzedFiles}개를 새로 분석해 장면 ${an.shots.length}개 저장 (사용량 약 $${cost.toFixed(4)})`
+          : `이미 최신 항목으로 분석된 영상입니다 (장면 ${an.shots.length}개, 비용 없음)`;
+      setProgress(msg);
+      setStatusMessage(msg);
+    } catch (e) {
+      setProgress(`장면 분석 실패: ${(e as Error).message}`);
+    } finally {
+      off?.();
+      setBusy(false);
+    }
+  };
+
   const run = async () => {
     setBusy(true);
     setProgress('시작...');
@@ -278,6 +303,14 @@ export const AutoEditCard: React.FC = () => {
       >
         {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clapperboard className="w-3.5 h-3.5" />}
         AI 자동 배치 실행
+      </button>
+      <button
+        onClick={analyzeOnly}
+        disabled={busy || !hasKey || videos.length === 0}
+        className={`${btn} w-full bg-[#2b2b2b] text-[#dddddd] disabled:opacity-45`}
+        title="자동 배치 없이 원본 영상의 장면 설명만 만들거나 새 항목으로 다시 만듭니다 (한 번 하면 저장)"
+      >
+        장면 분석만 다시 하기 (새 영상·예전 항목만, 비용 아주 조금)
       </button>
       {progress && <div className="text-[10px] text-[#aaaaaa] leading-relaxed">{progress}</div>}
     </div>
