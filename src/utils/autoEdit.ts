@@ -296,8 +296,14 @@ export function fitAssignment(
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
   // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
   const shotNo = (id: string) => Number(id.split('-').pop());
+  // R13 (사용자 2026-11-11): 같은 영상이라도 '바로 앞 컷과 똑같아 보일 때'만 막음 (창문 유리 문장처럼 같은 장소를 이어 가야 할 때가 있음).
+  //  장면 분석이 없으면 판단할 수 없으니 예전처럼 같은 영상의 다른 부분은 모두 막음
   const jumpsSameVideo = (sh: AutoEditShot) =>
-    !!prev && prev.path === sh.path && prev.shot !== sh.id && !(prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1);
+    !!prev &&
+    prev.path === sh.path &&
+    prev.shot !== sh.id &&
+    !(prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1) &&
+    looksSameShot(prev.shot ? descById.get(prev.shot) : undefined, descById.get(sh.id));
   // 약한 화면 전환(sh.soft)이 컷의 처음·끝 SOFT_EDGE 초 안에 걸리면 원본의 다음 화면이 1~3프레임 번쩍임 (R28)
   const flashes = (sh: AutoEditShot, a: number, b: number) =>
     (sh.soft || []).some((x) => (x > a + 1e-3 && x < a + SOFT_EDGE) || (x > b - SOFT_EDGE && x < b - 1e-3));
@@ -437,6 +443,20 @@ export function fitAssignment(
 }
 
 /** 장면 설명 두 개가 얼마나 비슷한지 (글자 두 개씩 묶어 겹치는 비율, 0~1) */
+/**
+ * 같은 영상의 두 샷을 바로 이어 붙였을 때 '같은 컷이 두 번 나온 것처럼' 보이는지 (R13).
+ * 장면 분석이 없으면 판단 못 함 → 보인다고 봄. 같은 묶음(group)이거나, 첫 화면 설명이 비슷하거나,
+ * 같은 장소에서 동작 설명까지 비슷하면 같아 보임. 같은 장소라도 동작·첫 화면이 다르면 괜찮음.
+ */
+export function looksSameShot(a?: Pick<AutoEditShotDesc, 'group' | 'firstFrame' | 'place' | 'desc'>, b?: Pick<AutoEditShotDesc, 'group' | 'firstFrame' | 'place' | 'desc'>): boolean {
+  if (!a || !b) return true;
+  if (!a.group && !a.firstFrame && !b.group && !b.firstFrame) return true; // 예전 분석(묶음·첫 화면 없음)
+  if (a.group && a.group === b.group) return true;
+  if (a.firstFrame && b.firstFrame && descSim(a.firstFrame, b.firstFrame) >= 0.5) return true;
+  if (a.place && a.place === b.place && descSim(a.desc || '', b.desc || '') >= 0.5) return true;
+  return false;
+}
+
 export function descSim(a: string, b: string): number {
   const bg = (t: string) => {
     const x = t.replace(/\s+/g, '');
@@ -525,10 +545,12 @@ export function auditPlan(
   // 바로 앞 컷과 같은 영상·같은 장소에서 시간을 건너뛰어 붙임 → 두 컷 첫 화면이 비슷해 보임
   // 같은 영상의 다른 부분을 연달아 (장면 분석이 없어도 확인, 규칙 R13). 이어 쓰기·바로 다음 장면은 괜찮음
   const sameVideoJump = new Set<number>();
+  const descMap = new Map((opts.descs || []).map((d) => [d.id, d]));
   for (let i = 1; i < cs.length; i++) {
     const [a, b] = [cs[i - 1], cs[i]];
     if (!a.shot || !b.shot || a.shot === b.shot || a.path !== b.path) continue;
     if (Number(b.shot.split('-').pop()) === Number(a.shot.split('-').pop()) + 1) continue;
+    if (!looksSameShot(descMap.get(a.shot), descMap.get(b.shot))) continue; // 같은 영상이라도 확실히 달라 보이면 괜찮음 (R13)
     sameVideoJump.add(i);
     out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 앞 컷과 같은 영상의 다른 부분을 연달아 씀 (같은 컷이 두 번 나온 것처럼 보일 수 있음)` });
   }

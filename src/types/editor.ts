@@ -368,6 +368,8 @@ declare global {
       claudeSaveKey?: (key: string) => Promise<{ ok: boolean; message: string }>;
       claudeTestKey?: () => Promise<{ ok: boolean; message: string }>;
       claudeClearKey?: () => Promise<{ hasKey: boolean }>;
+      /** 원본 장면 구간 [시작, 끝] + 앞뒤 표지 경계 (비용 없음, 손으로 편집할 때 R36) */
+      getSceneCuts?: (params: { path: string; duration: number }) => Promise<{ shots: Array<[number, number]>; intro: number; outro: number }>;
       autoEditAnalyze?: (params: {
         media: Array<{ path: string; duration: number }>;
         product: string;

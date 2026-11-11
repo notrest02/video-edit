@@ -31,6 +31,7 @@ import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { AudioWaveformCanvas } from './AudioWaveformCanvas';
 import { AudioVuMeter } from './AudioVuMeter';
 import { importDroppedFiles } from '../utils/dropImport';
+import { getSceneCuts, maxDurationInShot, minSourceStartInShot, prefetchSceneCuts } from '../utils/sceneCuts';
 
 export const TimelinePanel: React.FC = () => {
   // 우측 타임라인(눈금자 + 트랙 레인 통합) 가로 스크롤 컨테이너
@@ -102,6 +103,11 @@ export const TimelinePanel: React.FC = () => {
     outPoint,
     setTrackHeightsByType,
   } = useEditorStore();
+  // R36: 미디어 영상들의 원본 장면 구간을 미리 받아 둠 (ffmpeg 만, 비용 없음) → 클립 늘리기·영상 넣기에서 장면 경계·제목 카드 피함
+  const assetsForCuts = useEditorStore((s) => s.assets);
+  useEffect(() => {
+    for (const a of assetsForCuts || []) if (a.type === 'video') prefetchSceneCuts(a.path, a.duration);
+  }, [assetsForCuts]);
   // 클립 우클릭 메뉴 (속도/길이 조절, 자르기)
   const [clipMenu, setClipMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
   const openClipMenu = (e: React.MouseEvent, clip: TimelineClip) => {
@@ -359,6 +365,19 @@ export const TimelinePanel: React.FC = () => {
     let lastClientX = e.clientX;
     let lastClientY = e.clientY;
     let autoScrollRaf: number | null = null;
+    // R36: 영상 클립 양끝을 늘릴 때 원본 장면이 바뀌는 곳에서 멈춤 (Alt 를 누르면 무시)
+    let altHeld = e.altKey;
+    let warnedCut = false;
+    const cutsForClip = clip.type === 'video' ? getSceneCuts(clip.sourcePath) : undefined;
+    if (clip.type === 'video' && !cutsForClip) {
+      const asset = curState.assets?.find((a) => a.id === clip.assetId || a.path === clip.sourcePath);
+      prefetchSceneCuts(clip.sourcePath, asset?.duration);
+    }
+    const noteCutStop = () => {
+      if (warnedCut) return;
+      warnedCut = true;
+      useEditorStore.getState().setStatusMessage('원본 장면이 바뀌는 곳에서 멈췄어요 (다음 장면이 비치지 않게). 더 늘리려면 Alt 를 누른 채 끄세요.');
+    };
 
     let prevAppliedDeltaStart = 0;
     let prevAppliedDeltaDur = 0;
@@ -458,10 +477,21 @@ export const TimelinePanel: React.FC = () => {
         }
       } else if (mode === 'trim-start') {
         const maxDelta = initialDur - frameSec * 2;
-        const minDelta =
+        let minDelta =
           clip.type === 'text'
             ? -initialStart
             : -Math.min(initialStart, initialSourceStart / clipSpeed(clip));
+        if (!altHeld && cutsForClip) {
+          const sp = clipSpeed(clip);
+          const minSrc = minSourceStartInShot(cutsForClip, initialSourceStart, initialSourceStart + initialDur * sp);
+          if (minSrc !== undefined) {
+            const lim = (minSrc - initialSourceStart) / sp;
+            if (lim > minDelta) {
+              if (rawDeltaSec < lim - 1e-4) noteCutStop();
+              minDelta = lim;
+            }
+          }
+        }
         let clampedDelta = Math.max(minDelta, Math.min(maxDelta, rawDeltaSec));
         let newStart = initialStart + clampedDelta;
         let activeGuide: number | null = null;
@@ -502,6 +532,14 @@ export const TimelinePanel: React.FC = () => {
         }
       } else if (mode === 'trim-end') {
         let newDur = Math.max(frameSec * 2, initialDur + rawDeltaSec);
+        if (!altHeld && cutsForClip) {
+          const maxDur = maxDurationInShot(cutsForClip, initialSourceStart, clipSpeed(clip), initialDur);
+          if (maxDur !== undefined && newDur > maxDur + 1e-4) {
+            // 프레임 눈금에 맞춰 내림 (경계를 넘지 않게). 지금 길이보다 줄이지는 않음
+            newDur = Math.max(initialDur, Math.floor(maxDur * fps + 1e-6) / fps);
+            noteCutStop();
+          }
+        }
         let newEnd = initialStart + newDur;
         let activeGuide: number | null = null;
 
@@ -558,6 +596,7 @@ export const TimelinePanel: React.FC = () => {
     const onMouseMove = (moveEvent: MouseEvent) => {
       lastClientX = moveEvent.clientX;
       lastClientY = moveEvent.clientY;
+      altHeld = moveEvent.altKey;
       applyDragAtPosition(moveEvent.clientX, moveEvent.clientY);
     };
 

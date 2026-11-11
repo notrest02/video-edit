@@ -10,7 +10,7 @@ import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
-import { analyzeMedia } from './sceneAnalyzer';
+import { analyzeMedia, sceneCuts } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
 import { factsFromVideos, generateScripts, parseOrder, planVersions, type ScriptGenParams } from './scriptGenerator';
 import { docxToText } from './docxText';
@@ -349,6 +349,8 @@ ipcMain.handle(
   async (e, params: { media: Array<{ path: string; duration: number }>; product: string }) =>
     analyzeMedia(resolvedFfmpegPath, params.media, params.product, (msg) => e.sender.send('autoEdit:progress', msg))
 );
+// 손으로 편집할 때 쓰는 원본 장면 구간 (비용 없음) — R36
+ipcMain.handle('scene:cuts', async (_e, p: { path: string; duration: number }) => sceneCuts(resolvedFfmpegPath, p.path, p.duration));
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
 
 // ---------- STEP 0 대본 만들기 (Claude) ----------

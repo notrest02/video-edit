@@ -389,6 +389,45 @@ const DESC_SCHEMA = {
 };
 
 /**
+ * 손으로 편집할 때 쓰는 원본 장면 구간 (비용 없음, ffmpeg 만): 쓸 수 있는 샷 구간들 [시작, 끝] + 앞뒤 표지 경계.
+ * 자동 배치 분석이 이미 있으면 그 샷 나누기를 그대로 쓰고, 없으면 샷 나누기·표지 찾기만 해서 따로 저장 (<키>.cuts.json).
+ * 타임라인에서 클립을 늘릴 때 원본 장면이 바뀌는 곳에서 멈추고, 미디어에서 넣을 때 제목 카드를 건너뛰는 데 씀 (R36)
+ */
+const sceneCutsJobs = new Map<string, Promise<{ shots: Array<[number, number]>; intro: number; outro: number }>>();
+export function sceneCuts(ffmpegPath: string, file: string, duration: number): Promise<{ shots: Array<[number, number]>; intro: number; outro: number }> {
+  const key = cacheKey(file);
+  const running = sceneCutsJobs.get(key);
+  if (running) return running;
+  const job = (async () => {
+    const full = path.join(cacheDir(), `${key}.json`);
+    if (fs.existsSync(full)) {
+      try {
+        const c = JSON.parse(fs.readFileSync(full, 'utf8')) as FileCache;
+        if (c.shots?.length && c.edges) return { shots: c.shots.map((s) => [s.start, s.end] as [number, number]), intro: c.edges.intro, outro: c.edges.outro };
+      } catch {
+        /* 아래에서 새로 */
+      }
+    }
+    const own = path.join(cacheDir(), `${key}.cuts.json`);
+    if (fs.existsSync(own)) {
+      try {
+        return JSON.parse(fs.readFileSync(own, 'utf8'));
+      } catch {
+        /* 새로 */
+      }
+    }
+    const edges = await detectEdges(ffmpegPath, file, duration).catch(() => ({ intro: 0, outro: duration }));
+    const shots = applyEdges(await detectShots(ffmpegPath, file, duration, 'x'), edges);
+    const res = { shots: shots.map((s) => [s.start, s.end] as [number, number]), intro: edges.intro, outro: edges.outro };
+    fs.writeFileSync(own, JSON.stringify(res));
+    return res;
+  })();
+  sceneCutsJobs.set(key, job);
+  job.catch(() => sceneCutsJobs.delete(key));
+  return job;
+}
+
+/**
  * 미디어 영상들 분석. 이미 분석한 파일은 캐시 사용, 새 파일만 샷 나누기 + 한 번의 Claude 호출로 설명.
  * 샷 id 는 파일 순서 번호 기준 (예: 3번째 파일 → "3-07") — 같은 미디어 목록이면 항상 같음
  */

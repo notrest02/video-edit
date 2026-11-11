@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { getSceneCuts, usableRange } from '../utils/sceneCuts';
 import {
   AlignedSubtitleItem,
   AdSegment,
@@ -1784,7 +1785,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
               : 0;
         }
         const safeStart = Number(Math.max(0, startTime).toFixed(4));
-        const safeDur = Number(asset.duration.toFixed(4));
+        // R36: 원본 맨 앞·맨 뒤 표지(제목 카드)는 빼고 넣음 (장면 구간을 아직 못 받았으면 통째로)
+        const [useFrom, useTo] = usableRange(getSceneCuts(asset.path), asset.duration);
+        const safeDur = Number((useTo - useFrom).toFixed(4));
         const hasAudioStream = asset.hasAudio !== false && Boolean(aTrack);
         const linkedGroupId = hasAudioStream
           ? `link_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -1797,7 +1800,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           name: `${asset.name} [V]`,
           startTime: safeStart,
           duration: safeDur,
-          sourceStart: 0,
+          sourceStart: Number(useFrom.toFixed(4)),
           sourcePath: asset.path,
           assetId: asset.id,
           linkedGroupId,
@@ -1815,7 +1818,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             name: `${asset.name} [A]`,
             startTime: safeStart,
             duration: safeDur,
-            sourceStart: 0,
+            sourceStart: Number(useFrom.toFixed(4)),
             sourcePath: asset.path,
             assetId: asset.id,
             linkedGroupId,

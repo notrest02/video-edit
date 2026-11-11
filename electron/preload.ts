@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claudeTestKey: () => ipcRenderer.invoke('claude:testKey'),
   claudeClearKey: () => ipcRenderer.invoke('claude:clearKey'),
   autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
+  getSceneCuts: (params: unknown) => ipcRenderer.invoke('scene:cuts', params),
   autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
   scriptGenGenerate: (params: unknown) => ipcRenderer.invoke('scriptGen:generate', params),
   scriptGenParseOrder: (order: string) => ipcRenderer.invoke('scriptGen:parseOrder', order),

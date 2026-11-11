@@ -140,6 +140,12 @@ test('R09', '후킹은 지정 영상·구간 장면만, 빠르게는 1.5배까�
   const hp = A.hookPieces(slot(0, 0, 3, true), { path: 'a.mp4', from: 2.1, to: 9 }, shots, []);
   assert(hp.length && hp.every((p) => p.path === 'a.mp4'), '다른 영상이 섞임');
   assert(hp.every((p) => p.srcIn >= 2.1 - 0.5 && p.speed <= 1.5 + 1e-9), '구간 밖이거나 1.5배 초과: ' + hp.map((p) => `${p.srcIn}/${p.speed}`).join(','));
+  // 후킹 길이 = 3초 고정이 아니라 지정 장면이 자연스럽게 담기는 길이 (사용자 2026-11-07, 11-11 재확인)
+  const cs = caps([['이거 보세요.', 2.0], ['진짜 신기하죠.', 1.6], ['이렇게 붙이면 끝나요.', 2.4], ['정말 편해요.', 2.0], ['추천해요.', 2.0]]);
+  const len = (cap) => A.buildSlotsFromCaptions(cs, totalOf(cs), { hi: 2.4, fps: 30, hookSec: 3, hookCap: cap })[0].end;
+  const short = len(2.0), long = len(3.8);
+  assert(short < 2.3, `지정 장면이 2초인데 후킹이 ${short.toFixed(2)}초 (장면 길이에 맞아야 함)`);
+  assert(long > 3.3, `지정 장면이 3.8초인데 후킹이 ${long.toFixed(2)}초 (3초로 잘림)`);
 });
 
 test('R11', '후킹 바로 다음 컷은 후킹 장면 금지', () => {
@@ -163,6 +169,19 @@ test('R13', '바로 앞 컷과 같은 영상의 다른 부분 연달아 금지 (
   assert(c3.shot === '2-02', `바로 다음 장면(2-02)은 허용돼야 하는데 ${c3.shot} 로 바뀜`);
   const bad = [{ path: 'a.mp4', start: 0, end: 2.5, srcIn: 0, speed: 1, shot: '1-01' }, { path: 'a.mp4', start: 2.5, end: 5, srcIn: 9.1, speed: 1, shot: '1-04' }];
   assert(has(issues(SLOTS4.slice(0, 2), bad, SH), /같은 영상의 다른 부분/), '검사기가 같은 영상 연달아를 못 잡음');
+  // 사용자 2026-11-11: '곧바로 같은 컷처럼 보이지만 않으면' 같은 영상도 괜찮음 (창문 유리 문장처럼 같은 장소를 이어 갈 때)
+  const d = (id, group, firstFrame, place, desc) => ({ id, desc, place, motion: 'low', parts: [], note: '', group, firstFrame });
+  const differ = [d('1-01', '창문에 흡착판 누르기', '창문 유리에 손이 흡착판을 댐', '창문 유리', '흡착판을 창문에 꾹 눌러 붙임'), d('1-04', '창문 거치대에 양말 널기', '거치대에 걸린 양말 여러 켤레', '창문 유리', '거치대에 양말을 하나씩 걸어 널기')];
+  const r2 = A.fitAssignment(SLOTS4.slice(0, 2), [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-04', in: 9.1 }], SH, null, [], [], differ);
+  assert(r2.clips[1].shot === '1-04', `달라 보이는 같은 영상 장면(1-04)인데 ${r2.clips[1].shot} 로 바뀜`);
+  assert(!has(issues(SLOTS4.slice(0, 2), bad, SH, { descs: differ }), /같은 영상의 다른 부분/), '달라 보이는데 검사기가 경고');
+  const same = [d('1-01', '창문에 흡착판 누르기', '창문 유리에 손이 흡착판을 댐', '창문 유리', '흡착판을 창문에 꾹 눌러 붙임'), d('1-04', '창문에 흡착판 누르기', '창문 유리에 손이 흡착판을 댐', '창문 유리', '흡착판을 창문에 다시 꾹 누름')];
+  const r3 = A.fitAssignment(SLOTS4.slice(0, 2), [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-04', in: 9.1 }], SH, null, [], [], same);
+  assert(r3.clips[1].shot !== '1-04', '같은 묶음(똑같아 보이는) 장면이 연달아 들어감');
+  // 지시문 D 도 같은 기준 (2026-11-11 사용자 확인). AI가 첫 화면을 볼 수 있게 firstFrame 도 넘김
+  const src = fs.readFileSync(path.join(ROOT, 'electron/autoEditAssign.ts'), 'utf8');
+  assert(src.includes('같은 컷이 두 번 나온 것처럼 보이는 샷은 쓰지 않는다') && src.includes('group·첫 화면·동작이 확실히 다르면 써도 된다'), '지시문 D 가 예전 문장(같은 영상이면 무조건 금지)');
+  assert(/firstFrame: d\?\.firstFrame/.test(src), 'AI에게 보내는 장면 목록에 firstFrame 이 없음');
 });
 
 test('R14', '비슷한 장면 묶음 연달아 → 검사기 경고', () => {
@@ -260,7 +279,7 @@ test('R27', '다른 광고와 겹침은 약하게만 피함: 코드가 겹친다
   assert(/used_elsewhere \(다른 광고에서 쓴 구간 — 금지 아님/.test(src), 'used_elsewhere 목록 설명이 없음');
 });
 
-test('P01', '지시문: 슬롯 항목 설명·맞는 정도 기준이 있고, 근거 장면을 무조건 "딱 맞음"으로 적게 하지 않음 (2026-11-11 1묶음)', () => {
+test('R30', '지시문: 슬롯 항목 설명·맞는 정도(fit) 기준이 있고, 근거 장면을 무조건 "딱 맞음"으로 적게 하지 않음 (2026-11-11 1묶음)', () => {
   const src = fs.readFileSync(path.join(ROOT, 'electron/autoEditAssign.ts'), 'utf8');
   assert(src.includes('나레이션 슬롯의 항목:') && src.includes('sentence 그 대사가 들어 있는 문장 전체') && src.includes('next 는 바로 다음 슬롯의 대사'), '슬롯 항목(text/sentence/cont/next) 설명이 없음');
   assert(src.includes('id 는 "영상 번호-샷 번호"'), '샷 id 설명이 없음');
@@ -279,6 +298,39 @@ test('R28', '원본의 약한 화면 전환이 컷 처음·끝 0.15초 안에 �
   // 약한 전환이 없으면 AI가 고른 시작점 그대로 (쓸데없이 옮기지 않음)
   const r2 = A.fitAssignment([slot(0, 0, 1)], [{ slot: 0, shot: '1-01', in: 1.0 }], [shot('1-01', 'a.mp4', 0, 3)], null, [], []);
   assert(Math.abs(r2.clips[0].srcIn - 1.0) < 0.06, `약한 전환이 없는데 시작점이 바뀜: ${r2.clips[0].srcIn}`);
+});
+
+test('R29', '컷은 자막이 바뀌기 3프레임 앞에서 (컷 자리 = 자막 시작 - 3프레임)', () => {
+  const cs = caps([['이거 보세요.', 2.0], ['진짜 신기하죠.', 1.6], ['이렇게 붙이면 끝나요.', 2.4], ['정말 편해요.', 2.0], ['추천해요.', 2.0]]);
+  const sl = A.buildSlotsFromCaptions(cs, totalOf(cs), { hi: 2.4, fps: 30 });
+  for (const s of sl.slice(1)) {
+    const lead = Math.round((s.captionStart - s.start) * 30);
+    assert(lead === 3, `${s.captionStart.toFixed(2)}초 자막의 컷이 ${lead}프레임 앞 (3프레임이어야 함)`);
+  }
+});
+
+test('R36', '손으로 클립을 늘릴 때 원본 장면이 바뀌는 곳에서 멈춤 + 미디어에서 넣을 때 제목 카드 건너뜀', () => {
+  const SC = load('src/utils/sceneCuts.ts');
+  // 운동화키트 02 마지막 클립: 원본 21.56초부터, 장면은 25.13초에 바뀜 → 끝을 늘려도 25.07초(경계 0.06초 안쪽)까지만
+  const cuts = { shots: [[0.11, 4.03], [4.13, 25.09], [25.17, 36.6]], intro: 0.11, outro: 36.6 };
+  const maxDur = SC.maxDurationInShot(cuts, 21.56, 1, 2.0);
+  assert(Math.abs(21.56 + maxDur - (25.09 - SC.CUT_EDGE)) < 1e-6, `늘릴 수 있는 끝 ${(21.56 + maxDur).toFixed(2)}초 (25.03초여야 함)`);
+  // 이미 경계를 넘은 클립은 줄이기는 자유 (지금 길이보다 작게 제한하지 않음)
+  assert(SC.maxDurationInShot(cuts, 21.56, 1, 3.64) === 3.64, '이미 넘은 클립의 길이를 강제로 줄임');
+  // 느리게 재생하는 클립은 속도만큼 길게 늘릴 수 있음
+  assert(Math.abs(SC.maxDurationInShot(cuts, 21.56, 0.5, 1) - (25.03 - 21.56) / 0.5) < 1e-6, '속도를 반영하지 않음');
+  // 앞을 늘릴 때: 장면 시작(4.13) 안쪽까지만
+  assert(Math.abs(SC.minSourceStartInShot(cuts, 5, 7) - (4.13 + SC.CUT_EDGE)) < 1e-6, '앞 늘리기 한계가 장면 시작이 아님');
+  // 미디어에서 넣을 때 앞 표지 0.11초 건너뜀 / 장면 구간을 아직 모르면 통째로
+  const [a, b] = SC.usableRange(cuts, 36.6);
+  assert(a === 0.11 && b === 36.6, `넣는 구간 ${a}~${b}`);
+  const [a2] = SC.usableRange(undefined, 36.6);
+  assert(a2 === 0, '장면 구간이 없는데 앞을 자름');
+  // 타임라인이 실제로 이 계산을 씀 (빠지면 실패)
+  const tl = fs.readFileSync(path.join(ROOT, 'src/components/TimelinePanel.tsx'), 'utf8');
+  assert(tl.includes('maxDurationInShot(cutsForClip') && tl.includes('minSourceStartInShot(cutsForClip') && tl.includes('altHeld'), '타임라인 끌기에 장면 경계 멈춤이 빠짐');
+  const st = fs.readFileSync(path.join(ROOT, 'src/store/useEditorStore.ts'), 'utf8');
+  assert(st.includes('usableRange(getSceneCuts(asset.path)'), '미디어에서 넣을 때 제목 카드 건너뛰기가 빠짐');
 });
 
 // ---------- 자동 마스크 (컷 앞뒤 프레임) ----------
