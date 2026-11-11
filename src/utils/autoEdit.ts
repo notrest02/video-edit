@@ -22,6 +22,8 @@ const CUT_LEAD_FRAMES = 3;
 const MIN_SPEED = 0.8;
 const MIN_SPEED_HARD = 0.6;
 const EDGE = 0.06;
+/** 컷 처음·끝에서 이만큼(초) 안에 원본의 약한 화면 전환이 있으면 그 자리에 놓지 않음 (R28) */
+const SOFT_EDGE = 0.15;
 /** 절대 선: 컷 최소 길이(초) */
 const MIN_CUT = 1.3;
 const MIN_CUT_HARD = 1.2;
@@ -290,13 +292,21 @@ export function fitAssignment(
   // 후킹 바로 다음 컷은 후킹에 쓴 샷을 (다른 부분이라도) 쓰지 않음 → 후킹 장면이 그대로 이어져 보이는 것 방지 (사용자 2026-11-07)
   let hookShots = new Set<string>();
   let afterHook = false;
-  type Place = { sh: AutoEditShot; t0: number; sp: number; ok: boolean };
+  type Place = { sh: AutoEditShot; t0: number; sp: number; ok: boolean; why?: 'soft' };
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
   // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
   const shotNo = (id: string) => Number(id.split('-').pop());
   const jumpsSameVideo = (sh: AutoEditShot) =>
     !!prev && prev.path === sh.path && prev.shot !== sh.id && !(prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1);
+  // 약한 화면 전환(sh.soft)이 컷의 처음·끝 SOFT_EDGE 초 안에 걸리면 원본의 다음 화면이 1~3프레임 번쩍임 (R28)
+  const flashes = (sh: AutoEditShot, a: number, b: number) =>
+    (sh.soft || []).some((x) => (x > a + 1e-3 && x < a + SOFT_EDGE) || (x > b - SOFT_EDGE && x < b - 1e-3));
   const place = (sh: AutoEditShot, D: number, wantIn: number): Place => {
+    const p = placeRaw(sh, D, wantIn);
+    if (p.ok && flashes(sh, p.t0, p.t0 + D * p.sp)) return { ...p, ok: false, why: 'soft' };
+    return p;
+  };
+  const placeRaw = (sh: AutoEditShot, D: number, wantIn: number): Place => {
     if (afterHook && hookShots.has(sh.id)) return { sh, t0: sh.start + EDGE, sp: 1, ok: false };
     if (jumpsSameVideo(sh)) return { sh, t0: sh.start + EDGE, sp: 1, ok: false };
     const s0 = sh.start + EDGE;
@@ -320,6 +330,7 @@ export function fitAssignment(
       let bestT = want;
       let bestKey: [number, number, number] = [Infinity, Infinity, Infinity];
       for (let t = lo; t <= hiT + 1e-6; t += 0.05) {
+        if (flashes(sh, t, t + D)) continue; // 약한 전환이 컷 처음·끝에 걸리는 시작점은 건너뜀
         const key: [number, number, number] = [
           Math.round(overlap(sh.path, t, t + D, usedHere) * 10),
           Math.round(overlap(sh.path, t, t + D, avoid) * 10),
@@ -336,7 +347,7 @@ export function fitAssignment(
     return { sh, t0: s0, sp, ok: sp >= MIN_SPEED_HARD && overlap(sh.path, s0, s1, usedHere) <= 0.2 };
   };
   const why = (sh: AutoEditShot | undefined, p: Place | null) =>
-    !sh ? '없는 장면' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : jumpsSameVideo(sh) ? '앞 컷과 같은 영상의 다른 부분' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : '이미 이 광고에서 씀';
+    !sh ? '없는 장면' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : jumpsSameVideo(sh) ? '앞 컷과 같은 영상의 다른 부분' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : p && (sh.soft || []).length && p.why === 'soft' ? '원본 화면 전환이 컷 끝에 걸림' : '이미 이 광고에서 씀';
   const put = (s: AutoEditSlot, p: Place) => {
     const D = s.end - s.start;
     const c: PlanClip = { path: p.sh.path, file: p.sh.file, start: s.start, end: s.end, srcIn: p.t0, speed: p.sp, shot: p.sh.id, text: s.text, hook: s.hook };

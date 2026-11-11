@@ -6,6 +6,7 @@
   "main": "dist-electron/main.cjs",
   "scripts": {
     "test:rules": "node tools/auto-edit/rules-test.mjs",
+    "check:export": "node tools/check-export/check-cuts.mjs",
     "dev": "vite",
     "build": "tsc && vite build && node scripts/build-electron.mjs",
     "electron:dev": "node scripts/dev-electron.mjs",

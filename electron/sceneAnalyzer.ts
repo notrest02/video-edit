@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { claudeJson, type UsageTotal } from './claudeService';
 
-export type Shot = { id: string; file: string; path: string; start: number; end: number; dur: number };
+export type Shot = { id: string; file: string; path: string; start: number; end: number; dur: number; /** 샷 안의 '약한 화면 전환' 의심 시각(원본 초) — 컷 처음·끝에 걸리면 1~3프레임 번쩍임 */ soft?: number[] };
 /** 샷 하나(또는 그 안의 부분)를 화면 기준으로 본 정보 — 대본 만들기와 자동 배치가 같이 쓴다 */
 export type ShotView = {
   /** 화면의 주인공: 화면에서 가장 크게·눈에 띄게 보이는 것 (예: 인형, 빨래, 제품, 손 동작, 사람 얼굴) */
@@ -55,6 +55,9 @@ type FileCache = {
   cutRefinedVersion?: number;
   /** 장면 설명 항목 버전 (2: 주인공·카메라 보고 말함·단계·분위기·구도·핵심 순간·비슷한 장면 묶음·첫 화면·쓰기 어려운 점) */
   descVersion?: number;
+  /** 약한 화면 전환(점수가 장면 전환 기준보다 낮은 점프 컷 등) 의심 시각들. softVersion 이 없으면 아직 안 찾음 */
+  soft?: number[];
+  softVersion?: number;
 };
 
 /** 장면 설명 항목이 바뀌면 올림 → 예전 설명은 다음에 쓸 때 한 번만 다시 설명 (썸네일 시트·샷 나누기는 그대로 재사용) */
@@ -129,6 +132,38 @@ function run(ffmpegPath: string, args: string[]): Promise<string> {
     proc.on('error', reject);
     proc.on('close', (code) => (code === 0 ? resolve(err) : reject(new Error(`ffmpeg 실패(${code}): ${err.slice(-400)}`))));
   });
+}
+
+/**
+ * 약한 화면 전환 찾기: 장면 전환 기준(0.11~0.15)보다 낮아서 샷으로 안 나뉜, 앞뒤보다 확 튀는 한 프레임 변화.
+ * 같은 장소에서 살짝 다른 각도로 넘어가는 점프 컷 등. 이 시각이 컷의 처음·끝 0.15초 안에 걸리면
+ * 원본의 다음 화면이 1~3프레임 비친다 → 자동 배치가 피한다 (R28, 2026-11-11). ffmpeg 만 씀 (비용 없음)
+ */
+const SOFT_VERSION = 1;
+const SOFT_MIN = 0.05;
+const SOFT_RATIO = 5;
+function findSoftCuts(pts: number[], sc: number[], shots: Shot[]): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < pts.length; i++) {
+    const s = sc[i] ?? 0;
+    if (s < SOFT_MIN) continue;
+    const near: number[] = [];
+    for (let j = Math.max(0, i - 8); j <= Math.min(pts.length - 1, i + 8); j++) if (Math.abs(j - i) > 1) near.push(sc[j] ?? 0);
+    near.sort((a, b) => a - b);
+    const med = near[Math.floor(near.length / 2)] ?? 0;
+    if (s < Math.max(SOFT_MIN, med * SOFT_RATIO)) continue;
+    // 샷 안쪽에 있는 것만 (샷 경계·전환 구간은 이미 샷 나누기가 처리)
+    if (!shots.some((x) => pts[i] > x.start + 0.02 && pts[i] < x.end - 0.02)) continue;
+    out.push(Math.round(pts[i] * 1000) / 1000);
+  }
+  return out;
+}
+async function scanScores(ffmpegPath: string, file: string): Promise<{ pts: number[]; sc: number[] }> {
+  const log = await run(ffmpegPath, ['-hide_banner', '-i', file, '-vf', "scale=160:-2,select='gte(scene,0)',metadata=print", '-an', '-f', 'null', '-']);
+  return {
+    pts: [...log.matchAll(/pts_time:([\d.]+)/g)].map((m) => Number(m[1])),
+    sc: [...log.matchAll(/scene_score=([\d.]+)/g)].map((m) => Number(m[1])),
+  };
 }
 
 async function detectShots(ffmpegPath: string, file: string, duration: number, prefix: string): Promise<Shot[]> {
@@ -420,9 +455,25 @@ export async function analyzeMedia(
         /* 보정 실패 시 기존 캐시 유지 */
       }
     }
+    // 약한 화면 전환 찾기 (영상마다 한 번, ffmpeg 만) — 예전 캐시도 여기서 한 번 채움
+    if (cache.softVersion !== SOFT_VERSION) {
+      try {
+        onProgress(`약한 화면 전환 확인 중 (${i + 1}/${media.length}): ${path.basename(m.path)}`);
+        const { pts, sc } = await scanScores(ffmpegPath, m.path);
+        cache.soft = findSoftCuts(pts, sc, cache.shots);
+        cache.softVersion = SOFT_VERSION;
+        fs.writeFileSync(cachePath, JSON.stringify(cache));
+      } catch {
+        /* 못 찾으면 없는 것으로 */
+      }
+    }
     // 이번 미디어 목록 순서로 id 다시 매김 (캐시엔 'x-NN' 형태로 저장)
     const renum = (id: string) => id.replace(/^[^-]+-/, `${prefix}-`);
-    cache.shots = cache.shots.map((s) => ({ ...s, id: renum(s.id), path: m.path }));
+    const soft = cache.soft || [];
+    cache.shots = cache.shots.map((s) => {
+      const inShot = soft.filter((t) => t > s.start && t < s.end);
+      return { ...s, id: renum(s.id), path: m.path, ...(inShot.length ? { soft: inShot } : {}) };
+    });
     if (cache.descs) cache.descs = cache.descs.map((d) => ({ ...d, id: renum(d.id) }));
     entries.push({ cachePath, cache });
   }

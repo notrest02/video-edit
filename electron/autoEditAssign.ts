@@ -20,6 +20,15 @@ const SYSTEM = `당신은 숏폼(세로 9:16, 30~40초) 제품 광고 편집자�
   stage 단계(문제상황/준비/실제사용/완성모습/기타), mood 분위기, framing 구도, key 핵심 순간(원본 초),
   group 비슷한 장면 묶음, issues 쓰기 어려운 점(큰 자막 등), parts 샷 안 부분별(from~to 원본 초, 부분마다 subject/talk/stage)
 - 항목이 비어 있으면(예전 분석) desc 로 판단한다.
+- id 는 "영상 번호-샷 번호"다 (1-02 = 1번 영상의 2번째 샷). 같은 영상에서 번호가 1 큰 샷이 시간상 바로 다음 샷이다.
+
+나레이션 슬롯의 항목:
+- text 이 슬롯에서 나오는 대사, sentence 그 대사가 들어 있는 문장 전체.
+  문장의 핵심(focus)은 sentence 로 정하고, 샷은 그 핵심을 보여 주면서 text 와도 어긋나지 않는 것을 고른다.
+- cont=true 면 바로 앞 슬롯과 같은 문장이 이어지는 슬롯이다. next 는 바로 다음 슬롯의 대사다 (흐름 참고용).
+- dur 슬롯 길이(초), min_shot 고를 수 있는 샷의 최소 길이(초), after_hook=true 면 후킹 바로 다음 슬롯.
+- basis 는 [대본 근거 장면] 참고.
+hook_used 는 이 광고에서 이미 쓴 샷 구간(후킹 등)이다.
 
 [반드시 지킬 것 — 어기면 코드가 다른 장면으로 바꾼다]
 A. 샷 길이(dur)가 슬롯의 min_shot 보다 짧은 샷은 고르지 않는다 (너무 느려진다).
@@ -30,7 +39,8 @@ D. 바로 앞 슬롯(후킹 포함)과 같은 영상 파일의 '다른' 샷은 �
    시간을 건너뛰어 붙이면 같은 컷이 두 번 나온 것처럼 보인다. 예외: 앞 샷 이어 쓰기, 또는 시간상 바로 다음 샷(id 번호 +1).
 
 [대본 근거 장면] 슬롯에 basis 가 있으면 대본을 쓸 때 그 문장의 근거로 본 장면들이다.
-   위 A~D 를 지키는 한 basis 장면을 가장 먼저 고른다 (basis 가 여러 개면 그중 아래 순서에 가장 맞는 것). fit 은 "딱 맞음".
+   위 A~D 를 지키는 한 basis 장면을 가장 먼저 고른다 (basis 가 여러 개면 그중 아래 순서에 가장 맞는 것).
+   basis 는 문장 전체의 근거다. fit 은 이 슬롯의 대사에 실제로 맞는 정도대로 적는다 (basis 라고 무조건 "딱 맞음"으로 적지 않는다).
    basis 장면이 모두 A~D 에 걸리면 basis 와 같은 주인공·장소의 다른 샷을 고른다.
 
 [고르는 순서 — 위에 있을수록 중요]
@@ -54,9 +64,15 @@ D. 바로 앞 슬롯(후킹 포함)과 같은 영상 파일의 '다른' 샷은 �
    앞 장면이 여전히 문장에 맞으면 같은 샷을 이어 쓴다 (화면이 덜 자주 바뀐다).
 6. 깨끗한 장면: 같은 조건이면 issues 가 없는(큰 자막·흔들림 없는) 샷.
 7. 구도: 같은 조건이면 바로 앞 컷과 framing 이 다른 샷.
+8. 다른 광고와 겹침 (R27): used_elsewhere 는 같은 원본으로 만든 '다른 광고'에서 쓴 샷 구간이다. 금지가 아니라 참고다.
+   1~7 기준으로 똑같이 잘 맞는 후보가 둘 이상일 때만 used_elsewhere 에 없는 쪽을 고른다.
+   대사에 더 잘 맞는 샷이 used_elsewhere 에 있으면 그대로 고르고, 그 샷 안에서 from~to 와 겹치지 않는 부분을 in 으로 고른다
+   (겹치지 않는 부분이 없거나 key 가 겹친 부분에 있으면 겹쳐도 된다).
+   겹침을 피하려고 핵심·단계·장소가 덜 맞는 샷을 고르거나 fit 을 "대체"로 낮추지 않는다. (hook_used 와 다르다: hook_used 는 C 규칙)
 
-[맞는 장면이 없을 때] fit 에 적는다: "딱 맞음" / "비슷함" / "대체".
-   1~2 를 지키는 샷이 없으면 "대체"로 하고 이 순서로 고른다:
+[맞는 정도] fit 에 적는다:
+   "딱 맞음" = 1(핵심)·2(단계)·3(장소·분위기)이 모두 맞음 / "비슷함" = 1·2 는 맞고 3(장소·분위기)이 어긋남 / "대체" = 1(핵심)이나 2(단계)가 안 맞음.
+[맞는 장면이 없을 때] 1~2 를 지키는 샷이 없으면 "대체"로 하고 이 순서로 고른다:
    ① 같은 문장이면 앞 슬롯 샷 이어 쓰기 ② 대사 성격에 맞는 단계의 샷(감정·결론→완성모습, 사용→실제사용, 문제→문제상황)
    ③ 제품이 잘 보이는 깨끗한 완성모습. 글자만 비슷하고 뜻이 다른 장면은 대체로도 쓰지 않는다.
 
@@ -153,7 +169,7 @@ ${JSON.stringify(shotTable)}
 ${slotJson(list)}
 
 hook_used: ${JSON.stringify([...params.hookUsed, ...usedHere])}
-used_elsewhere: ${JSON.stringify(params.usedElsewhere)}
+used_elsewhere (다른 광고에서 쓴 구간 — 금지 아님, 고르는 순서 8 참고): ${JSON.stringify(params.usedElsewhere)}
 ${prevNote}
 위 목록에 있는 모든 슬롯에 빠짐없이 샷을 배정해 assign 으로 답한다. (후킹 지정이 없는 광고는 슬롯 0도 목록에 있다)`;
     try {
@@ -194,7 +210,12 @@ ${prevNote}
       const d = a ? descById.get(a.shot) : undefined;
       return { slot: s.slot, start: +s.start.toFixed(2), end: +s.end.toFixed(2), hook: s.hook, text: s.text, sentence: s.sentence, focus: a?.focus, fit: a?.fit, shot: a?.shot, in: a?.in, shotDesc: d?.desc, shotSubject: d?.subject, shotStage: d?.stage, shotPlace: d?.place, alt: a?.alt, why: a?.why };
     });
-    fs.writeFileSync(path.join(dir, `${stamp}.json`), JSON.stringify({ product: params.product, rows }, null, 1));
+    // 실제 사용량(생각 포함 출력 토큰)도 남김 → 답 길이 한도(64000)가 적당한지 숫자로 판단 (사용자 2026-11-11)
+    const won = Math.round(((usage.input * 0.1 + usage.output * 0.5) / 1e6) * 1400);
+    fs.writeFileSync(
+      path.join(dir, `${stamp}.json`),
+      JSON.stringify({ product: params.product, usage: { input: usage.input, output: usage.output, truncations, maxTokens: 64000, approxWon: won }, rows }, null, 1)
+    );
   } catch {
     /* 기록 실패는 배치에 영향 없음 */
   }

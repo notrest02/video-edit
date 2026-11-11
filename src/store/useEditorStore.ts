@@ -3297,7 +3297,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         //   규칙: 경계에서 반드시 컷(구간마다 따로 계산), 구간 첫 컷 = 그 광고 후킹, 같은 장면 재사용 금지는 광고 안에서만,
         //   다른 광고(다른 시퀀스 + 앞 구간)에서 쓴 장면은 되도록 피함 — 단 후킹(광고주 지정)은 겹쳐도 됨
         const hi = shotLenCap(an.shots);
-        const otherClips = st.sequences.filter((s) => s.id !== st.activeSequenceId).flatMap((s) => s.clips || []);
+        // 다른 시퀀스의 후킹 컷(후킹 지정 광고 구간의 첫 영상 컷)은 빼고 넘김 — 후킹은 광고주 지정이라 겹쳐도 됨 (R27)
+        const otherClips = st.sequences
+          .filter((s) => s.id !== st.activeSequenceId)
+          .flatMap((s) => {
+            const hookStarts = (s.adSegments || []).filter((g) => g.hook).map((g) => g.start);
+            return (s.clips || []).filter((c) => !(c.type === 'video' && hookStarts.some((t) => Math.abs(c.startTime - t) < 0.05)));
+          });
         const usedOther = usedRangesFromClips(otherClips, an.shots);
         const allClips: AutoEditPlan['clips'] = [];
         const warnings: string[] = [];

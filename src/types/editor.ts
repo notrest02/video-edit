@@ -91,7 +91,15 @@ export type ScriptGenRequest = {
   examplePaths: string[];
 };
 
-export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number };
+/** 내보낸 영상 컷 검사 결과 (electron/exportChecker.ts) */
+export type ExportCheckResult = {
+  frames: number;
+  fps: number;
+  cuts: number;
+  problems: Array<{ kind: '짧은 장면' | '마스크 풀림' | '번쩍임'; frame: number; time: number; msg: string; image?: string }>;
+};
+
+export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number; /** 샷 안 약한 화면 전환 의심 시각(원본 초) */ soft?: number[] };
 type AutoEditShotView = { subject?: string; talk?: boolean; stage?: string };
 export type AutoEditShotDesc = AutoEditShotView & {
   id: string;
@@ -533,7 +541,7 @@ declare global {
         samplesPerSec: number;
       }>;
       createSampleVideo: () => Promise<Omit<MediaAsset, 'id'>>;
-      exportVideo: (payload: unknown) => Promise<{ canceled: boolean; outputPath?: string }>;
+      exportVideo: (payload: unknown) => Promise<{ canceled: boolean; outputPath?: string; check?: ExportCheckResult }>;
       chooseFolderDialog?: (title?: string) => Promise<string | null>;
       onExportProgress: (callback: (progress: number) => void) => () => void;
       saveProjectDialog: (defaultFileName?: string) => Promise<string | null>;

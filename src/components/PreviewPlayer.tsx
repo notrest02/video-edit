@@ -13,7 +13,7 @@ import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
 import { BlurMaskOverlay } from './BlurMaskOverlay';
 import { resolveTextAt, valueAt } from '../utils/keyframes';
-import { drawSubtitleClip } from '../utils/subtitleCanvasRenderer';
+import { drawSubtitleClip, subtitleLines } from '../utils/subtitleCanvasRenderer';
 import {
   ensureGdiTextReady,
   extractGdiFamily,
@@ -305,6 +305,14 @@ export const PreviewPlayer: React.FC = () => {
   const gdiOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const [gdiGlyphVersion, setGdiGlyphVersion] = useState(0);
   useEffect(() => onGdiGlyphsLoaded(() => setGdiGlyphVersion((v) => v + 1)), []);
+  // 글꼴이 늦게 불러와지면 자막을 다시 그림 (캔버스는 브라우저 글자와 달리 스스로 다시 그리지 않음)
+  const [fontVersion, setFontVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setFontVersion((v) => v + 1);
+    document.fonts?.addEventListener?.('loadingdone', bump);
+    document.fonts?.ready?.then(bump).catch(() => {});
+    return () => document.fonts?.removeEventListener?.('loadingdone', bump);
+  }, []);
   const gdiSubs = displayedActiveSubtitles.filter((sub) => extractGdiFamily(sub.fontFamily));
   const gdiSubsKey = gdiSubs
     .map((sub) => `${sub.id}|${sub.fontFamily}|${sub.fontWeight}|${sub.fontItalic}|${sub.text}`)
@@ -377,10 +385,15 @@ export const PreviewPlayer: React.FC = () => {
     if (!ctx) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, pxW, pxH);
-    ctx.scale(scale, scale);
-    for (const sub of gdiSubs) drawSubtitleClip(ctx, sub, cssW, cssH);
+    // 모든 자막을 내보내기와 같은 그림 엔진으로, 시퀀스 크기 기준으로 계산한 뒤 미리보기 크기로 줄여 그림
+    //  → 줄바꿈·글자 크기·외곽선이 내보낸 영상과 같다 (예전: 미리보기는 브라우저 글자, 내보내기는 캔버스라 한 줄이 두 줄로 바뀜)
+    const seqW = sequence.width || 1080;
+    const seqH = sequence.height || 1920;
+    const k = (scale * cssW) / seqW;
+    ctx.scale(k, k);
+    for (const sub of displayedActiveSubtitles) drawSubtitleClip(ctx, sub, seqW, seqH);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gdiSubsKey, gdiGlyphVersion, canvasWidth, sequence.width, sequence.height, viewZoom, displayedActiveSubtitles]);
+  }, [gdiSubsKey, gdiGlyphVersion, fontVersion, canvasWidth, sequence.width, sequence.height, viewZoom, displayedActiveSubtitles]);
 
   // 재생 루프 (하드웨어 오디오/비디오 요소를 마스터 클럭으로 동기화하여 소리 끊김 및 누적 시크 오류 원천 차단)
   useEffect(() => {
@@ -466,10 +479,18 @@ export const PreviewPlayer: React.FC = () => {
 
     const targetMediaTime =
       activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime) * clipSpeed(activeVideoClip);
-    // 속도 조절된 클립은 그 속도로 재생
-    if (Math.abs(videoEl.playbackRate - clipSpeed(activeVideoClip)) > 1e-3) {
-      videoEl.playbackRate = clipSpeed(activeVideoClip);
+    // 속도 조절된 클립은 그 속도로 재생.
+    // 재생 중엔 영상이 목소리 시계보다 늦거나 빠르면 속도를 살짝(최대 ±10%) 바꿔 1프레임 안으로 따라붙게 함
+    //  (예전엔 0.6초 넘게 어긋나야 다시 맞춰서, 컷·마스크가 영상 그림과 몇 프레임씩 엇갈렸음 — 2026-11-11)
+    {
+      const base = clipSpeed(activeVideoClip);
+      const lag = targetMediaTime - videoEl.currentTime; // + 면 영상이 늦음
+      const want = isPlaying && !videoEl.seeking && Math.abs(lag) > 0.5 / 30 ? base * (1 + Math.max(-0.1, Math.min(0.1, lag * 2))) : base;
+      if (Math.abs(videoEl.playbackRate - want) > 1e-3) videoEl.playbackRate = want;
     }
+    // 클립 끝(원본에서 쓰는 마지막 프레임)에 닿으면 그 프레임에서 멈춤 → 다음 클립으로 넘어가기 전 원본의 다음 장면이 비치지 않음
+    const srcEnd = activeVideoClip.sourceStart + activeVideoClip.duration * clipSpeed(activeVideoClip);
+    const atClipEnd = videoEl.currentTime >= srcEnd - 1 / 30;
 
     // 음성이 A 트랙으로 분리되었거나(activeVideoClip.muted), 활성 오디오가 재생 중인 경우 비디오 자체 소리는 끔
     // (분리된 A 트랙 음성 클립을 삭제했더라도 비디오 클립은 muted=true 상태를 유지하므로 소리가 나지 않음)
@@ -501,7 +522,9 @@ export const PreviewPlayer: React.FC = () => {
     }
 
     if (isPlaying) {
-      if (videoEl.paused) {
+      if (atClipEnd && !isClipChanged) {
+        if (!videoEl.paused) videoEl.pause();
+      } else if (videoEl.paused) {
         videoEl.play().catch(() => {});
       }
     } else {
@@ -800,7 +823,7 @@ export const PreviewPlayer: React.FC = () => {
           <canvas
             ref={gdiOverlayRef}
             style={{ width: '100%', height: '100%' }}
-            className={`absolute inset-0 z-10 pointer-events-none ${gdiSubs.length ? '' : 'hidden'}`}
+            className={`absolute inset-0 z-10 pointer-events-none ${displayedActiveSubtitles.length ? '' : 'hidden'}`}
           />
 
           {/* 실시간 자막 오버레이: 실제 렌더링되는 화면 위에서 직접 클릭해 글자 수정 또는 Enter(나누기)/Backspace(합치기) 수행! */}
@@ -814,10 +837,12 @@ export const PreviewPlayer: React.FC = () => {
 
             const isSelected = sub.id === selectedClipId;
             const rawText = sub.text || '';
-            // Windows(GDI) 렌더 글꼴: 실제 글자는 위 캔버스가 그리므로 여기서는 투명 처리
-            const isGdiFont = Boolean(extractGdiFamily(sub.fontFamily));
+            // 실제 글자·배경은 위 캔버스가 내보내기와 같은 엔진으로 그리므로 여기서는 투명 처리 (커서·클릭·글자 수정만 담당)
+            const isGdiFont = true;
 
-            const displayLines = rawText.split(/\r?\n/);
+            // 줄 나눔도 내보내기 계산 그대로 → 상자 크기와 줄 수가 내보낸 영상과 같음
+            const exportLines = subtitleLines(sub, sequence.width || 1080, sequence.height || 1920);
+            const displayLines = exportLines.length ? exportLines : rawText.split(/\r?\n/);
 
             // 글자 크기(fontSize)는 자막 글자 수(길이)에 따라 절대 작아지지 않고,
             // 오직 사용자가 설정한 fontSize와 시퀀스/프리뷰 화면 비율에 의해서만 고정 결정됩니다.
@@ -896,9 +921,6 @@ export const PreviewPlayer: React.FC = () => {
                     setSelectedClipId(sub.id);
                     setIsPlaying(false);
                   }}
-                  style={{
-                    maxWidth: `${maxBoxWidthPx + 8}px`,
-                  }}
                   className={`pointer-events-auto cursor-text px-1 py-0.5 rounded transition-shadow w-max text-center ${
                     isSelected
                       ? isQuickSplitMergeMode
@@ -911,7 +933,6 @@ export const PreviewPlayer: React.FC = () => {
                   <div
                     style={{
                       ...sharedTypographyStyle,
-                      maxWidth: `${maxBoxWidthPx}px`,
                       backgroundColor:
                         !isGdiFont && bgOpacity > 0 && sub.backgroundColor !== 'transparent'
                           ? hexToRgba(sub.backgroundColor || '#000000', bgOpacity)
@@ -925,7 +946,8 @@ export const PreviewPlayer: React.FC = () => {
                       aria-hidden="true"
                       style={{
                         ...sharedTypographyStyle,
-                        maxWidth: `${maxBoxWidthPx}px`,
+                        // 줄 나눔은 내보내기 계산(displayLines)으로 이미 정해짐 → 여기서는 다시 줄바꿈하지 않음
+                        whiteSpace: 'pre',
                       }}
                       className="col-start-1 row-start-1 invisible px-2.5 py-1 pointer-events-none select-none min-w-[2ch] text-center"
                     >

@@ -1,4 +1,5 @@
 import { blurPointsAt, maskPngDataUrl } from '../utils/blurMask';
+import { effectiveMasks } from '../utils/autoMask';
 import { hasTextMotionKeyframes, resolveTextAt, shiftKeyframes } from '../utils/keyframes';
 import React, { useEffect, useState } from 'react';
 import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
@@ -7,7 +8,50 @@ import { useEditorStore } from '../store/useEditorStore';
 import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
 import { ensureFontsForValues } from '../utils/pcFonts';
 import { ensureGdiClipsReady } from '../utils/gdiFonts';
-import type { TimelineClip } from '../types/editor';
+import type { ExportCheckResult, TimelineClip } from '../types/editor';
+
+type CheckReport = { file: string; check: ExportCheckResult };
+
+/** 내보낸 영상 컷 검사 결과 창: 의심 자리마다 앞뒤 5프레임 사진 (가운데가 문제 프레임) */
+const ExportCheckModal: React.FC<{ reports: CheckReport[]; onClose: () => void }> = ({ reports, onClose }) => {
+  const fileName = (p: string) => p.split(/[\\/]/).pop();
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center" onClick={onClose}>
+      <div
+        className="bg-[#1d1d1d] border border-[#3a3a3a] rounded-lg w-[1320px] max-w-[95vw] max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-4 py-2.5 border-b border-[#2d2d2d] flex items-center justify-between">
+          <div className="text-[13px] font-semibold text-[#e6e6e6]">컷 검사: 확인이 필요한 자리 (가운데 사진이 문제 프레임)</div>
+          <button onClick={onClose} className="px-2 py-0.5 rounded bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[12px]">
+            닫기
+          </button>
+        </div>
+        <div className="overflow-y-auto p-4 space-y-4 text-[12px]">
+          <div className="text-[#999999]">
+            영상 프레임을 숫자로 비교해 찾은 '의심' 자리예요. 사진을 보고 정상이면 무시하세요. 못 잡는 것: 한국어 자막 아래로 살짝 비치는 원본 글자.
+          </div>
+          {reports.map((r) => (
+            <div key={r.file} className="space-y-2">
+              <div className="text-[#79b8ff] font-medium">
+                {fileName(r.file)} — 컷 {r.check.cuts}개 중 의심 {r.check.problems.length}곳
+              </div>
+              {r.check.problems.map((p) => (
+                <div key={p.frame} className="bg-[#161616] border border-[#2d2d2d] rounded p-2 space-y-1.5">
+                  <div>
+                    <span className="text-[#f5a623] font-semibold">⚠️ {p.time.toFixed(2)}초</span>{' '}
+                    <span className="text-[#dddddd]">{p.kind}</span> <span className="text-[#888888]">— {p.msg}</span>
+                  </div>
+                  {p.image && <img src={`media://local?path=${encodeURIComponent(p.image)}`} className="w-full rounded" />}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 /**
  * 렌더 구간 [rangeStart, rangeEnd) 안으로 클립을 잘라내고 0초 기준으로 당긴다.
@@ -43,6 +87,8 @@ export const TopHeader: React.FC = () => {
   // 렌더 범위: 전체 시퀀스 / 인~아웃 구간
   const [renderRange, setRenderRange] = useState<'all' | 'inout' | 'segments'>('inout');
   const [exportProgress, setExportProgress] = useState(0);
+  // 내보낸 영상 컷 검사 결과 (내보내기 직후 자동, 비용 없음). 의심 자리가 있으면 창으로 보여 줌
+  const [checkReports, setCheckReports] = useState<CheckReport[]>([]);
 
   const {
     projectName,
@@ -132,7 +178,7 @@ export const TopHeader: React.FC = () => {
         const f = sequence.fps || fps;
         return {
           ...v,
-          masks: (c?.blurMasks || []).map((m) => ({
+          masks: effectiveMasks(c?.blurMasks, c?.duration || 0).map((m) => ({
             png: maskPngDataUrl(blurPointsAt(m, 0, outW, outH), outW, outH, m.feather),
             blur: m.blur,
             from: m.from,
@@ -166,6 +212,7 @@ export const TopHeader: React.FC = () => {
     if (!folder) return;
     setIsExporting(true);
     const done: string[] = [];
+    const reports: CheckReport[] = [];
     try {
       for (let i = 0; i < adSegments.length; i++) {
         const g = adSegments[i];
@@ -173,8 +220,13 @@ export const TopHeader: React.FC = () => {
         setStatusMessage(`광고 ${i + 1}/${adSegments.length} (${g.name}) 내보내는 중...`);
         const res = await renderRangeTo(g.start, g.end, `${folder}\\${g.name}.mp4`);
         if (res.outputPath) done.push(res.outputPath);
+        if (res.outputPath && res.check) reports.push({ file: res.outputPath, check: res.check });
       }
-      setStatusMessage(`광고 ${done.length}개 내보내기 완료: ${folder}`);
+      const bad = reports.reduce((n, r) => n + r.check.problems.length, 0);
+      setStatusMessage(
+        `광고 ${done.length}개 내보내기 완료: ${folder}${reports.length ? (bad ? ` — 컷 검사 의심 ${bad}곳` : ' — 컷 검사 문제 없음') : ''}`
+      );
+      if (bad) setCheckReports(reports);
     } catch (err: any) {
       setStatusMessage(`광고 구간별 내보내기 실패 (${done.length}개 완료): ${err.message}`);
     } finally {
@@ -236,7 +288,7 @@ export const TopHeader: React.FC = () => {
           rotation: c.rotation,
           opacity: c.opacity,
           keyframes: c.keyframes,
-          masks: (c.blurMasks || []).map((m) => ({
+          masks: effectiveMasks(c.blurMasks, c.duration).map((m) => ({
             png: maskPngDataUrl(blurPointsAt(m, 0, sequence.width || 1920, sequence.height || 1080), sequence.width || 1920, sequence.height || 1080, m.feather),
             blur: m.blur,
             from: m.from,
@@ -304,9 +356,11 @@ export const TopHeader: React.FC = () => {
       if (res.canceled) {
         setStatusMessage('내보내기가 취소되었습니다.');
       } else {
+        const n = res.check?.problems.length ?? 0;
         setStatusMessage(
-          `MP4 내보내기 완료${useInOutRange ? ' (인~아웃 구간)' : ''}: ${res.outputPath}`
+          `MP4 내보내기 완료${useInOutRange ? ' (인~아웃 구간)' : ''}: ${res.outputPath}${res.check ? (n ? ` — 컷 검사 의심 ${n}곳` : ' — 컷 검사 문제 없음') : ''}`
         );
+        if (n && res.outputPath && res.check) setCheckReports([{ file: res.outputPath, check: res.check }]);
       }
     } catch (err: any) {
       setStatusMessage(`MP4 내보내기 실패: ${err.message}`);
@@ -453,6 +507,7 @@ export const TopHeader: React.FC = () => {
 
       </div>
       {showShortcuts && <ShortcutSettingsModal onClose={() => setShowShortcuts(false)} />}
+      {checkReports.length > 0 && <ExportCheckModal reports={checkReports} onClose={() => setCheckReports([])} />}
     </header>
   );
 };

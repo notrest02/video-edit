@@ -27,9 +27,11 @@ export function drawSubtitleClip(
   ctx: CanvasRenderingContext2D,
   clip: TimelineClip,
   width: number,
-  height: number
-): void {
-  if (!clip.text) return;
+  height: number,
+  /** true 면 그리지 않고 줄 나눔만 계산해 돌려줌 (미리보기 상자 크기용) */
+  layoutOnly = false
+): string[] {
+  if (!clip.text) return [];
 
   const referenceWidth = width < height ? 720 : 1280;
   const scaleRatio = Math.max(0.25, width / referenceWidth);
@@ -88,6 +90,8 @@ export function drawSubtitleClip(
     const wrapped = wrapParagraphByWord(measure, para, maxTextLineWidth);
     lines.push(...wrapped);
   }
+
+  if (layoutOnly) return lines;
 
   const lineHeight = fontSize * 1.35;
   const totalTextHeight = lines.length * lineHeight;
@@ -201,6 +205,23 @@ export function drawSubtitleClip(
   }
 
   ctx.restore();
+  return lines;
+}
+
+let layoutCtx: CanvasRenderingContext2D | null = null;
+/**
+ * 내보내기와 똑같은 계산으로 자막이 몇 줄로 어떻게 나뉘는지 돌려준다 (width x height = 시퀀스 크기).
+ * 미리보기는 이 결과를 그대로 써서, 미리보기에서 한 줄인 자막이 내보내면 두 줄이 되는 일이 없게 한다 (사용자 2026-11-11).
+ */
+export function subtitleLines(clip: TimelineClip, width: number, height: number): string[] {
+  if (!layoutCtx) layoutCtx = document.createElement('canvas').getContext('2d');
+  if (!layoutCtx) return (clip.text || '').split(/\r?\n/);
+  layoutCtx.save();
+  try {
+    return drawSubtitleClip(layoutCtx, clip, width, height, true);
+  } finally {
+    layoutCtx.restore();
+  }
 }
 
 /**

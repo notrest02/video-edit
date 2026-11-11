@@ -389,7 +389,15 @@ export const TimelinePanel: React.FC = () => {
     const applyDragAtPosition = (clientX: number, clientY: number) => {
       const scrollDiff = scroller.scrollLeft - startScrollLeft;
       const totalDeltaPx = clientX - startClientX + scrollDiff;
-      const rawDeltaSec = totalDeltaPx / useEditorStore.getState().zoomPxPerSec;
+      // 끌어 놓은 자리(시작/끝)가 프레임 눈금에 딱 맞게 → 확대했을 때 클립 사이 미세한 틈·겹침이 안 생김 (2026-11-11)
+      const toFrame = (t: number) => Math.round(t * fps) / fps;
+      const pxDeltaSec = totalDeltaPx / useEditorStore.getState().zoomPxPerSec;
+      const rawDeltaSec =
+        Math.abs(totalDeltaPx) < 0.5
+          ? 0
+          : mode === 'trim-end'
+            ? toFrame(initialStart + initialDur + pxDeltaSec) - (initialStart + initialDur)
+            : toFrame(initialStart + pxDeltaSec) - initialStart;
 
       let hoveredTrackId: string | undefined = undefined;
       if (mode === 'move') {
@@ -1095,6 +1103,17 @@ export const TimelinePanel: React.FC = () => {
                   </div>
                 ))}
 
+                {/* 프레임 눈금: 한 프레임이 6px 이상으로 확대됐을 때만 (클립 끝이 어느 프레임인지 보임) */}
+                {zoomPxPerSec / fps >= 6 && (
+                  <div
+                    className="absolute bottom-0 left-0 right-0 h-1.5 pointer-events-none"
+                    style={{
+                      backgroundImage: 'linear-gradient(to right, #666666 1px, transparent 1px)',
+                      backgroundSize: `${zoomPxPerSec / fps}px 100%`,
+                    }}
+                  />
+                )}
+
                 {/* 광고 구간 띠 (한 시퀀스에 광고 여러 개) */}
                 <AdSegmentBands zoomPxPerSec={zoomPxPerSec} />
 
@@ -1185,7 +1204,10 @@ export const TimelinePanel: React.FC = () => {
 
                       {trackClips.map((clip) => {
                         const leftPx = clip.startTime * zoomPxPerSec;
-                        const widthPx = Math.max(16, clip.duration * zoomPxPerSec);
+                        // 실제 길이 그대로 그림 (예전: 최소 16px 이라 짧은 클립이 실제보다 길게 보이고 다음 클립을 덮음 — 2026-11-11)
+                        const widthPx = Math.max(3, clip.duration * zoomPxPerSec);
+                        // 좁은 클립에서는 양끝 손잡이가 클립 전체를 덮지 않게 (가운데는 옮기기용으로 남김)
+                        const handlePx = Math.max(1, Math.min(8, widthPx / 4));
                         const isSelected =
                           clip.id === selectedClipId ||
                           selectedClipIds.includes(clip.id) ||
@@ -1229,12 +1251,13 @@ export const TimelinePanel: React.FC = () => {
                                 ? 'cursor-crosshair'
                                 : 'cursor-grab active:cursor-grabbing'
                             } ${clipStyle} ${
-                              isSelected ? 'ring-2 ring-white z-10 brightness-110' : ''
+                              isSelected ? 'ring-2 ring-inset ring-white z-10 brightness-110' : ''
                             }`}
                           >
                             <div
                               onMouseDown={(e) => handleClipMouseDown(e, clip, 'trim-start')}
-                              className="absolute left-0 top-0 bottom-0 w-2 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
+                              style={{ width: `${handlePx}px` }}
+                              className="absolute left-0 top-0 bottom-0 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
                             />
 
                             <div className="relative z-10 flex items-center justify-between gap-1 text-[11px] font-medium truncate pointer-events-none">
@@ -1302,7 +1325,8 @@ export const TimelinePanel: React.FC = () => {
 
                             <div
                               onMouseDown={(e) => handleClipMouseDown(e, clip, 'trim-end')}
-                              className="absolute right-0 top-0 bottom-0 w-2 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
+                              style={{ width: `${handlePx}px` }}
+                              className="absolute right-0 top-0 bottom-0 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
                             />
                           </div>
                         );

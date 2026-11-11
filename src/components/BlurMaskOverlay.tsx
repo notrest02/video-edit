@@ -9,6 +9,7 @@ import React, { useRef, useState } from 'react';
 import { useEditorStore } from '../store/useEditorStore';
 import type { BlurMask, MaskPoint, TimelineClip } from '../types/editor';
 import { blurPointsAt, maskPointsAt, maskSvgDataUrl } from '../utils/blurMask';
+import { effectiveMasks } from '../utils/autoMask';
 
 const key = (mi: number, k: number) => `${mi}:${k}`;
 
@@ -33,6 +34,12 @@ export const BlurMaskOverlay: React.FC<{
   const masks = clip?.blurMasks || [];
   if (!clip || masks.length === 0) return null;
   const t = currentTime - clip.startTime;
+  // 보이는 구간은 내보내기와 같은 계산 (자동 마스크: 컷 앞뒤 끝까지 늘림, 같은 자리 빈틈 잇기)
+  const shown = new Map(effectiveMasks(masks, clip.duration).map((m) => [m.id, m]));
+  const hiddenNow = (m: BlurMask) => {
+    const e = shown.get(m.id) || m;
+    return (e.from !== undefined && t < e.from) || (e.to !== undefined && t >= e.to);
+  };
   const scale = canvasWidth / Math.max(1, width); // 출력 px → 미리보기 px
   const editing = selectedClipId === clip.id;
 
@@ -142,7 +149,7 @@ export const BlurMaskOverlay: React.FC<{
       const [lx, hx, ly, hy] = [Math.min(x0, x1), Math.max(x0, x1), Math.min(y0, y1), Math.max(y0, y1)];
       const picked = new Set(additive ? sel : []);
       masks.forEach((m, mi) =>
-        ((m.from !== undefined && t < m.from) || (m.to !== undefined && t >= m.to) ? [] : maskPointsAt(m, t)).forEach(([x, y], k) => {
+        (hiddenNow(m) ? [] : maskPointsAt(m, t)).forEach(([x, y], k) => {
           if (x >= lx && x <= hx && y >= ly && y <= hy) picked.add(key(mi, k));
         })
       );
@@ -155,7 +162,7 @@ export const BlurMaskOverlay: React.FC<{
 
   return (
     <>
-      {masks.filter((m) => (m.from === undefined || t >= m.from) && (m.to === undefined || t < m.to)).map((m) => (
+      {masks.filter((m) => !hiddenNow(m)).map((m) => (
         <div
           key={m.id}
           className="absolute inset-0 z-[5] pointer-events-none"
@@ -180,7 +187,7 @@ export const BlurMaskOverlay: React.FC<{
           onPointerDown={onEmptyDown}
         >
           {masks.map((m, mi) => {
-            if ((m.from !== undefined && t < m.from) || (m.to !== undefined && t >= m.to)) return null; // 지금 안 보이는 마스크는 손잡이도 숨김
+            if (hiddenNow(m)) return null; // 지금 안 보이는 마스크는 손잡이도 숨김
             const pts = maskPointsAt(m, t);
             const r = width * 0.018;
             return (

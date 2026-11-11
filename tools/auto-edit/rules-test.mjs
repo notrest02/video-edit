@@ -246,6 +246,71 @@ test('R25', '대본 근거 장면: 문장을 찾아 지금 미디어의 장면�
   assert(r.clips[1].shot === '2-01', `둘째 컷 ${r.clips[1].shot} (근거 장면 2-01 이어야 함)`);
 });
 
+test('R27', '다른 광고와 겹침은 약하게만 피함: 코드가 겹친다는 이유로 장면을 바꾸지 않고, 지시문에 "금지 아님"이 있음', () => {
+  // 다른 광고가 1-01 의 0~3초 전부를 썼어도, AI가 1-01 을 골랐으면 그대로 1-01
+  const sl = [slot(0, 0, 2), slot(1, 2, 4)];
+  const r = A.fitAssignment(sl, [{ slot: 0, shot: '1-01', in: 0.1 }, { slot: 1, shot: '2-01', in: 0.1 }], SH, null, [['a.mp4', 0, 3]], []);
+  assert(r.clips[0].shot === '1-01', `다른 광고에서 쓴 장면이라 바뀜: ${r.clips[0].shot}`);
+  // 같은 장면 안에 안 쓴 부분이 있으면 그쪽으로 시작점 옮김 (1-02 의 3.1~4.5 를 다른 광고가 씀 → 4.5 이후)
+  const r2 = A.fitAssignment([slot(0, 0, 1.4)], [{ slot: 0, shot: '1-02', in: 3.2 }], SH, null, [['a.mp4', 3.1, 4.5]], []);
+  assert(r2.clips[0].shot === '1-02' && r2.clips[0].srcIn >= 4.5 - 0.1, `안 쓴 부분으로 안 옮김 (겹침 0.1초 넘음): in=${r2.clips[0].srcIn}`);
+  // 지시문 (다시 쓰다 빠지면 실패)
+  const src = fs.readFileSync(path.join(ROOT, 'electron/autoEditAssign.ts'), 'utf8');
+  assert(/8\. 다른 광고와 겹침 \(R27\)/.test(src) && src.includes('금지가 아니라 참고다') && src.includes('"대체"로 낮추지 않는다'), '지시문에 R27(다른 광고 겹침은 참고만) 문장이 없음');
+  assert(/used_elsewhere \(다른 광고에서 쓴 구간 — 금지 아님/.test(src), 'used_elsewhere 목록 설명이 없음');
+});
+
+test('P01', '지시문: 슬롯 항목 설명·맞는 정도 기준이 있고, 근거 장면을 무조건 "딱 맞음"으로 적게 하지 않음 (2026-11-11 1묶음)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'electron/autoEditAssign.ts'), 'utf8');
+  assert(src.includes('나레이션 슬롯의 항목:') && src.includes('sentence 그 대사가 들어 있는 문장 전체') && src.includes('next 는 바로 다음 슬롯의 대사'), '슬롯 항목(text/sentence/cont/next) 설명이 없음');
+  assert(src.includes('id 는 "영상 번호-샷 번호"'), '샷 id 설명이 없음');
+  assert(src.includes('"대체" = 1(핵심)이나 2(단계)가 안 맞음') && src.includes('"비슷함" = 1·2 는 맞고'), '맞는 정도(fit) 기준이 없음');
+  assert(!/fit 은 "딱 맞음"\./.test(src) && src.includes('basis 라고 무조건 "딱 맞음"으로 적지 않는다'), '근거 장면을 무조건 "딱 맞음"으로 적게 함');
+});
+
+test('R28', '원본의 약한 화면 전환이 컷 처음·끝 0.15초 안에 걸리지 않음 (다음 화면 1~3프레임 비침 방지)', () => {
+  // 1-01(0~3초) 안 1.95초에 약한 전환. AI가 in=1.0 으로 1초짜리 자리에 고르면 1.95~2.0초(끝 2프레임)에 다음 화면이 비침
+  const shots = [{ ...shot('1-01', 'a.mp4', 0, 3), soft: [1.95] }, shot('2-01', 'b.mp4', 0, 3)];
+  const r = A.fitAssignment([slot(0, 0, 1)], [{ slot: 0, shot: '1-01', in: 1.0 }], shots, null, [], []);
+  const c = r.clips[0];
+  const a = c.srcIn, b = c.srcIn + (c.end - c.start) * c.speed;
+  const bad = c.shot === '1-01' && ((1.95 > a && 1.95 < a + 0.15) || (1.95 > b - 0.15 && 1.95 < b));
+  assert(!bad, `약한 전환(1.95초)이 컷 ${a.toFixed(2)}~${b.toFixed(2)} 의 처음·끝에 걸림`);
+  // 약한 전환이 없으면 AI가 고른 시작점 그대로 (쓸데없이 옮기지 않음)
+  const r2 = A.fitAssignment([slot(0, 0, 1)], [{ slot: 0, shot: '1-01', in: 1.0 }], [shot('1-01', 'a.mp4', 0, 3)], null, [], []);
+  assert(Math.abs(r2.clips[0].srcIn - 1.0) < 0.06, `약한 전환이 없는데 시작점이 바뀜: ${r2.clips[0].srcIn}`);
+});
+
+// ---------- 자동 마스크 (컷 앞뒤 프레임) ----------
+const M = load('src/utils/autoMask.ts');
+const vclip = (sourceStart, duration, speed = 1) => ({ id: 'v', type: 'video', startTime: 10, duration, sourceStart, speed });
+const track = (id, text, a, b, box = [0.2, 0.7, 0.8, 0.75]) => {
+  const samples = [];
+  for (let t = a; t < b - 1e-6; t += 0.2) samples.push({ t: +t.toFixed(3), box });
+  return { id, text, conf: 0.9, hasHan: true, start: a, end: b, samples };
+};
+const SZ = { w: 1080, h: 1920 };
+
+test('R26', '자동 마스크: 컷 직전·직후 1~2프레임에도 원본 글자가 안 보인다', () => {
+  // 1) 클립(원본 2~4초) 끝 직후에 처음 잡힌 글자 → 실제론 마지막 프레임에 이미 나와 있을 수 있음 (운동화키트_01 6.57초)
+  let ms = M.tracksToMasks([track('a', '鞋子刮破了', 4.1, 6)], vclip(2, 2), SZ, SZ);
+  assert(ms.length === 1 && (ms[0].to ?? 2) >= 2 - 1e-6, `클립 끝 직후 글자를 버림/끝까지 안 가림: ${JSON.stringify(ms.map((m) => [m.from, m.to]))}`);
+  // 2) 클립 시작 0.15초 뒤에 처음 잡힌 글자 → 처음부터 가림 (23.72초)
+  ms = M.tracksToMasks([track('b', '不要扔', 2.15, 6)], vclip(2, 2), SZ, SZ);
+  assert(ms.length === 1 && (ms[0].from ?? 0) === 0, `시작 직후 글자가 처음부터 안 가려짐: from=${ms[0]?.from}`);
+  // 3) 같은 자리에서 문장만 바뀜(A → 0.4초 빈틈 → B) → 빈틈 없이 이어서
+  ms = M.tracksToMasks([track('c', '第一句话', 0, 1.0), track('d', '另外内容', 1.4, 4)], vclip(0, 4), SZ, SZ);
+  const [x, y] = [...ms].sort((p, q) => (p.from ?? 0) - (q.from ?? 0));
+  assert(ms.length === 2 && x.to >= (y.from ?? 0) - 1e-6, `같은 자리 문장 사이 빈틈: ${x?.to} ~ ${y?.from}`);
+  // 4) 예전에 만든 마스크(끝 0.05초 전에 꺼짐)도 미리보기·내보내기에선 클립 끝까지
+  const old = [{ id: 'o', points: [[0, 0], [1, 0], [1, 1], [0, 1]], blur: 30, feather: 6, from: 0.1, to: 1.95, auto: 'x' }];
+  const eff = M.effectiveMasks(old, 2)[0];
+  assert(eff.from === undefined && eff.to === undefined, `예전 마스크 끝 처리 안 됨: ${eff.from} ~ ${eff.to}`);
+  // 손으로 만든 마스크는 그대로
+  const hand = M.effectiveMasks([{ ...old[0], auto: undefined }], 2)[0];
+  assert(hand.from === 0.1 && hand.to === 1.95, '손으로 만든 마스크 구간을 바꿈');
+});
+
 // ---------- 결과 ----------
 const failed = results.filter((r) => !r.ok);
 for (const r of results) console.log(`${r.ok ? '✅' : '❌'} ${r.id} ${r.name}${r.ok ? '' : `\n     → ${r.msg}`}`);

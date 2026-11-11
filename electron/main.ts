@@ -32,6 +32,7 @@ import {
   testAndSaveElevenKey,
 } from './elevenlabsService';
 import { analyzeText, cancelTextAnalyze } from './textDetector';
+import { checkExportedVideo, type CheckResult } from './exportChecker';
 import { ffExpr, type KeyframeMap } from '../src/utils/keyframes';
 import { ModelDownloader, type ModelFileSpec, type ModelStatus } from './modelDownloader';
 import {
@@ -92,6 +93,8 @@ function createWindow() {
     minHeight: 740,
     backgroundColor: '#0f1117',
     title: 'ShortCut - 숏폼 광고 편집기 (by syeong)',
+    // 창·작업표시줄 아이콘 (서명 안 한 배포본은 실행 파일 아이콘이 기본값이라 여기서 직접 지정)
+    icon: [path.join(__dirname, '..', 'dist', 'icon.png'), path.join(__dirname, '..', 'build', 'icon.png')].find((p) => fs.existsSync(p)),
     // autoHideMenuBar 를 쓰면 Alt 키(Alt+휠 줌 등)를 뗄 때마다 메뉴바가 튀어나오므로 끄고 숨김 처리만 한다
     autoHideMenuBar: false,
     webPreferences: {
@@ -154,6 +157,8 @@ function getMimeType(filePath: string): string {
     case '.ogg': return 'audio/ogg';
     case '.m4a': return 'audio/mp4';
     case '.aac': return 'audio/aac';
+    case '.png': return 'image/png';
+    case '.jpg': return 'image/jpeg';
     default: return 'application/octet-stream';
   }
 }
@@ -1576,7 +1581,17 @@ ipcMain.handle(
         proc.on('error', reject);
       });
 
-      return { canceled: false, outputPath };
+      // 내보낸 영상 컷 검사 (비용 없음, 몇 초): 짧은 장면·마스크 풀림·1프레임 번쩍임 → 의심 자리 사진
+      let check: CheckResult | undefined;
+      try {
+        event.sender.send('editor:exportProgress', 100);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const imageDir = path.join(app.getPath('userData'), 'export-check', `${path.basename(outputPath, '.mp4')}_${stamp}`);
+        check = await checkExportedVideo(resolvedFfmpegPath, outputPath, imageDir, fps);
+      } catch (err) {
+        console.warn('[export-check] 검사 실패', err);
+      }
+      return { canceled: false, outputPath, check };
     } finally {
       fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
