@@ -268,6 +268,8 @@ export interface TimelineClip {
   positionY?: number;         // 수직 위치 5 ~ 95 (%)
   /** 세로 기준점: positionY 가 자막 상자의 위쪽 끝/가운데/아래쪽 끝 (기본 가운데). 위쪽이면 두 줄이 아래로, 아래쪽이면 위로 늘어남 */
   anchorY?: 'top' | 'center' | 'bottom';
+  /** 자막 박스 최대 폭 비율 (25 ~ 96 %, 기본 88) — 이 폭을 넘으면 어절 단위로 다음 줄로 줄바꿈 */
+  boxWidthPct?: number;
   snappedToClip?: boolean;    // 클립 경계에 스냅되었는지 표시
   needsReview?: boolean;      // 대본+파형 정렬기가 확신하지 못한 자막 (타임라인에 검토 표시)
   alignConfidence?: number;   // 0~1, 해당 구간 Whisper 텍스트와 대본 일치도

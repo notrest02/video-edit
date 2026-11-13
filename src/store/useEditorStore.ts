@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import { getSceneCuts, usableRange } from '../utils/sceneCuts';
 import {
+  extractSubtitleStyle,
+  loadSubtitleTemplates,
+  saveSubtitleTemplates,
+  type SubtitleStyleTemplate,
+} from '../utils/subtitleTemplates';
+import {
   AlignedSubtitleItem,
   AdSegment,
   AutoEditPlan,
@@ -17,7 +23,7 @@ import {
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
 import { voiceStartCaption, withSnapLead } from '../utils/snapLead';
-import { attachLooks, auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
+import { attachLooks, auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, selectMediaForSequence, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
 import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
@@ -84,10 +90,14 @@ interface EditorState {
   autoSplitOnCaptionGenerate: boolean;
   isQuickSplitMergeMode: boolean; // 프리뷰 화면에서 Enter(나누기) / Backspace(합치기) 단축키 토글 모드
   autoSyncSubtitleStyle: boolean; // 한 자막 스타일 변경 시 나머지 자막에도 즉시 동기화할지 여부
+  subtitleStyleTemplates: SubtitleStyleTemplate[];
 
   // History for Undo/Redo
   past: HistorySnapshot[];
   future: HistorySnapshot[];
+
+  // Clipboard for Copy/Paste
+  copiedClips: TimelineClip[];
 
   // Actions
   setProjectName: (name: string) => void;
@@ -119,6 +129,8 @@ interface EditorState {
   setSelectedTrackId: (trackId: string | null) => void;
   setSelectedBinItem: (item: { type: 'sequence' | 'asset'; id: string } | null) => void;
   deleteSelectedLayers: () => void;
+  copySelectedClips: () => number;
+  pasteCopiedClips: (atTime?: number) => number;
   removeAsset: (assetId: string) => void;
   duplicateSequence: (seqId: string) => void;
   setSnapEnabled: (enabled: boolean) => void;
@@ -139,10 +151,14 @@ interface EditorState {
     sourceClipId?: string,
     scope?: 'all' | 'same-track'
   ) => void;
+  saveSubtitleStyleTemplate: (name: string, sourceClipId?: string) => SubtitleStyleTemplate | null;
+  applySubtitleStyleTemplate: (templateId: string, scope?: 'selected' | 'all') => void;
+  deleteSubtitleStyleTemplate: (templateId: string) => void;
   reformatAllCaptionsLineLayout: (
     customMode?: CaptionLineMode,
     customMaxChars?: number
   ) => Promise<void>;
+  removePeriodsFromSubtitles: () => void;
   applyScriptLinesDirectly: (customScript?: string) => CaptionDiffItem[];
   splitSubtitleClipAtTextCursor: (
     clipId: string,
@@ -764,9 +780,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
     autoSplitOnCaptionGenerate: false,
     isQuickSplitMergeMode: true,
     autoSyncSubtitleStyle: false,
+    subtitleStyleTemplates: loadSubtitleTemplates(),
 
     past: [],
     future: [],
+    copiedClips: [],
 
     setProjectName: (projectName) => set({ projectName, isDirty: true }),
 
@@ -1206,6 +1224,99 @@ export const useEditorStore = create<EditorState>((set, get) => {
         set({ selectedBinItem: null });
       }
     },
+
+    copySelectedClips: () => {
+      const { selectedClipIds, selectedClipId, clips, linkedSelection } = get();
+      const targetIds =
+        selectedClipIds.length > 0
+          ? selectedClipIds
+          : selectedClipId
+          ? [selectedClipId]
+          : [];
+
+      if (targetIds.length === 0) {
+        set({ statusMessage: '복사할 클립을 먼저 선택하세요.' });
+        return 0;
+      }
+
+      const idSet = new Set(targetIds);
+      if (linkedSelection) {
+        for (const c of clips) {
+          if (idSet.has(c.id) && c.linkedGroupId) {
+            for (const p of clips) {
+              if (p.linkedGroupId === c.linkedGroupId) idSet.add(p.id);
+            }
+          }
+        }
+      }
+
+      const targets = clips
+        .filter((c) => idSet.has(c.id))
+        .sort((a, b) => a.startTime - b.startTime);
+
+      if (targets.length === 0) {
+        set({ statusMessage: '복사할 클립을 찾지 못했습니다.' });
+        return 0;
+      }
+
+      const cloned: TimelineClip[] = JSON.parse(JSON.stringify(targets));
+      set({
+        copiedClips: cloned,
+        statusMessage: `${cloned.length}개의 클립을 복사했습니다. (Ctrl+V로 현재 재생 위치에 붙여넣기)`,
+      });
+      return cloned.length;
+    },
+
+    pasteCopiedClips: (atTime) => {
+      const { copiedClips, currentTime, clips, tracks } = get();
+      if (!copiedClips || copiedClips.length === 0) {
+        set({ statusMessage: '붙여넣을 복사된 클립이 없습니다.' });
+        return 0;
+      }
+
+      const targetTime = Math.max(0, atTime ?? currentTime);
+      const minStart = Math.min(...copiedClips.map((c) => c.startTime));
+
+      pushHistory();
+
+      // 연결된 비디오/오디오 쌍은 붙여넣기 시 새 linkedGroupId로 묶음 (원본과 분리)
+      const linkMap = new Map<string, string>();
+      const makeId = (prefix: string) =>
+        `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const pastedClips: TimelineClip[] = copiedClips.map((orig) => {
+        const clone: TimelineClip = JSON.parse(JSON.stringify(orig));
+        clone.id = makeId('clip');
+        clone.startTime = Number((targetTime + (orig.startTime - minStart)).toFixed(4));
+        if (orig.linkedGroupId) {
+          let nextGroup = linkMap.get(orig.linkedGroupId);
+          if (!nextGroup) {
+            nextGroup = makeId('link');
+            linkMap.set(orig.linkedGroupId, nextGroup);
+          }
+          clone.linkedGroupId = nextGroup;
+        }
+        // 원래 트랙이 삭제됐으면 같은 타입의 첫 번째 트랙에 배치
+        if (!tracks.some((t) => t.id === clone.trackId)) {
+          const fallback = tracks.find((t) => t.type === clone.type);
+          if (fallback) clone.trackId = fallback.id;
+        }
+        return clone;
+      });
+
+      const pastedIds = new Set(pastedClips.map((c) => c.id));
+      const merged = [...clips, ...pastedClips];
+      const { clips: finalClips } = overwriteOverlappingClips(merged, pastedIds);
+
+      set({
+        clips: finalClips,
+        sequences: syncActiveSequenceData(tracks, finalClips),
+        selectedClipId: pastedClips[0]?.id || null,
+        selectedClipIds: pastedClips.map((c) => c.id),
+        statusMessage: `${pastedClips.length}개의 클립을 현재 재생 위치(${targetTime.toFixed(2)}초)에 붙여넣었습니다.`,
+      });
+      return pastedClips.length;
+    },
     setSnapEnabled: (snapEnabled) => set({ snapEnabled }),
     setLinkedSelection: (linkedSelection) => set({ linkedSelection }),
     setActiveTool: (activeTool) => set({ activeTool }),
@@ -1250,35 +1361,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         return;
       }
 
-      const stylePatch: Partial<TimelineClip> = {
-        fontFamily: sourceClip.fontFamily,
-        fontSize: sourceClip.fontSize,
-        fontWeight: sourceClip.fontWeight,
-        fontItalic: sourceClip.fontItalic,
-        letterSpacing: sourceClip.letterSpacing,
-        fontColor: sourceClip.fontColor,
-        fontOpacity: sourceClip.fontOpacity,
-        strokeEnabled: sourceClip.strokeEnabled,
-        strokeColor: sourceClip.strokeColor,
-        strokeWidth: sourceClip.strokeWidth,
-        strokeOpacity: sourceClip.strokeOpacity,
-        shadowEnabled: sourceClip.shadowEnabled,
-        shadowColor: sourceClip.shadowColor,
-        shadowOpacity: sourceClip.shadowOpacity,
-        shadowBlur: sourceClip.shadowBlur,
-        shadowOffsetX: sourceClip.shadowOffsetX,
-        shadowOffsetY: sourceClip.shadowOffsetY,
-        opacity: sourceClip.opacity,
-        backgroundEnabled: sourceClip.backgroundEnabled,
-        backgroundColor: sourceClip.backgroundColor,
-        backgroundOpacity: sourceClip.backgroundOpacity,
-        backgroundRadius: sourceClip.backgroundRadius,
-        backgroundPaddingX: sourceClip.backgroundPaddingX,
-        backgroundPaddingY: sourceClip.backgroundPaddingY,
-        positionX: sourceClip.positionX,
-        positionY: sourceClip.positionY,
-        anchorY: sourceClip.anchorY,
-      };
+      const stylePatch = extractSubtitleStyle(sourceClip);
 
       pushHistory();
       let appliedCount = 0;
@@ -1297,6 +1380,96 @@ export const useEditorStore = create<EditorState>((set, get) => {
         clips: nextClips,
         sequences: syncActiveSequenceData(tracks, nextClips),
         statusMessage: `✨ 현재 자막('${sourceClip.name}')의 스타일(폰트·외곽선·그림자·투명도·위치)이 전체 자막 ${appliedCount}개에 일괄 적용되었습니다!`,
+      });
+    },
+
+    saveSubtitleStyleTemplate: (name, sourceClipId) => {
+      const trimmed = name.trim();
+      if (!trimmed) {
+        set({ statusMessage: '저장할 글자 스타일 템플릿 이름을 입력해 주세요.' });
+        return null;
+      }
+      const { clips, selectedClipId, subtitleStyleTemplates } = get();
+      const targetId = sourceClipId || selectedClipId;
+      const sourceClip = clips.find((c) => c.id === targetId && c.type === 'text');
+      if (!sourceClip) {
+        set({ statusMessage: '스타일을 저장할 자막 클립을 먼저 선택해 주세요.' });
+        return null;
+      }
+
+      const style = extractSubtitleStyle(sourceClip);
+      const existing = subtitleStyleTemplates.find((t) => t.name === trimmed);
+      const item: SubtitleStyleTemplate = existing
+        ? { ...existing, style, createdAt: Date.now() }
+        : {
+            id: `tpl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            name: trimmed,
+            style,
+            createdAt: Date.now(),
+          };
+      const next = existing
+        ? subtitleStyleTemplates.map((t) => (t.id === existing.id ? item : t))
+        : [...subtitleStyleTemplates, item];
+
+      saveSubtitleTemplates(next);
+      set({
+        subtitleStyleTemplates: next,
+        statusMessage: `글자 스타일 템플릿 '${trimmed}'을(를) ${existing ? '덮어써서 ' : ''}저장했습니다.`,
+      });
+      return item;
+    },
+
+    applySubtitleStyleTemplate: (templateId, scope = 'selected') => {
+      const {
+        subtitleStyleTemplates,
+        clips,
+        tracks,
+        selectedClipId,
+        selectedClipIds,
+        autoSyncSubtitleStyle,
+      } = get();
+      const tpl = subtitleStyleTemplates.find((t) => t.id === templateId);
+      if (!tpl) return;
+
+      const applyAll = scope === 'all' || autoSyncSubtitleStyle;
+      const targetIds = new Set(
+        selectedClipIds.length > 0 ? selectedClipIds : selectedClipId ? [selectedClipId] : []
+      );
+      if (!applyAll && targetIds.size === 0) {
+        set({ statusMessage: '템플릿을 적용할 자막 클립을 먼저 선택해 주세요.' });
+        return;
+      }
+
+      pushHistory();
+      let appliedCount = 0;
+      const nextClips = clips.map((c) => {
+        if (c.type !== 'text') return c;
+        if (!applyAll && !targetIds.has(c.id)) return c;
+        appliedCount++;
+        return { ...c, ...tpl.style };
+      });
+
+      if (appliedCount === 0) {
+        set({ statusMessage: '선택한 클립 중 자막 클립이 없습니다.' });
+        return;
+      }
+
+      set({
+        clips: nextClips,
+        sequences: syncActiveSequenceData(tracks, nextClips),
+        statusMessage: `'${tpl.name}' 스타일 템플릿을 자막 ${appliedCount}개에 적용했습니다. (Ctrl+Z로 되돌리기 가능)`,
+      });
+    },
+
+    deleteSubtitleStyleTemplate: (templateId) => {
+      const { subtitleStyleTemplates } = get();
+      const target = subtitleStyleTemplates.find((t) => t.id === templateId);
+      if (!target) return;
+      const next = subtitleStyleTemplates.filter((t) => t.id !== templateId);
+      saveSubtitleTemplates(next);
+      set({
+        subtitleStyleTemplates: next,
+        statusMessage: `글자 스타일 템플릿 '${target.name}'을(를) 삭제했습니다.`,
       });
     },
 
@@ -1567,6 +1740,29 @@ export const useEditorStore = create<EditorState>((set, get) => {
         clips: updatedClips,
         sequences: syncActiveSequenceData(tracks, updatedClips),
         statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)`,
+      });
+    },
+
+    removePeriodsFromSubtitles: () => {
+      const { clips, tracks } = get();
+      const hasPeriod = clips.some((c) => c.type === 'text' && (c.text || '').includes('.'));
+      if (!hasPeriod) {
+        set({ statusMessage: '제거할 마침표(.)가 있는 자막이 없습니다.' });
+        return;
+      }
+
+      pushHistory();
+      let changedCount = 0;
+      const updatedClips = clips.map((c) => {
+        if (c.type !== 'text' || !(c.text || '').includes('.')) return c;
+        changedCount += 1;
+        return { ...c, text: (c.text || '').replace(/\./g, '') };
+      });
+
+      set({
+        clips: updatedClips,
+        sequences: syncActiveSequenceData(tracks, updatedClips),
+        statusMessage: `자막 ${changedCount}개에서 마침표(.)를 모두 제거했습니다. (Ctrl+Z로 되돌릴 수 있습니다)`,
       });
     },
 
@@ -1996,6 +2192,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           'positionX',
           'positionY',
           'anchorY',
+          'boxWidthPct',
         ];
 
         const sharedStylePatch: Partial<TimelineClip> = {};
@@ -3269,10 +3466,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         ...audio.map((c) => c.startTime + c.duration),
         caps[caps.length - 1].startTime + caps[caps.length - 1].duration
       );
-      const media = st.assets.filter((a) => a.type === 'video');
+      const activeSeq = st.sequences.find((s) => s.id === st.activeSequenceId);
+      const otherSeqs = st.sequences.filter((s) => s.id !== st.activeSequenceId);
+      const allVideos = st.assets.filter((a) => a.type === 'video');
+      const media = selectMediaForSequence(allVideos, activeSeq, otherSeqs, st.clips);
       if (media.length === 0) return '미디어에 원본 영상이 없습니다. 영상을 미디어에 올려 주세요.';
       // 광고 구간: 저장된 구간이 있으면 구간별로, 없으면 시퀀스 전체가 광고 1개 (UI 의 후킹 지정 사용)
-      const savedSegs = st.sequences.find((s) => s.id === st.activeSequenceId)?.adSegments || [];
+      const savedSegs = activeSeq?.adSegments || [];
       const resolveHook = (h: AdSegment['hook']) => {
         if (!h) return null;
         // 경로가 저장돼 있으면 (구간별 후킹 지정, 음성 만들기) 그 영상

@@ -154,37 +154,61 @@ export const AdSegmentBands: React.FC<{ zoomPxPerSec: number }> = ({ zoomPxPerSe
         onMouseDown={handleBandMouseDown}
         className="absolute inset-x-0 top-0 h-[22px] z-20"
       />
-      {segs.map((g, i) => (
-        <div
-          key={g.id}
-          onMouseDown={handleBandMouseDown}
-          style={{
-            left: `${g.start * zoomPxPerSec}px`,
-            width: `${Math.max(2, (g.end - g.start) * zoomPxPerSec)}px`,
-            background: `${COLORS[i % COLORS.length]}45`,
-            borderColor: COLORS[i % COLORS.length],
-          }}
-          className="absolute top-0 h-[20px] border-t-2 overflow-hidden z-30 select-none flex items-center"
-          title={`${g.name}${g.hook ? ` · 후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : ''}`}
-        >
-          <span className="px-2 text-[9px] font-semibold text-white whitespace-nowrap pointer-events-none">
-            {g.name}
-            {g.hook ? ` · 후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : ''}
-          </span>
-        </div>
-      ))}
-      {handles.map((h) => (
-        <div
-          key={h.key}
-          onMouseDown={(e) => startDrag(e, h.target)}
-          style={{ left: `${h.time * zoomPxPerSec - 14}px` }}
-          className="group absolute top-0 h-[22px] w-7 cursor-ew-resize z-40 flex items-center justify-center"
-          title={h.label}
-        >
-          <div className="w-[2px] h-full bg-white group-hover:bg-[#ffdf5d] shadow-[0_0_4px_rgba(0,0,0,0.8)]" />
-          <div className="absolute top-[2px] w-2.5 h-3.5 rounded-xs bg-white group-hover:bg-[#ffdf5d] border border-black/40 shadow-sm" />
-        </div>
-      ))}
+      {segs.map((g, i) => {
+        const leftPx = g.start * zoomPxPerSec;
+        const rawWidthPx = Math.max(0, (g.end - g.start) * zoomPxPerSec);
+        const next = segs[i + 1];
+        const maxWidthPx = next ? Math.max(0, next.start * zoomPxPerSec - leftPx) : Infinity;
+        const widthPx = next ? Math.min(rawWidthPx, maxWidthPx) : Math.max(2, rawWidthPx);
+        return (
+          <div
+            key={g.id}
+            onMouseDown={handleBandMouseDown}
+            style={{
+              left: `${leftPx}px`,
+              width: `${widthPx}px`,
+              background: `${COLORS[i % COLORS.length]}45`,
+              borderColor: COLORS[i % COLORS.length],
+            }}
+            className="absolute top-0 h-[20px] border-t-2 overflow-hidden z-30 select-none flex items-center"
+            title={`${g.name}${g.hook ? ` · 후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : ''}`}
+          >
+            <span className="px-2 text-[9px] font-semibold text-white whitespace-nowrap pointer-events-none">
+              {g.name}
+              {g.hook ? ` · 후킹 ${g.hook.fileNo}번 ${g.hook.from}~${g.hook.to}초` : ''}
+            </span>
+          </div>
+        );
+      })}
+      {handles.map((h, idx) => {
+        const prevDistPx = idx > 0 ? (h.time - handles[idx - 1].time) * zoomPxPerSec : Infinity;
+        const nextDistPx = idx + 1 < handles.length ? (handles[idx + 1].time - h.time) * zoomPxPerSec : Infinity;
+        const minNeighborPx = Math.min(prevDistPx, nextDistPx);
+        const hitWidthPx = Math.max(4, Math.min(28, minNeighborPx * 0.6));
+        const showGrip = minNeighborPx >= 12;
+        const narrowGrip = minNeighborPx < 24;
+        return (
+          <div
+            key={h.key}
+            onMouseDown={(e) => startDrag(e, h.target)}
+            style={{
+              left: `${h.time * zoomPxPerSec - hitWidthPx / 2}px`,
+              width: `${hitWidthPx}px`,
+            }}
+            className="group absolute top-0 h-[22px] cursor-ew-resize z-40 flex items-center justify-center"
+            title={h.label}
+          >
+            <div
+              className={`${minNeighborPx < 14 ? 'w-[1px]' : 'w-[2px]'} h-full bg-white group-hover:bg-[#ffdf5d] shadow-[0_0_4px_rgba(0,0,0,0.8)]`}
+            />
+            {showGrip && (
+              <div
+                className={`absolute top-[2px] ${narrowGrip ? 'w-1.5' : 'w-2.5'} h-3.5 rounded-xs bg-white group-hover:bg-[#ffdf5d] border border-black/40 shadow-sm`}
+              />
+            )}
+          </div>
+        );
+      })}
     </>
   );
 };

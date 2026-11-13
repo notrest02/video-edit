@@ -844,3 +844,74 @@ export function usedRangesFromClips(
   }
   return { ranges, byShot };
 }
+
+/**
+ * 프로젝트 보관함에 파일명(basename)은 같지만 경로가 다른 원본 영상이 여러 개 있을 때,
+ * 다른 시퀀스에서 이미 쓴 원본이 현재 시퀀스 자동 배치에 섞이지 않도록 현재 시퀀스용 원본 목록을 추린다.
+ */
+export function selectMediaForSequence<T extends { path: string; type?: string }>(
+  assets: T[],
+  activeSequence: { clips?: Array<{ type?: string; sourcePath?: string }>; adSegments?: Array<{ hook?: { path?: string } | null }> } | undefined,
+  otherSequences: Array<{ clips?: Array<{ type?: string; sourcePath?: string }>; adSegments?: Array<{ hook?: { path?: string } | null }> }>,
+  activeClipsOverride?: Array<{ type?: string; sourcePath?: string }>
+): T[] {
+  const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+  const baseName = (p: string) => norm(p).split('/').pop() || norm(p);
+  const dirName = (p: string) => {
+    const n = norm(p);
+    const idx = n.lastIndexOf('/');
+    return idx >= 0 ? n.slice(0, idx) : '';
+  };
+
+  const collectPaths = (
+    clips?: Array<{ type?: string; sourcePath?: string }>,
+    segs?: Array<{ hook?: { path?: string } | null }>
+  ) => {
+    const set = new Set<string>();
+    for (const c of clips || []) {
+      if (c.sourcePath) set.add(norm(c.sourcePath));
+    }
+    for (const g of segs || []) {
+      if (g.hook?.path) set.add(norm(g.hook.path));
+    }
+    return set;
+  };
+
+  const activePaths = collectPaths(activeClipsOverride ?? activeSequence?.clips, activeSequence?.adSegments);
+  const activeDirs = new Set([...activePaths].map(dirName).filter(Boolean));
+  const otherPaths = new Set<string>();
+  for (const s of otherSequences) {
+    for (const p of collectPaths(s.clips, s.adSegments)) otherPaths.add(p);
+  }
+
+  const byBase = new Map<string, T[]>();
+  for (const a of assets) {
+    const b = baseName(a.path);
+    const arr = byBase.get(b) || [];
+    arr.push(a);
+    byBase.set(b, arr);
+  }
+
+  const picked = new Set<T>();
+  for (const group of byBase.values()) {
+    if (group.length <= 1) {
+      if (group[0]) picked.add(group[0]);
+      continue;
+    }
+    // 1순위: 현재 시퀀스에 이미 연결된 경로(클립·후킹)
+    const inActive = group.filter((a) => activePaths.has(norm(a.path)));
+    if (inActive.length > 0) {
+      for (const a of inActive) picked.add(a);
+      continue;
+    }
+    // 2순위: 다른 시퀀스에서 이미 쓴 경로는 제외
+    const notInOther = group.filter((a) => !otherPaths.has(norm(a.path)));
+    const pool = notInOther.length > 0 ? notInOther : group;
+    // 3순위: 현재 시퀀스 폴더와 같은 폴더 우선
+    const sameDir = activeDirs.size > 0 ? pool.filter((a) => activeDirs.has(dirName(a.path))) : [];
+    const chosen = sameDir.length > 0 ? sameDir : pool;
+    for (const a of chosen) picked.add(a);
+  }
+
+  return assets.filter((a) => picked.has(a));
+}

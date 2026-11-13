@@ -455,6 +455,15 @@ export async function analyzeMedia(
   const looks: Record<string, string> = {};
   const usage: UsageTotal = { input: 0, output: 0 };
   const entries: Array<{ cachePath: string; cache: FileCache }> = [];
+  const baseCounts = new Map<string, number>();
+  for (const m of media) {
+    const b = path.basename(m.path).toLowerCase();
+    baseCounts.set(b, (baseCounts.get(b) || 0) + 1);
+  }
+  const displayFile = (p: string) => {
+    const b = path.basename(p);
+    return (baseCounts.get(b.toLowerCase()) || 0) > 1 ? `${path.basename(path.dirname(p))}/${b}` : b;
+  };
   const seen = new Set<string>();
   for (let i = 0; i < media.length; i++) {
     const m = media[i];
@@ -537,9 +546,10 @@ export async function analyzeMedia(
     // 이번 미디어 목록 순서로 id 다시 매김 (캐시엔 'x-NN' 형태로 저장)
     const renum = (id: string) => id.replace(/^[^-]+-/, `${prefix}-`);
     const soft = cache.soft || [];
+    const fileLabel = displayFile(m.path);
     cache.shots = cache.shots.map((s) => {
       const inShot = soft.filter((t) => t > s.start && t < s.end);
-      return { ...s, id: renum(s.id), path: m.path, ...(inShot.length ? { soft: inShot } : {}) };
+      return { ...s, id: renum(s.id), path: m.path, file: fileLabel, ...(inShot.length ? { soft: inShot } : {}) };
     });
     if (cache.descs) cache.descs = cache.descs.map((d) => ({ ...d, id: renum(d.id) }));
     entries.push({ cachePath, cache });
@@ -553,7 +563,7 @@ export async function analyzeMedia(
     const res = await claudeJson<{ shots: ShotDesc[] }>({
       system: DESC_SYSTEM,
       text: DESC_TEXT(product, shots),
-      images: todo.map((e) => ({ label: `썸네일 시트: ${e.cache.shots[0]?.id.split('-')[0]}번 파일 ${path.basename(e.cache.path)}`, path: e.cache.sheet })),
+      images: todo.map((e) => ({ label: `썸네일 시트: ${e.cache.shots[0]?.id.split('-')[0]}번 파일 ${displayFile(e.cache.path)}`, path: e.cache.sheet })),
       schema: DESC_SCHEMA,
     });
     usage.input += res.usage.input;

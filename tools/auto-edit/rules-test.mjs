@@ -394,26 +394,35 @@ test('R29', '컷은 자막이 바뀌기 3프레임 앞에서 (컷 자리 = 자�
   }
 });
 
-test('R36', '손으로 클립을 늘릴 때 원본 장면이 바뀌는 곳에서 멈춤 + 미디어에서 넣을 때 제목 카드 건너뜀', () => {
+test('R36', '미디어에서 넣을 때 제목 카드 건너뜀 + 손으로 늘릴 때 Alt 없이 원본 끝/이웃 클립 경계까지 자유롭게 늘림', () => {
   const SC = load('src/utils/sceneCuts.ts');
-  // 운동화키트 02 마지막 클립: 원본 21.56초부터, 장면은 25.13초에 바뀜 → 끝을 늘려도 25.07초(경계 0.06초 안쪽)까지만
+  const TB = load('src/utils/trimBounds.ts');
   const cuts = { shots: [[0.11, 4.03], [4.13, 25.09], [25.17, 36.6]], intro: 0.11, outro: 36.6 };
-  const maxDur = SC.maxDurationInShot(cuts, 21.56, 1, 2.0);
-  assert(Math.abs(21.56 + maxDur - (25.09 - SC.CUT_EDGE)) < 1e-6, `늘릴 수 있는 끝 ${(21.56 + maxDur).toFixed(2)}초 (25.03초여야 함)`);
-  // 이미 경계를 넘은 클립은 줄이기는 자유 (지금 길이보다 작게 제한하지 않음)
-  assert(SC.maxDurationInShot(cuts, 21.56, 1, 3.64) === 3.64, '이미 넘은 클립의 길이를 강제로 줄임');
-  // 느리게 재생하는 클립은 속도만큼 길게 늘릴 수 있음
-  assert(Math.abs(SC.maxDurationInShot(cuts, 21.56, 0.5, 1) - (25.03 - 21.56) / 0.5) < 1e-6, '속도를 반영하지 않음');
-  // 앞을 늘릴 때: 장면 시작(4.13) 안쪽까지만
-  assert(Math.abs(SC.minSourceStartInShot(cuts, 5, 7) - (4.13 + SC.CUT_EDGE)) < 1e-6, '앞 늘리기 한계가 장면 시작이 아님');
+
   // 미디어에서 넣을 때 앞 표지 0.11초 건너뜀 / 장면 구간을 아직 모르면 통째로
   const [a, b] = SC.usableRange(cuts, 36.6);
   assert(a === 0.11 && b === 36.6, `넣는 구간 ${a}~${b}`);
   const [a2] = SC.usableRange(undefined, 36.6);
   assert(a2 === 0, '장면 구간이 없는데 앞을 자름');
-  // 타임라인이 실제로 이 계산을 씀 (빠지면 실패)
+
+  // 손으로 늘릴 때: 원본 0초~assetDuration 안에서 자유롭게(장면 경계 멈춤 없음), 이웃 클립이 있으면 거기까지만
+  const clip = { id: 'c2', type: 'video', trackId: 'V1', startTime: 5, duration: 3, sourceStart: 4, speed: 1 };
+  const neighbors = [
+    { id: 'c1', trackId: 'V1', startTime: 0, duration: 2 },   // 2초에 끝남 → 앞 늘리기 최소 -3초 (startTime=2)
+    clip,
+    { id: 'c3', trackId: 'V1', startTime: 10, duration: 2 },  // 10초에 시작 → 뒤 늘리기 최대 5초 (end=10)
+  ];
+  const b1 = TB.computeTrimBounds(clip, neighbors, 20);
+  assert(Math.abs(b1.minStartDelta - -3) < 1e-6, `앞 클립 경계 제한 ${b1.minStartDelta}`);
+  assert(Math.abs(b1.maxDuration - 5) < 1e-6, `뒤 클립 경계 제한 ${b1.maxDuration}`);
+
+  // 이웃 클립이 없으면 원본 0초~원본 끝(20초)까지 (배속 0.5배면 타임라인 길이 2배)
+  const b2 = TB.computeTrimBounds({ ...clip, speed: 0.5 }, [clip], 20);
+  assert(Math.abs(b2.minStartDelta - -5) < 1e-6, `앞 타임라인 0초 제한 ${b2.minStartDelta}`);
+  assert(Math.abs(b2.maxDuration - 32) < 1e-6, `원본 끝 상한(0.5배) ${b2.maxDuration}`);
+
   const tl = fs.readFileSync(path.join(ROOT, 'src/components/TimelinePanel.tsx'), 'utf8');
-  assert(tl.includes('maxDurationInShot(cutsForClip') && tl.includes('minSourceStartInShot(cutsForClip') && tl.includes('altHeld'), '타임라인 끌기에 장면 경계 멈춤이 빠짐');
+  assert(tl.includes('computeTrimBounds('), '타임라인 끌기에 computeTrimBounds 가 빠짐');
   const st = fs.readFileSync(path.join(ROOT, 'src/store/useEditorStore.ts'), 'utf8');
   assert(st.includes('usableRange(getSceneCuts(asset.path)'), '미디어에서 넣을 때 제목 카드 건너뛰기가 빠짐');
 });

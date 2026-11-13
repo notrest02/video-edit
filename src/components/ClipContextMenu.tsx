@@ -17,6 +17,7 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
   onClose,
 }) => {
   const clip = useEditorStore((st) => st.clips.find((c) => c.id === clipId));
+  const hasCopied = useEditorStore((s) => s.copiedClips.length > 0);
   const ref = useRef<HTMLDivElement | null>(null);
   const [speedInput, setSpeedInput] = useState('');
   const [lenInput, setLenInput] = useState('');
@@ -63,7 +64,7 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
 
   // 화면 밖으로 나가지 않게 위치 보정
   const W = 250;
-  const H = isText ? 60 : 380;
+  const H = isText ? 120 : 440;
   const left = Math.min(x, window.innerWidth - W - 8);
   const top = Math.min(y, window.innerHeight - H - 8);
 
@@ -174,6 +175,26 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
           <div className="h-px bg-[#3a3a3a] my-1" />
         </>
       )}
+      <button
+        onClick={() => run(() => st.copySelectedClips())}
+        className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+      >
+        <span>클립 복사</span>
+        <span className="text-[#888888]">
+          {getShortcutMap().copyClips.map(displayBinding).join(' / ')}
+        </span>
+      </button>
+      <button
+        onClick={() => run(() => st.pasteCopiedClips())}
+        disabled={!hasCopied}
+        className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white disabled:opacity-40 disabled:pointer-events-none flex justify-between"
+      >
+        <span>현재 재생 위치에 붙여넣기</span>
+        <span className="text-[#888888]">
+          {getShortcutMap().pasteClips.map(displayBinding).join(' / ')}
+        </span>
+      </button>
+      <div className="h-px bg-[#3a3a3a] my-1" />
       <button
         onClick={() => run(() => st.splitClipAtPlayhead())}
         className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"

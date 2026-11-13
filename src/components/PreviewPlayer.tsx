@@ -62,7 +62,36 @@ export const PreviewPlayer: React.FC = () => {
   const videoBRef = useRef<HTMLVideoElement | null>(null);
   const frontIdxRef = useRef(0);
   const [frontIdx, setFrontIdx] = useState(0);
+  const holdingIdxRef = useRef<number | null>(null);
+  const [holdingIdx, setHoldingIdx] = useState<number | null>(null);
+  const freezeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const freezeActiveRef = useRef(false);
+  const [freezeActive, setFreezeActive] = useState(false);
+  const isPlayingRef = useRef(false);
+  const frontReadyRef = useRef(false);
+  const [frontReady, setFrontReady] = useState(false);
   const preparedRef = useRef<{ idx: number; clipId: string } | null>(null);
+  const pendingMetaSeekRef = useRef(new WeakMap<HTMLMediaElement, () => void>());
+
+  /** src 변경 직후 readyState === 0 일 때 currentTime 대입이 무시되는 것을 방지 */
+  const seekVideoWhenReady = (el: HTMLMediaElement, targetSec: number) => {
+    const t = Math.max(0, targetSec);
+    const prev = pendingMetaSeekRef.current.get(el);
+    if (prev) {
+      el.removeEventListener('loadedmetadata', prev);
+      pendingMetaSeekRef.current.delete(el);
+    }
+    if (el.readyState >= 1) {
+      el.currentTime = t;
+      return;
+    }
+    const onMeta = () => {
+      pendingMetaSeekRef.current.delete(el);
+      el.currentTime = t;
+    };
+    pendingMetaSeekRef.current.set(el, onMeta);
+    el.addEventListener('loadedmetadata', onMeta, { once: true });
+  };
   const motionRef = useRef<{ transform: string; opacity: number; px: number; py: number; rot: number; sc: number }>({
     transform: 'none',
     opacity: 1,
@@ -85,6 +114,7 @@ export const PreviewPlayer: React.FC = () => {
   const lastVideoSeekWallRef = useRef<number>(0);
   const lastAudioSeekWallRef = useRef<number>(0);
   const [canvasWidth, setCanvasWidth] = useState<number>(360);
+  const [boxWidthDrag, setBoxWidthDrag] = useState<{ clipId: string; pct: number } | null>(null);
   // 화면 위 자막 도구 막대: 화면을 가려서 접었다 펼 수 있게 (마지막 상태 기억)
   const [subBarOpen, setSubBarOpen] = useState<boolean>(() => {
     try {
@@ -120,6 +150,59 @@ export const PreviewPlayer: React.FC = () => {
     pendingRef.current = null;
     el.currentTime = t;
   };
+  // 컷 전환 직전 프레임을 캔버스에 1장 고정해 두어 <video> 디코딩/레이어 전환 중 검은 깜빡임 원천 차단
+  const captureFreezeFrame = (video: HTMLVideoElement | null | undefined) => {
+    const canvas = freezeCanvasRef.current;
+    if (!canvas || !video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) {
+      return false;
+    }
+    if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+    if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      freezeActiveRef.current = true;
+      setFreezeActive(true);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // 새 front <video>가 실제 프레임을 화면에 그린 뒤에만 직전 프레임(holdingIdx + freezeCanvas)을 내린다
+  const releaseHoldingOnFrame = (
+    el: HTMLMediaElement,
+    expectedFrontIdx: number,
+    expectedHeldIdx: number
+  ) => {
+    const finish = () => {
+      if (frontIdxRef.current !== expectedFrontIdx) return;
+      if (holdingIdxRef.current !== expectedHeldIdx) return;
+      const held = videoEls()[expectedHeldIdx];
+      if (held && held !== el && !held.paused) held.pause();
+      holdingIdxRef.current = null;
+      setHoldingIdx(null);
+      if (freezeActiveRef.current) {
+        freezeActiveRef.current = false;
+        setFreezeActive(false);
+      }
+    };
+    const rVfc = (
+      el as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number }
+    ).requestVideoFrameCallback;
+    if (isPlayingRef.current && typeof rVfc === 'function') {
+      let done = false;
+      const safeFinish = () => {
+        if (done) return;
+        done = true;
+        finish();
+      };
+      rVfc.call(el, () => requestAnimationFrame(safeFinish));
+      window.setTimeout(safeFinish, 250);
+    } else {
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    }
+  };
   useEffect(() => {
     const pairs: Array<[HTMLMediaElement | null, React.MutableRefObject<number | null>]> = [
       [videoARef.current, pendingVideoSeekRef],
@@ -131,12 +214,31 @@ export const PreviewPlayer: React.FC = () => {
       if (!el) continue;
       const onSeeked = () => {
         const next = ref.current;
-        if (next === null) return;
-        ref.current = null;
-        if (Math.abs(el.currentTime - next) > 0.001) el.currentTime = next;
+        if (next !== null) {
+          ref.current = null;
+          if (Math.abs(el.currentTime - next) > 0.001) {
+            el.currentTime = next;
+            return;
+          }
+        }
+        if (el === videoEls()[frontIdxRef.current] && el.readyState >= 2 && !el.seeking) {
+          if (!frontReadyRef.current) {
+            frontReadyRef.current = true;
+            setFrontReady(true);
+          }
+          if (holdingIdxRef.current !== null) {
+            releaseHoldingOnFrame(el, frontIdxRef.current, holdingIdxRef.current);
+          }
+        }
       };
       el.addEventListener('seeked', onSeeked);
-      cleanups.push(() => el.removeEventListener('seeked', onSeeked));
+      el.addEventListener('loadeddata', onSeeked);
+      el.addEventListener('canplay', onSeeked);
+      cleanups.push(() => {
+        el.removeEventListener('seeked', onSeeked);
+        el.removeEventListener('loadeddata', onSeeked);
+        el.removeEventListener('canplay', onSeeked);
+      });
     }
     return () => cleanups.forEach((fn) => fn());
   }, []);
@@ -231,6 +333,7 @@ export const PreviewPlayer: React.FC = () => {
     getTotalDuration,
     previewProxyMap,
   } = useEditorStore();
+  isPlayingRef.current = isPlaying;
 
   const totalDuration = getTotalDuration();
 
@@ -356,6 +459,48 @@ export const PreviewPlayer: React.FC = () => {
     }
   };
 
+  const startBoxWidthDrag = (
+    e: React.MouseEvent<HTMLDivElement>,
+    sub: TimelineClip,
+    side: 'left' | 'right'
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedClipId(sub.id);
+    setIsPlaying(false);
+
+    const startX = e.clientX;
+    const boxEl = e.currentTarget.parentElement;
+    const zoom = Math.max(0.25, viewStateRef.current.zoom || 1);
+    const actualWidthPx = boxEl ? boxEl.getBoundingClientRect().width / zoom : canvasWidth * 0.88;
+    const actualPct = Math.max(25, (actualWidthPx / Math.max(100, canvasWidth)) * 100);
+    const currentSettingPct = sub.boxWidthPct ?? 88;
+    const startPct = Math.min(currentSettingPct, Math.ceil(actualPct + 1));
+    let recorded = false;
+
+    const onMove = (ev: MouseEvent) => {
+      const dx = (ev.clientX - startX) / zoom;
+      const signedDx = side === 'right' ? dx : -dx;
+      // 가운데 정렬 자막이므로 한쪽 끝을 dx만큼 끌면 전체 폭은 2*dx만큼 대칭으로 변함
+      const deltaPct = ((signedDx * 2) / Math.max(100, canvasWidth)) * 100;
+      const nextPct = Math.round(Math.max(25, startPct + deltaPct));
+      if (!recorded) {
+        recorded = true;
+        useEditorStore.getState().recordHistorySnapshot();
+      }
+      setBoxWidthDrag({ clipId: sub.id, pct: nextPct });
+      updateClip(sub.id, { boxWidthPct: nextPct });
+    };
+
+    const onUp = () => {
+      setBoxWidthDrag(null);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   // 시퀀스 캔버스 실제 렌더링 폭 감지 (9:16 세로형 시퀀스에서도 한 줄/두 줄이 절대 세로로 꺾이지 않도록 폭 계산)
   useEffect(() => {
     const el = canvasContainerRef.current;
@@ -451,24 +596,76 @@ export const PreviewPlayer: React.FC = () => {
     if (!activeVideoClip || !activeVideoClip.sourcePath) {
       videoEls().forEach((el) => el && !el.paused && el.pause());
       lastVideoClipIdRef.current = null;
+      if (holdingIdxRef.current !== null) {
+        holdingIdxRef.current = null;
+        setHoldingIdx(null);
+      }
+      if (freezeActiveRef.current) {
+        freezeActiveRef.current = false;
+        setFreezeActive(false);
+      }
+      if (frontReadyRef.current) {
+        frontReadyRef.current = false;
+        setFrontReady(false);
+      }
       return;
     }
 
+    const previewPath = previewProxyMap[activeVideoClip.sourcePath] || activeVideoClip.sourcePath;
+    const mediaUrl = `media://local?path=${encodeURIComponent(previewPath)}`;
+    const targetMediaTime =
+      activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime) * clipSpeed(activeVideoClip);
+
     if (preparedRef.current && preparedRef.current.idx === frontIdxRef.current) preparedRef.current = null;
-    // 다음 클립으로 넘어왔고 뒤쪽 <video> 에 미리 준비돼 있으면 그쪽을 바로 앞으로 (검은 화면 없이 전환)
-    if (lastVideoClipIdRef.current !== activeVideoClip.id && preparedRef.current?.clipId === activeVideoClip.id) {
-      const prevFront = videoRef.current;
-      frontIdxRef.current = preparedRef.current.idx;
-      preparedRef.current = null;
-      setFrontIdx(frontIdxRef.current);
-      if (prevFront && !prevFront.paused) prevFront.pause();
+    // 다음 클립으로 넘어왔을 때:
+    //  1) 뒤쪽 <video> 에 미리 준비돼 있으면 그쪽을 앞으로
+    //  2) 준비되지 않은 컷 전환이어도, 현재 화면에 프레임이 있으면 뒤쪽 <video> 에서 먼저 불러와 새 프레임이 뜰 때까지 기존 프레임을 유지 (검은 화면 깜빡임 제거)
+    if (lastVideoClipIdRef.current !== activeVideoClip.id) {
+      const prevIdx = frontIdxRef.current;
+      const prevFront = videoEls()[prevIdx];
+      if (prevFront && prevFront.readyState >= 2) {
+        captureFreezeFrame(prevFront);
+      }
+      if (preparedRef.current?.clipId === activeVideoClip.id) {
+        const nextIdx = preparedRef.current.idx;
+        const nextEl = videoEls()[nextIdx];
+        frontIdxRef.current = nextIdx;
+        preparedRef.current = null;
+        setFrontIdx(nextIdx);
+        const readyNow = Boolean(
+          nextEl &&
+          nextEl.dataset.srcPath === previewPath &&
+          nextEl.readyState >= 2 &&
+          !nextEl.seeking &&
+          Math.abs(nextEl.currentTime - targetMediaTime) <= 0.08
+        );
+        if (readyNow && nextEl) {
+          frontReadyRef.current = true;
+          setFrontReady(true);
+          holdingIdxRef.current = prevIdx;
+          setHoldingIdx(prevIdx);
+          releaseHoldingOnFrame(nextEl, nextIdx, prevIdx);
+        } else {
+          frontReadyRef.current = false;
+          setFrontReady(false);
+          holdingIdxRef.current = prevIdx;
+          setHoldingIdx(prevIdx);
+        }
+      } else if (prevFront && prevFront.readyState >= 2) {
+        const nextIdx = 1 - prevIdx;
+        frontIdxRef.current = nextIdx;
+        preparedRef.current = null;
+        setFrontIdx(nextIdx);
+        frontReadyRef.current = false;
+        setFrontReady(false);
+        holdingIdxRef.current = prevIdx;
+        setHoldingIdx(prevIdx);
+      }
     }
+
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
-    // 미리보기용 프록시가 준비돼 있으면 그것을 사용 (렌더는 항상 원본)
-    const previewPath = previewProxyMap[activeVideoClip.sourcePath] || activeVideoClip.sourcePath;
-    const mediaUrl = `media://local?path=${encodeURIComponent(previewPath)}`;
     const isNewSrc = videoEl.dataset.srcPath !== previewPath;
     if (isNewSrc) {
       videoEl.dataset.srcPath = previewPath;
@@ -476,9 +673,6 @@ export const PreviewPlayer: React.FC = () => {
       lastVideoClipIdRef.current = null;
       pendingVideoSeekRef.current = null;
     }
-
-    const targetMediaTime =
-      activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime) * clipSpeed(activeVideoClip);
     // 속도 조절된 클립은 그 속도로 재생.
     // 재생 중엔 영상이 목소리 시계보다 늦거나 빠르면 속도를 살짝(최대 ±10%) 바꿔 1프레임 안으로 따라붙게 함
     //  (예전엔 0.6초 넘게 어긋나야 다시 맞춰서, 컷·마스크가 영상 그림과 몇 프레임씩 엇갈렸음 — 2026-11-11)
@@ -510,7 +704,16 @@ export const PreviewPlayer: React.FC = () => {
     if (isClipChanged) {
       pendingVideoSeekRef.current = null;
       // 미리 맞춰 둔 위치와 거의 같으면 다시 찾지 않음 (다시 찾는 동안 화면이 멈추거나 비지 않게)
-      if (timeDiff > 0.05) videoEl.currentTime = Math.max(0, targetMediaTime);
+      if (isNewSrc || timeDiff > 0.05) seekVideoWhenReady(videoEl, targetMediaTime);
+      if (videoEl.readyState >= 2 && !videoEl.seeking && !isNewSrc && timeDiff <= 0.08) {
+        if (!frontReadyRef.current) {
+          frontReadyRef.current = true;
+          setFrontReady(true);
+        }
+        if (holdingIdxRef.current !== null) {
+          releaseHoldingOnFrame(videoEl, frontIdxRef.current, holdingIdxRef.current);
+        }
+      }
       lastVideoClipIdRef.current = activeVideoClip.id;
       lastVideoSeekWallRef.current = now;
     } else if (!isPlaying && timeDiff > 0.02) {
@@ -536,6 +739,8 @@ export const PreviewPlayer: React.FC = () => {
 
   // 다음 영상 클립 미리 준비: 1.5초 안에 시작하는 다음 클립을 뒤쪽 <video> 에 불러와 첫 프레임에 맞춰 둠
   useEffect(() => {
+    // 앞쪽 전환이 아직 완료되지 않아 뒤쪽이 직전 프레임을 잡고 있는 동안에는 덮어쓰지 않음
+    if (holdingIdxRef.current !== null) return;
     const back = videoEls()[1 - frontIdxRef.current];
     if (!back) return;
     if (preparedRef.current && preparedRef.current.idx === frontIdxRef.current) preparedRef.current = null;
@@ -548,8 +753,8 @@ export const PreviewPlayer: React.FC = () => {
       if (!next || c.startTime < next.startTime) next = c;
     }
     if (!next) return;
-    if (preparedRef.current?.clipId === next.id && back.dataset.srcPath) return;
     const previewPath = previewProxyMap[next.sourcePath!] || next.sourcePath!;
+    if (preparedRef.current?.clipId === next.id && back.dataset.srcPath === previewPath) return;
     if (back.dataset.srcPath !== previewPath) {
       back.dataset.srcPath = previewPath;
       back.src = `media://local?path=${encodeURIComponent(previewPath)}`;
@@ -557,7 +762,7 @@ export const PreviewPlayer: React.FC = () => {
     if (!back.paused) back.pause();
     back.muted = true;
     back.playbackRate = clipSpeed(next);
-    back.currentTime = Math.max(0, next.sourceStart);
+    seekVideoWhenReady(back, next.sourceStart);
     preparedRef.current = { idx: 1 - frontIdxRef.current, clipId: next.id };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeVideoClip, currentTime, clips, previewProxyMap]);
@@ -790,22 +995,46 @@ export const PreviewPlayer: React.FC = () => {
             };
             return null;
           })()}
-          {[videoARef, videoBRef].map((ref, idx) => (
-            <video
-              key={idx}
-              ref={ref}
-              preload="auto"
-              style={{
-                transform: motionRef.current.transform,
-                // 안 보이는 쪽도 그려 둬야(투명) 앞으로 올 때 첫 프레임이 바로 보임
-                opacity: activeVideoClip && idx === frontIdx ? motionRef.current.opacity : 0,
-              }}
-              className={`absolute inset-0 w-full h-full transition-transform duration-75 ${
-                sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
-              }`}
-              playsInline
-            />
-          ))}
+          <canvas
+            ref={freezeCanvasRef}
+            style={{
+              transform: motionRef.current.transform,
+              zIndex: 3,
+              opacity: activeVideoClip && freezeActive ? motionRef.current.opacity : 0,
+            }}
+            className={`absolute inset-0 w-full h-full pointer-events-none ${
+              sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
+            }`}
+          />
+          {[videoARef, videoBRef].map((ref, idx) => {
+            const isFront = Boolean(activeVideoClip) && idx === frontIdx;
+            const isHolding = Boolean(activeVideoClip) && idx === holdingIdx;
+            const showOpacity =
+              isFront && (frontReady || holdingIdx === null)
+                ? motionRef.current.opacity
+                : isHolding
+                  ? motionRef.current.opacity
+                  : activeVideoClip
+                    ? 0.001
+                    : 0;
+            return (
+              <video
+                key={idx}
+                ref={ref}
+                preload="auto"
+                style={{
+                  transform: motionRef.current.transform,
+                  zIndex: isFront ? 2 : isHolding ? 1 : 0,
+                  // 새 컷이 첫 프레임을 디코딩하는 동안 직전 프레임(holdingIdx)을 유지해 검은 화면 깜빡임 제거
+                  opacity: showOpacity,
+                }}
+                className={`absolute inset-0 w-full h-full transition-transform duration-75 ${
+                  sequence.fitMode === 'cover' ? 'object-cover' : 'object-contain'
+                }`}
+                playsInline
+              />
+            );
+          })}
           <audio ref={audioRef} preload="auto" />
           {activeAudioClips
             .filter((c) => c.id !== activeAudioClip?.id)
@@ -853,7 +1082,8 @@ export const PreviewPlayer: React.FC = () => {
               10,
               Math.round((sub.fontSize || 40) * scaleRatio * 10) / 10
             );
-            const maxBoxWidthPx = Math.max(120, Math.floor(canvasWidth * 0.88));
+            const boxPct = Math.max(25, sub.boxWidthPct ?? 88);
+            const maxBoxWidthPx = Math.max(80, Math.floor(canvasWidth * (boxPct / 100)));
 
             // 글자 색상 + 글자 불투명도
             const resolvedFontColor = hexToRgba(
@@ -921,7 +1151,8 @@ export const PreviewPlayer: React.FC = () => {
                     setSelectedClipId(sub.id);
                     setIsPlaying(false);
                   }}
-                  className={`pointer-events-auto cursor-text px-1 py-0.5 rounded transition-shadow w-max text-center ${
+                  style={{ maxWidth: `${maxBoxWidthPx}px` }}
+                  className={`relative pointer-events-auto cursor-text px-1 py-0.5 rounded transition-shadow w-max text-center ${
                     isSelected
                       ? isQuickSplitMergeMode
                         ? 'ring-2 ring-[#3fb950]'
@@ -929,6 +1160,31 @@ export const PreviewPlayer: React.FC = () => {
                       : 'hover:ring-1 hover:ring-white/50'
                   }`}
                 >
+                  {isSelected && (
+                    <>
+                      <div
+                        onMouseDown={(e) => startBoxWidthDrag(e, sub, 'left')}
+                        onClick={(e) => e.stopPropagation()}
+                        title="좌우로 끌어 자막 박스 폭 조절 (대칭으로 늘어나며 1줄/2줄 자동 변환)"
+                        className="group absolute -left-2 top-1/2 -translate-y-1/2 w-3 h-7 cursor-ew-resize z-30 flex items-center justify-center"
+                      >
+                        <div className="w-1.5 h-5 rounded-full bg-white group-hover:bg-[#ffdf5d] border border-black/50 shadow" />
+                      </div>
+                      <div
+                        onMouseDown={(e) => startBoxWidthDrag(e, sub, 'right')}
+                        onClick={(e) => e.stopPropagation()}
+                        title="좌우로 끌어 자막 박스 폭 조절 (대칭으로 늘어나며 1줄/2줄 자동 변환)"
+                        className="group absolute -right-2 top-1/2 -translate-y-1/2 w-3 h-7 cursor-ew-resize z-30 flex items-center justify-center"
+                      >
+                        <div className="w-1.5 h-5 rounded-full bg-white group-hover:bg-[#ffdf5d] border border-black/50 shadow" />
+                      </div>
+                      {boxWidthDrag?.clipId === sub.id && (
+                        <div className="absolute -top-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-[#ffdf5d] whitespace-nowrap pointer-events-none">
+                          폭 {boxWidthDrag.pct}%
+                        </div>
+                      )}
+                    </>
+                  )}
                   {/* inline-grid 미러링 구조로 실제 렌더링 폭/높이와 100% 동일한 화면 위에서 직접 커서 배치 및 수정 가능 */}
                   <div
                     style={{

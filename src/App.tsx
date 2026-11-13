@@ -87,6 +87,12 @@ export const App: React.FC = () => {
         case 'redo':
           state.redo();
           break;
+        case 'copyClips':
+          state.copySelectedClips();
+          break;
+        case 'pasteClips':
+          state.pasteCopiedClips();
+          break;
         case 'delete':
           state.deleteSelectedLayers();
           break;

@@ -68,6 +68,7 @@ export const LeftSidebar: React.FC = () => {
     setCaptionMaxCharsPerLine,
     setAutoSplitOnCaptionGenerate,
     reformatAllCaptionsLineLayout,
+    removePeriodsFromSubtitles,
     splitVariantsIntoSequences,
     setAdSegments,
     replaceClipWithSegments,
@@ -589,7 +590,7 @@ export const LeftSidebar: React.FC = () => {
       </div>
 
       {/* 생성/변환 시 자동 적용 체크박스 & 기존 캡션 즉시 다시 구성 버튼 */}
-      <div className="flex items-center justify-between gap-2 pt-0.5">
+      <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
         <label className="flex items-center gap-1.5 text-[11px] text-[#cccccc] cursor-pointer">
           <input
             type="checkbox"
@@ -600,16 +601,27 @@ export const LeftSidebar: React.FC = () => {
           <span>캡션 생성/대본 변환 시 자동 적용</span>
         </label>
 
-        <button
-          onClick={() =>
-            reformatAllCaptionsLineLayout(captionLineMode, captionMaxCharsPerLine)
-          }
-          disabled={subtitleClips.length === 0}
-          className="px-2.5 py-1.5 rounded bg-[#2d8ceb] hover:bg-[#1e78d6] disabled:opacity-40 text-white font-bold text-[11px] flex items-center gap-1 shadow transition shrink-0"
-        >
-          <RefreshCw className="w-3 h-3" />
-          <span>현재 캡션 다시 구성 ({subtitleClips.length}개)</span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+          <button
+            onClick={removePeriodsFromSubtitles}
+            disabled={subtitleClips.length === 0}
+            title="현재 시퀀스의 모든 자막 클립에서 마침표(.)를 한 번에 제거합니다 (Ctrl+Z 실행 취소 가능)"
+            className="px-2 py-1.5 rounded bg-[#2b2b2b] hover:bg-[#3a3a3a] border border-[#444444] disabled:opacity-40 text-[#e0e0e0] font-semibold text-[11px] transition shrink-0"
+          >
+            마침표(.) 제거
+          </button>
+
+          <button
+            onClick={() =>
+              reformatAllCaptionsLineLayout(captionLineMode, captionMaxCharsPerLine)
+            }
+            disabled={subtitleClips.length === 0}
+            className="px-2.5 py-1.5 rounded bg-[#2d8ceb] hover:bg-[#1e78d6] disabled:opacity-40 text-white font-bold text-[11px] flex items-center gap-1 shadow transition shrink-0"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>현재 캡션 다시 구성 ({subtitleClips.length}개)</span>
+          </button>
+        </div>
       </div>
 
     </div>

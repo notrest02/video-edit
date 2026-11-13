@@ -78,7 +78,8 @@ export function drawSubtitleClip(
   };
   const measure = (t: string) => (gdi ? gdi.measure(t) : ctx.measureText(t).width);
 
-  const maxBoxWidth = Math.floor(width * 0.88);
+  const boxPct = Math.max(25, clip.boxWidthPct ?? 88) / 100;
+  const maxBoxWidth = Math.floor(width * boxPct);
   const padX = Math.round(10 * scaleRatio);
   const padY = Math.round(4 * scaleRatio);
   const maxTextLineWidth = Math.max(80, maxBoxWidth - padX * 2);

@@ -17,6 +17,8 @@ export type ShortcutActionId =
   | 'saveAs'
   | 'undo'
   | 'redo'
+  | 'copyClips'
+  | 'pasteClips'
   | 'delete'
   | 'playPause'
   | 'prevFrame'
@@ -46,6 +48,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'saveAs', group: '파일', label: '다른 이름으로 저장', context: 'global', defaults: ['Ctrl+Shift+KeyS'] },
   { id: 'undo', group: '편집', label: '실행 취소', context: 'global', defaults: ['Ctrl+KeyZ'] },
   { id: 'redo', group: '편집', label: '다시 실행', context: 'global', defaults: ['Ctrl+Shift+KeyZ', 'Ctrl+KeyY'] },
+  { id: 'copyClips', group: '편집', label: '선택한 클립 복사', context: 'global', defaults: ['Ctrl+KeyC'] },
+  { id: 'pasteClips', group: '편집', label: '현재 재생 위치에 붙여넣기', context: 'global', defaults: ['Ctrl+KeyV'] },
   { id: 'delete', group: '편집', label: '선택한 클립/트랙 삭제', context: 'global', defaults: ['Delete', 'Backspace'] },
   { id: 'playPause', group: '재생', label: '재생 / 일시정지', context: 'global', defaults: ['Space'] },
   { id: 'prevFrame', group: '재생', label: '1프레임 뒤로', context: 'global', defaults: ['ArrowLeft'] },

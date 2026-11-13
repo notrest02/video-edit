@@ -69,6 +69,10 @@ export const RightInspector: React.FC = () => {
     autoSyncSubtitleStyle,
     setAutoSyncSubtitleStyle,
     applySubtitleStyleToAll,
+    subtitleStyleTemplates,
+    saveSubtitleStyleTemplate,
+    applySubtitleStyleTemplate,
+    deleteSubtitleStyleTemplate,
     updateClip,
     deleteClip,
     unlinkClip,
@@ -76,6 +80,7 @@ export const RightInspector: React.FC = () => {
   } = useEditorStore();
 
   const [systemFonts, setSystemFonts] = useState<SystemFontItem[]>(globalCachedFonts);
+  const [templateName, setTemplateName] = useState('');
   // 상단 탭: 속성 / 모션(키프레임을 넓게 보는 창). 마지막 탭 기억
   const [tab, setTabState] = useState<'props' | 'motion'>(() => {
     try {
@@ -460,6 +465,79 @@ export const RightInspector: React.FC = () => {
                 <span className="text-[10px] text-[#999999]">
                   전체 자막 {totalSubtitleCount}개
                 </span>
+              </div>
+
+              {/* 글자 스타일 템플릿 저장 / 불러오기 */}
+              <div className="bg-[#16181d] border border-[#323642] rounded p-2 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-[#e2e8f0]">
+                    글자 스타일 템플릿
+                  </span>
+                  <span className="text-[10px] text-[#888888]">
+                    {subtitleStyleTemplates.length}개 저장됨
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={templateName}
+                    onChange={(e) => setTemplateName(e.target.value)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === 'Enter' && templateName.trim()) {
+                        const saved = saveSubtitleStyleTemplate(templateName, selectedClip.id);
+                        if (saved) setTemplateName('');
+                      }
+                    }}
+                    placeholder="템플릿 이름 (예: 흰색 외곽선)"
+                    className="flex-1 min-w-0 bg-[#101216] border border-[#343844] focus:border-[#2d8ceb] rounded px-2 py-1 text-[11px] text-white placeholder-[#666666] focus:outline-none select-text"
+                  />
+                  <button
+                    onClick={() => {
+                      const saved = saveSubtitleStyleTemplate(templateName, selectedClip.id);
+                      if (saved) setTemplateName('');
+                    }}
+                    disabled={!templateName.trim()}
+                    className="px-2 py-1 rounded bg-[#2ea043] hover:bg-[#268c39] disabled:opacity-40 text-white font-semibold text-[10px] shrink-0 transition"
+                    title="현재 자막의 폰트·크기·색·외곽선·그림자·배경·위치를 템플릿으로 저장합니다"
+                  >
+                    현재 스타일 저장
+                  </button>
+                </div>
+
+                {subtitleStyleTemplates.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pt-0.5">
+                    {subtitleStyleTemplates.map((tpl) => (
+                      <div
+                        key={tpl.id}
+                        className="inline-flex items-center rounded border border-[#3a3f4b] bg-[#21242c] overflow-hidden"
+                      >
+                        <button
+                          onClick={() => applySubtitleStyleTemplate(tpl.id, 'selected')}
+                          title={`클릭하여 '${tpl.name}' 스타일 적용 (실시간 동기화 켜짐 시 전체 적용)`}
+                          className="px-2 py-1 text-[10px] text-[#e5e7eb] hover:bg-[#2d8ceb] hover:text-white transition truncate max-w-[130px]"
+                        >
+                          {tpl.name}
+                        </button>
+                        <button
+                          onClick={() => applySubtitleStyleTemplate(tpl.id, 'all')}
+                          title={`'${tpl.name}' 스타일을 현재 시퀀스 전체 자막(${totalSubtitleCount}개)에 바로 적용`}
+                          className="px-1.5 py-1 text-[9px] text-[#93c5fd] hover:bg-[#1f6feb] hover:text-white border-l border-[#3a3f4b] transition"
+                        >
+                          전체
+                        </button>
+                        <button
+                          onClick={() => deleteSubtitleStyleTemplate(tpl.id)}
+                          title={`'${tpl.name}' 템플릿 삭제`}
+                          className="px-1.5 py-1 text-[10px] text-[#888888] hover:bg-rose-500/20 hover:text-rose-400 border-l border-[#3a3f4b] transition"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* 0. 스타일 일괄 적용 & 실시간 동기화 컨트롤 */}
@@ -1166,6 +1244,36 @@ export const RightInspector: React.FC = () => {
                       className="w-full accent-[#2d8ceb]"
                     />
                   </div>
+                </div>
+
+                {/* 박스 최대 폭 (글자 크기 유지 + 1줄/2줄 자동 줄바꿈) */}
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between items-center text-[10px] text-[#999999]">
+                    <span>박스 최대 폭 (미리보기 좌우 손잡이 조절)</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-[#cccccc]">
+                        {selectedClip.boxWidthPct ?? 88}%
+                      </span>
+                      {(selectedClip.boxWidthPct ?? 88) !== 88 && (
+                        <button
+                          onClick={() => updateClip(selectedClip.id, { boxWidthPct: 88 }, true)}
+                          className="px-1 py-0.2 rounded bg-[#2a2a2a] hover:bg-[#3a3a3a] text-[9px] text-[#aaaaaa]"
+                        >
+                          기본(88%)
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    min={25}
+                    max={Math.max(200, selectedClip.boxWidthPct ?? 88)}
+                    value={selectedClip.boxWidthPct ?? 88}
+                    onChange={(e) =>
+                      updateClip(selectedClip.id, { boxWidthPct: Number(e.target.value) })
+                    }
+                    className="w-full accent-[#2d8ceb]"
+                  />
                 </div>
               </div>
             </div>

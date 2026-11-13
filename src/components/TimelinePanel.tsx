@@ -31,7 +31,8 @@ import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { AudioWaveformCanvas } from './AudioWaveformCanvas';
 import { AudioVuMeter } from './AudioVuMeter';
 import { importDroppedFiles } from '../utils/dropImport';
-import { getSceneCuts, maxDurationInShot, minSourceStartInShot, prefetchSceneCuts } from '../utils/sceneCuts';
+import { prefetchSceneCuts } from '../utils/sceneCuts';
+import { computeTrimBounds } from '../utils/trimBounds';
 
 export const TimelinePanel: React.FC = () => {
   // 우측 타임라인(눈금자 + 트랙 레인 통합) 가로 스크롤 컨테이너
@@ -108,14 +109,22 @@ export const TimelinePanel: React.FC = () => {
   useEffect(() => {
     for (const a of assetsForCuts || []) if (a.type === 'video') prefetchSceneCuts(a.path, a.duration);
   }, [assetsForCuts]);
-  // 클립 우클릭 메뉴 (속도/길이 조절, 자르기)
+  // 클립 우클릭 메뉴 (속도/길이 조절, 자르기, 복사/붙여넣기)
   const [clipMenu, setClipMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
+  const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);
   const openClipMenu = (e: React.MouseEvent, clip: TimelineClip) => {
     e.preventDefault();
     e.stopPropagation();
+    setEmptyMenu(null);
     const st = useEditorStore.getState();
     if (!st.selectedClipIds.includes(clip.id)) st.setSelectedClipId(clip.id, false);
     setClipMenu({ clipId: clip.id, x: e.clientX, y: e.clientY });
+  };
+  const openEmptyMenu = (e: React.MouseEvent) => {
+    if (useEditorStore.getState().copiedClips.length === 0) return;
+    e.preventDefault();
+    setClipMenu(null);
+    setEmptyMenu({ x: e.clientX, y: e.clientY });
   };
   // 타임라인 본문(트랙 헤더 + 레인) 전체: 휠 조작(이동/줌/트랙 높이)을 받는 영역
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
@@ -365,19 +374,8 @@ export const TimelinePanel: React.FC = () => {
     let lastClientX = e.clientX;
     let lastClientY = e.clientY;
     let autoScrollRaf: number | null = null;
-    // R36: 영상 클립 양끝을 늘릴 때 원본 장면이 바뀌는 곳에서 멈춤 (Alt 를 누르면 무시)
-    let altHeld = e.altKey;
-    let warnedCut = false;
-    const cutsForClip = clip.type === 'video' ? getSceneCuts(clip.sourcePath) : undefined;
-    if (clip.type === 'video' && !cutsForClip) {
-      const asset = curState.assets?.find((a) => a.id === clip.assetId || a.path === clip.sourcePath);
-      prefetchSceneCuts(clip.sourcePath, asset?.duration);
-    }
-    const noteCutStop = () => {
-      if (warnedCut) return;
-      warnedCut = true;
-      useEditorStore.getState().setStatusMessage('원본 장면이 바뀌는 곳에서 멈췄어요 (다음 장면이 비치지 않게). 더 늘리려면 Alt 를 누른 채 끄세요.');
-    };
+    const clipAsset = curState.assets?.find((a) => a.id === clip.assetId || a.path === clip.sourcePath);
+    const trimBounds = computeTrimBounds(clip, curState.clips, clipAsset?.duration);
 
     let prevAppliedDeltaStart = 0;
     let prevAppliedDeltaDur = 0;
@@ -477,21 +475,7 @@ export const TimelinePanel: React.FC = () => {
         }
       } else if (mode === 'trim-start') {
         const maxDelta = initialDur - frameSec * 2;
-        let minDelta =
-          clip.type === 'text'
-            ? -initialStart
-            : -Math.min(initialStart, initialSourceStart / clipSpeed(clip));
-        if (!altHeld && cutsForClip) {
-          const sp = clipSpeed(clip);
-          const minSrc = minSourceStartInShot(cutsForClip, initialSourceStart, initialSourceStart + initialDur * sp);
-          if (minSrc !== undefined) {
-            const lim = (minSrc - initialSourceStart) / sp;
-            if (lim > minDelta) {
-              if (rawDeltaSec < lim - 1e-4) noteCutStop();
-              minDelta = lim;
-            }
-          }
-        }
+        const minDelta = trimBounds.minStartDelta;
         let clampedDelta = Math.max(minDelta, Math.min(maxDelta, rawDeltaSec));
         let newStart = initialStart + clampedDelta;
         let activeGuide: number | null = null;
@@ -500,6 +484,7 @@ export const TimelinePanel: React.FC = () => {
           for (const pt of snapPoints) {
             if (
               Math.abs(newStart - pt) <= snapToleranceSec &&
+              pt >= initialStart + minDelta - 1e-4 &&
               pt < initialStart + initialDur - frameSec * 2
             ) {
               newStart = pt;
@@ -531,21 +516,17 @@ export const TimelinePanel: React.FC = () => {
           );
         }
       } else if (mode === 'trim-end') {
-        let newDur = Math.max(frameSec * 2, initialDur + rawDeltaSec);
-        if (!altHeld && cutsForClip) {
-          const maxDur = maxDurationInShot(cutsForClip, initialSourceStart, clipSpeed(clip), initialDur);
-          if (maxDur !== undefined && newDur > maxDur + 1e-4) {
-            // 프레임 눈금에 맞춰 내림 (경계를 넘지 않게). 지금 길이보다 줄이지는 않음
-            newDur = Math.max(initialDur, Math.floor(maxDur * fps + 1e-6) / fps);
-            noteCutStop();
-          }
-        }
+        let newDur = Math.max(frameSec * 2, Math.min(trimBounds.maxDuration, initialDur + rawDeltaSec));
         let newEnd = initialStart + newDur;
         let activeGuide: number | null = null;
 
         if (snapEnabled) {
           for (const pt of snapPoints) {
-            if (Math.abs(newEnd - pt) <= snapToleranceSec && pt > initialStart + frameSec * 2) {
+            if (
+              Math.abs(newEnd - pt) <= snapToleranceSec &&
+              pt > initialStart + frameSec * 2 &&
+              pt <= initialStart + trimBounds.maxDuration + 1e-4
+            ) {
               newEnd = pt;
               newDur = newEnd - initialStart;
               activeGuide = pt;
@@ -596,7 +577,6 @@ export const TimelinePanel: React.FC = () => {
     const onMouseMove = (moveEvent: MouseEvent) => {
       lastClientX = moveEvent.clientX;
       lastClientY = moveEvent.clientY;
-      altHeld = moveEvent.altKey;
       applyDragAtPosition(moveEvent.clientX, moveEvent.clientY);
     };
 
@@ -1175,6 +1155,7 @@ export const TimelinePanel: React.FC = () => {
               {/* 2) 트랙 클립 레인들 (마우스 드래그 영역 선택 지원) */}
               <div
                 onMouseDown={handleTrackAreaMouseDown}
+                onContextMenu={openEmptyMenu}
                 className="flex-1 flex flex-col relative select-none"
               >
                 {/* 러버밴드 마키(영역 드래그) 선택 사각형 */}
@@ -1247,6 +1228,15 @@ export const TimelinePanel: React.FC = () => {
                         const widthPx = Math.max(3, clip.duration * zoomPxPerSec);
                         // 좁은 클립에서는 양끝 손잡이가 클립 전체를 덮지 않게 (가운데는 옮기기용으로 남김)
                         const handlePx = Math.max(1, Math.min(8, widthPx / 4));
+                        const handleTintClass =
+                          widthPx >= 36
+                            ? 'bg-black/25 hover:bg-white/70'
+                            : 'bg-transparent group-hover:bg-black/25 hover:!bg-white/70';
+                        const padClass =
+                          widthPx < 28 ? 'px-0.5' : widthPx < 64 ? 'px-1' : 'px-2';
+                        const showClipLabel = widthPx >= 22;
+                        const showTextBadge = widthPx >= 64;
+                        const showIconBadge = widthPx >= 42;
                         const isSelected =
                           clip.id === selectedClipId ||
                           selectedClipIds.includes(clip.id) ||
@@ -1283,7 +1273,7 @@ export const TimelinePanel: React.FC = () => {
                               handleClipMouseDown(e, clip, 'move');
                             }}
                             onContextMenu={(e) => openClipMenu(e, clip)}
-                            className={`group absolute top-[3px] bottom-[3px] rounded-xs border px-2 py-0.5 overflow-hidden flex flex-col ${
+                            className={`group absolute top-[3px] bottom-[3px] rounded-xs border ${padClass} py-0.5 overflow-hidden flex flex-col ${
                               clip.type === 'audio' ? 'justify-start' : 'justify-center'
                             } transition-colors ${
                               activeTool === 'razor'
@@ -1296,35 +1286,37 @@ export const TimelinePanel: React.FC = () => {
                             <div
                               onMouseDown={(e) => handleClipMouseDown(e, clip, 'trim-start')}
                               style={{ width: `${handlePx}px` }}
-                              className="absolute left-0 top-0 bottom-0 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
+                              className={`absolute left-0 top-0 bottom-0 ${handleTintClass} cursor-ew-resize z-20`}
                             />
 
-                            <div className="relative z-10 flex items-center justify-between gap-1 text-[11px] font-medium truncate pointer-events-none">
-                              <span className="truncate drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]">
-                                {clip.type === 'text' ? clip.text || clip.name : clip.name}
-                              </span>
-                              {clip.needsReview && clip.type === 'text' && (
-                                <span
-                                  className="text-[9px] bg-black/40 text-[#ff8a9a] px-1 rounded shrink-0"
-                                  title={`자동 정렬 확신도 낮음 (일치도 ${Math.round((clip.alignConfidence ?? 0) * 100)}%) - 위치를 확인해 주세요`}
-                                >
-                                  ⚠ 검토
+                            {showClipLabel && (
+                              <div className="relative z-10 flex items-center justify-between gap-1 text-[11px] font-medium truncate pointer-events-none">
+                                <span className="truncate drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]">
+                                  {clip.type === 'text' ? clip.text || clip.name : clip.name}
                                 </span>
-                              )}
-                              {clip.type !== 'text' && clipSpeed(clip) !== 1 && (
-                                <span
-                                  className="text-[9px] bg-black/50 text-[#ffd479] px-1 rounded shrink-0"
-                                  title="재생 속도 (우클릭으로 변경)"
-                                >
-                                  {Math.round(clipSpeed(clip) * 100)}%
-                                </span>
-                              )}
-                              {clip.snappedToClip && clip.type === 'text' && (
-                                <span className="text-[9px] bg-black/40 text-[#f5a623] px-1 rounded shrink-0">
-                                  🧲
-                                </span>
-                              )}
-                            </div>
+                                {showTextBadge && clip.needsReview && clip.type === 'text' && (
+                                  <span
+                                    className="text-[9px] bg-black/40 text-[#ff8a9a] px-1 rounded shrink-0"
+                                    title={`자동 정렬 확신도 낮음 (일치도 ${Math.round((clip.alignConfidence ?? 0) * 100)}%) - 위치를 확인해 주세요`}
+                                  >
+                                    ⚠ 검토
+                                  </span>
+                                )}
+                                {showTextBadge && clip.type !== 'text' && clipSpeed(clip) !== 1 && (
+                                  <span
+                                    className="text-[9px] bg-black/50 text-[#ffd479] px-1 rounded shrink-0"
+                                    title="재생 속도 (우클릭으로 변경)"
+                                  >
+                                    {Math.round(clipSpeed(clip) * 100)}%
+                                  </span>
+                                )}
+                                {showIconBadge && clip.snappedToClip && clip.type === 'text' && (
+                                  <span className="text-[9px] bg-black/40 text-[#f5a623] px-1 rounded shrink-0">
+                                    🧲
+                                  </span>
+                                )}
+                              </div>
+                            )}
 
                             {clip.type === 'video' && !!clip.blurMasks?.length && (
                               <div className="absolute left-0 right-0 bottom-[1px] h-[9px] pointer-events-none z-[5]" title="블러 마스크 구간">
@@ -1365,7 +1357,7 @@ export const TimelinePanel: React.FC = () => {
                             <div
                               onMouseDown={(e) => handleClipMouseDown(e, clip, 'trim-end')}
                               style={{ width: `${handlePx}px` }}
-                              className="absolute right-0 top-0 bottom-0 bg-black/25 hover:bg-white/70 cursor-ew-resize z-20"
+                              className={`absolute right-0 top-0 bottom-0 ${handleTintClass} cursor-ew-resize z-20`}
                             />
                           </div>
                         );
@@ -1510,6 +1502,39 @@ export const TimelinePanel: React.FC = () => {
           y={clipMenu.y}
           onClose={() => setClipMenu(null)}
         />
+      )}
+
+      {emptyMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[99]"
+            onMouseDown={() => setEmptyMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setEmptyMenu(null);
+            }}
+          />
+          <div
+            style={{
+              left: Math.min(emptyMenu.x, window.innerWidth - 230),
+              top: Math.min(emptyMenu.y, window.innerHeight - 48),
+              width: 220,
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+            className="fixed z-[100] bg-[#232323] border border-[#3d3d3d] rounded shadow-2xl text-[11px] text-[#dddddd] py-1 select-none"
+          >
+            <button
+              onClick={() => {
+                useEditorStore.getState().pasteCopiedClips();
+                setEmptyMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+            >
+              <span>현재 재생 위치에 붙여넣기</span>
+              <span className="text-[#888888]">Ctrl+V</span>
+            </button>
+          </div>
+        </>
       )}
 
       {/* 3. 우측 끝 오디오 레벨 미터 (실제 오디오 파형/신호와 1:1 실시간 매칭) */}
