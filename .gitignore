@@ -9,6 +9,8 @@ dist-electron/
 release/
 release-build/
 release-installer/
+release-sac/
+release-sac-*/
 dist-package/
 
 # Environment Variables
