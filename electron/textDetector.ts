@@ -69,10 +69,11 @@ async function load() {
 
 const HAN = /[㐀-鿿]/;
 
-/** 확률 지도 → 글자 상자 (det 좌표 px) */
-function boxesFromProb(prob: Float32Array, W: number, H: number): Array<[number, number, number, number]> {
+type DetBox = [number, number, number, number];
+/** 확률 지도 → 글자 상자 (det 좌표 px). parts = 합치기 전 조각들 (합친 상자가 엉터리로 읽히면 조각별로 다시 읽음) */
+function boxesFromProb(prob: Float32Array, W: number, H: number): Array<{ box: DetBox; parts: DetBox[] }> {
   const seen = new Uint8Array(W * H);
-  const out: Array<[number, number, number, number]> = [];
+  const out: Array<{ box: DetBox; parts: DetBox[] }> = [];
   const stack: number[] = [];
   for (let i = 0; i < W * H; i++) {
     if (seen[i] || prob[i] < 0.3) continue;
@@ -97,7 +98,8 @@ function boxesFromProb(prob: Float32Array, W: number, H: number): Array<[number,
     if (n < 12 || s / n < 0.6) continue;
     const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
     const pad = (bw * bh * 1.5) / (2 * (bw + bh)); // PaddleOCR unclip 과 비슷하게 조금 넓힘
-    out.push([Math.max(0, x0 - pad), Math.max(0, y0 - pad), Math.min(W, x1 + pad), Math.min(H, y1 + pad)]);
+    const box: DetBox = [Math.max(0, x0 - pad), Math.max(0, y0 - pad), Math.min(W, x1 + pad), Math.min(H, y1 + pad)];
+    out.push({ box, parts: [box] });
   }
   // 가까운 상자 합치기 (세로쓰기가 글자마다 따로 잡히는 경우 등)
   let merged = true;
@@ -105,14 +107,14 @@ function boxesFromProb(prob: Float32Array, W: number, H: number): Array<[number,
     merged = false;
     for (let a = 0; a < out.length && !merged; a++)
       for (let b = a + 1; b < out.length && !merged; b++) {
-        const [A, B] = [out[a], out[b]];
+        const [A, B] = [out[a].box, out[b].box];
         const g = 0.5 * Math.min(A[3] - A[1], A[2] - A[0], B[3] - B[1], B[2] - B[0]);
         const touch = A[0] - g <= B[2] && B[0] - g <= A[2] && A[1] - g <= B[3] && B[1] - g <= A[3];
         const sameLine =
           Math.abs((A[1] + A[3]) / 2 - (B[1] + B[3]) / 2) < 0.6 * Math.max(A[3] - A[1], B[3] - B[1]) ||
           Math.abs((A[0] + A[2]) / 2 - (B[0] + B[2]) / 2) < 0.6 * Math.max(A[2] - A[0], B[2] - B[0]);
         if (touch && sameLine) {
-          out[a] = [Math.min(A[0], B[0]), Math.min(A[1], B[1]), Math.max(A[2], B[2]), Math.max(A[3], B[3])];
+          out[a] = { box: [Math.min(A[0], B[0]), Math.min(A[1], B[1]), Math.max(A[2], B[2]), Math.max(A[3], B[3])], parts: [...out[a].parts, ...out[b].parts] };
           out.splice(b, 1);
           merged = true;
         }
@@ -194,7 +196,7 @@ export async function analyzeText(
   onProgress: (m: string) => void
 ): Promise<{ tracks: TextTrack[]; cached: boolean }> {
   const st = fs.statSync(file);
-  const key = crypto.createHash('sha1').update(`v1|${path.resolve(file).toLowerCase()}|${st.size}|${st.mtimeMs}`).digest('hex').slice(0, 16);
+  const key = crypto.createHash('sha1').update(`v4|${path.resolve(file).toLowerCase()}|${st.size}|${st.mtimeMs}`).digest('hex').slice(0, 16);
   const cachePath = path.join(cacheDir(), `${key}.json`);
   if (fs.existsSync(cachePath)) return { tracks: JSON.parse(fs.readFileSync(cachePath, 'utf8')), cached: true };
 
@@ -232,11 +234,27 @@ export async function analyzeText(
     for (let i = 0; i < W * H; i++) for (let c = 0; c < 3; c++) d[c * W * H + i] = (buf[i * 3 + c] / 255 - mean[c]) / std[c];
     const prob = (await s.det.run({ [s.det.inputNames[0]]: new s.ort.Tensor('float32', d, [1, 3, H, W]) }))[s.det.outputNames[0]].data as Float32Array;
     const found: Array<{ box: TextBox; text: string; conf: number }> = [];
-    for (const b of boxesFromProb(prob, W, H)) {
+    const read = async (b: DetBox) => {
       const out = (await s.rec.run({ [s.rec.inputNames[0]]: recognize(buf, W, H, b, s) }))[s.rec.outputNames[0]];
       const [text, conf] = ctcDecode(out, s.chars);
-      if (!text || conf < 0.5) continue; // 엉터리로 읽힌 상자(화면 속 물건 등) 버림
-      found.push({ box: [b[0] / W, b[1] / H, b[2] / W, b[3] / H], text, conf });
+      // ok 가 아니면 엉터리로 읽힌 상자(화면 속 물건 등) → 버림
+      return { box: [b[0] / W, b[1] / H, b[2] / W, b[3] / H] as TextBox, text, conf, ok: !!text && conf >= 0.5 };
+    };
+    for (const g of boxesFromProb(prob, W, H)) {
+      const whole = await read(g.box);
+      // 여러 조각을 합친 상자가 엉터리로 읽히거나 한자가 안 나오면 조각별로 다시 읽음.
+      //  (운동화 2.mp4 14.4초~: 자막 "拿回去试试"가 바로 아래 달력 글자 "NOV"와 한 상자로 합쳐져 "die" 0.35 로 읽혀 통째로 버려짐 → 자막이 안 가려짐, 2026-11-13)
+      if (g.parts.length > 1 && !(whole.ok && HAN.test(whole.text))) {
+        const parts = [];
+        for (const p of g.parts) parts.push(await read(p));
+        // 조각에서 나온 한자 1~3자는 쓰지 않음: 배경 소품(그림 속 "發財"·"主發财" 등)이 잠깐씩 잡혀 블러가 생겼다 없어졌다 함. 따로 잡힌 짧은 자막은 그대로 가림
+        const good = parts.filter((p) => p.ok && !(HAN.test(p.text) && [...p.text].length < 4));
+        if (good.length && (!whole.ok || good.some((p) => HAN.test(p.text)))) {
+          for (const p of good) found.push({ box: p.box, text: p.text, conf: p.conf });
+          continue;
+        }
+      }
+      if (whole.ok) found.push({ box: whole.box, text: whole.text, conf: whole.conf });
     }
     // 열린 덩어리와 이어 붙이기: 위치가 겹치고 글자가 비슷하면 같은 덩어리
     const used = new Set<Open>();

@@ -198,8 +198,51 @@ export function tracksToMasks(
     }
     masks.push(mask);
   }
-  bridgeSamePlace(masks);
-  return masks;
+  const merged = mergeSamePlace(masks);
+  bridgeSamePlace(merged);
+  return merged;
+}
+
+/** 같은 자리 마스크를 하나로 합칠 때, 글자가 없는 빈틈이 이보다(초) 길면 따로 둠 (글자 없는 곳을 오래 가리지 않게) */
+export const SAME_PLACE_GAP = 2.0;
+
+/**
+ * 같은 자리에서 원본 자막 문장만 바뀌는 경우(문장 A → B → C) 문장마다 마스크가 따로 생겨
+ * 한 클립에 마스크가 2~3개씩 쌓이고, 앞당김·늦춤 때문에 같은 프레임에 두 마스크가 겹쳐 가려졌음 (사용자 2026-11-13).
+ * → 겹치는 자리(작은 쪽 넓이의 50% 이상)이고 빈틈이 SAME_PLACE_GAP 이하면 마스크 하나로: 영역은 둘을 감싸는 사각형, 구간은 처음~끝.
+ * 움직이는 마스크(키프레임)는 합치지 않음.
+ */
+export function mergeSamePlace(masks: BlurMask[]): BlurMask[] {
+  const overlap = (a: number[], b: number[]) => {
+    const ix = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+    const iy = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+    const sa = (a[2] - a[0]) * (a[3] - a[1]);
+    const sb = (b[2] - b[0]) * (b[3] - b[1]);
+    return (ix * iy) / Math.max(1e-9, Math.min(sa, sb));
+  };
+  const out = [...masks].sort((a, b) => (a.from ?? 0) - (b.from ?? 0)).map((m) => ({ ...m }));
+  let again = true;
+  while (again) {
+    again = false;
+    for (let i = 0; i < out.length && !again; i++)
+      for (let j = i + 1; j < out.length && !again; j++) {
+        const [a, b] = [out[i], out[j]];
+        if (a.keyframes?.length || b.keyframes?.length) continue;
+        if (a.from === undefined || a.to === undefined || b.from === undefined || b.to === undefined) continue;
+        const [ba, bb] = [maskBox(a), maskBox(b)];
+        if (overlap(ba, bb) < 0.5) continue;
+        if (Math.max(a.from, b.from) - Math.min(a.to, b.to) > SAME_PLACE_GAP) continue;
+        out[i] = {
+          ...a,
+          points: rectPoints(Math.min(ba[0], bb[0]), Math.min(ba[1], bb[1]), Math.max(ba[2], bb[2]), Math.max(ba[3], bb[3])),
+          from: Math.min(a.from, b.from),
+          to: Math.max(a.to, b.to),
+        };
+        out.splice(j, 1);
+        again = true;
+      }
+  }
+  return out;
 }
 
 /**

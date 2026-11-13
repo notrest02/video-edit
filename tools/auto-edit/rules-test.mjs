@@ -437,8 +437,12 @@ test('R26', '자동 마스크: 컷 직전·직후 1~2프레임에도 원본 글�
   assert(ms.length === 1 && (ms[0].from ?? 0) === 0, `시작 직후 글자가 처음부터 안 가려짐: from=${ms[0]?.from}`);
   // 3) 같은 자리에서 문장만 바뀜(A → 0.4초 빈틈 → B) → 빈틈 없이 이어서
   ms = M.tracksToMasks([track('c', '第一句话', 0, 1.0), track('d', '另外内容', 1.4, 4)], vclip(0, 4), SZ, SZ);
-  const [x, y] = [...ms].sort((p, q) => (p.from ?? 0) - (q.from ?? 0));
-  assert(ms.length === 2 && x.to >= (y.from ?? 0) - 1e-6, `같은 자리 문장 사이 빈틈: ${x?.to} ~ ${y?.from}`);
+  //    (2026-11-13 부터는 같은 자리 마스크를 하나로 합침 → 마스크 하나가 처음부터 끝까지, R38)
+  assert(ms.length === 1 && (ms[0].from ?? 0) === 0 && (ms[0].to ?? 4) >= 4 - 1e-6, `같은 자리 문장 사이 빈틈: ${JSON.stringify(ms.map((m) => [m.from, m.to]))}`);
+  //    합치지 않는 경우(따로 만든 마스크 두 개)도 빈틈은 이어짐
+  const two = [{ id: 'p', points: [[0, 0], [1, 0], [1, 0.1], [0, 0.1]], blur: 30, feather: 6, from: 0, to: 1.1, auto: 'p' }, { id: 'q', points: [[0, 0], [1, 0], [1, 0.1], [0, 0.1]], blur: 30, feather: 6, from: 1.5, to: 3, auto: 'q' }];
+  M.bridgeSamePlace(two);
+  assert(two[0].to >= 1.5 - 1e-6, `같은 자리 빈틈을 안 이음: ${two[0].to}`);
   // 4) 예전에 만든 마스크(끝 0.05초 전에 꺼짐)도 미리보기·내보내기에선 클립 끝까지
   const old = [{ id: 'o', points: [[0, 0], [1, 0], [1, 1], [0, 1]], blur: 30, feather: 6, from: 0.1, to: 1.95, auto: 'x' }];
   const eff = M.effectiveMasks(old, 2)[0];
@@ -446,6 +450,24 @@ test('R26', '자동 마스크: 컷 직전·직후 1~2프레임에도 원본 글�
   // 손으로 만든 마스크는 그대로
   const hand = M.effectiveMasks([{ ...old[0], auto: undefined }], 2)[0];
   assert(hand.from === 0.1 && hand.to === 1.95, '손으로 만든 마스크 구간을 바꿈');
+});
+
+test('R38', '자동 마스크: 같은 자리에서 문장만 바뀌면 마스크 하나로 (한 클립에 마스크가 쌓여 같은 프레임에 겹쳐 가려지지 않게, 사용자 2026-11-13)', () => {
+  // 같은 자리 자막 3문장 (짧은 것·긴 것) → 마스크 1개, 가장 넓은 영역, 처음~끝
+  let ms = M.tracksToMasks([track('a', '第一句', 0.6, 1.8, [0.3, 0.7, 0.7, 0.75]), track('b', '第二句话比较长', 1.8, 3.0, [0.15, 0.7, 0.85, 0.75]), track('c', '第三句', 3.0, 4.4, [0.3, 0.7, 0.7, 0.75])], vclip(0, 5), SZ, SZ);
+  assert(ms.length === 1, `같은 자리 문장 3개가 마스크 ${ms.length}개`);
+  const xs = ms[0].points.map((p) => p[0]);
+  assert(Math.min(...xs) <= 0.15 && Math.max(...xs) >= 0.85, '합친 마스크가 가장 긴 문장을 다 못 덮음');
+  assert((ms[0].from ?? 0) <= 0.6 && (ms[0].to ?? 5) >= 4.4, `합친 마스크 구간이 짧음: ${ms[0].from}~${ms[0].to}`);
+  // 같은 프레임에 겹쳐 가리는 자동 마스크가 없어야 함
+  const overlapTime = (list) => list.some((a, i) => list.some((b, j) => j > i && Math.min(a.to ?? 9, b.to ?? 9) > Math.max(a.from ?? 0, b.from ?? 0) && Math.abs(a.points[0][1] - b.points[0][1]) < 0.02));
+  assert(!overlapTime(ms), '같은 자리 마스크가 같은 시간에 겹침');
+  // 다른 자리(위쪽 워터마크 + 아래 자막)는 따로
+  ms = M.tracksToMasks([track('a', '水印文字', 0, 5, [0.05, 0.05, 0.3, 0.08]), track('b', '字幕内容', 1, 3)], vclip(0, 5), SZ, SZ);
+  assert(ms.length === 2, `다른 자리 글자를 하나로 합침 (${ms.length}개)`);
+  // 같은 자리라도 글자 없는 빈틈이 길면(2초 넘게) 따로 — 글자 없는 곳을 오래 가리지 않게
+  ms = M.tracksToMasks([track('a', '第一句', 1.0, 2.0), track('b', '第二句', 6.0, 7.0)], vclip(0, 9), SZ, SZ);
+  assert(ms.length === 2, `빈틈이 긴데 하나로 합쳐 글자 없는 곳까지 가림 (${ms.length}개)`);
 });
 
 // ---------- 결과 ----------
