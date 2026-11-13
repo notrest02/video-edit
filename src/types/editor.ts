@@ -99,7 +99,9 @@ export type ExportCheckResult = {
   problems: Array<{ kind: '짧은 장면' | '마스크 풀림' | '번쩍임'; frame: number; time: number; msg: string; image?: string }>;
 };
 
-export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number; /** 샷 안 약한 화면 전환 의심 시각(원본 초) */ soft?: number[] };
+/** 원본 영상의 화면 모습: step 초마다 w×h RGB 작은 그림을 이어 붙인 것 (R13 '같은 컷처럼 보이는지' 비교) */
+export type ShotLooks = { step: number; w: number; h: number; data: Uint8Array };
+export type AutoEditShot ={ id: string; file: string; path: string; start: number; end: number; dur: number; /** 샷 안 약한 화면 전환 의심 시각(원본 초) */ soft?: number[]; /** 이 샷이 들어 있는 원본 영상의 화면 모습 (영상 단위로 같은 객체) */ look?: ShotLooks };
 type AutoEditShotView = { subject?: string; talk?: boolean; stage?: string };
 export type AutoEditShotDesc = AutoEditShotView & {
   id: string;
@@ -373,7 +375,7 @@ declare global {
       autoEditAnalyze?: (params: {
         media: Array<{ path: string; duration: number }>;
         product: string;
-      }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; usage: { input: number; output: number }; analyzedFiles: number }>;
+      }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; usage: { input: number; output: number }; analyzedFiles: number; looks?: Record<string, string>; look?: { step: number; w: number; h: number } }>;
       autoEditAssign?: (params: {
         product: string;
         shots: AutoEditShot[];

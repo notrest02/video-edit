@@ -8,7 +8,7 @@
  * 맞추기(fit): 샷 경계를 절대 넘지 않음(다음 장면이 1~2프레임 비치는 것 방지), 모자라면 느리게(최저 0.6배 근처),
  *   다른 광고에서 쓴 구간과 덜 겹치는 시작점, 후킹은 지정 구간 안에서만(나눌 땐 1초 이상 조각).
  */
-import type { AutoEditPlan, AutoEditShot, AutoEditShotDesc, AutoEditSlot, TimelineClip } from '../types/editor';
+import type { AutoEditPlan, AutoEditShot, AutoEditShotDesc, AutoEditSlot, ShotLooks, TimelineClip } from '../types/editor';
 
 const CLAUSE_END = /(서|고|데|니|까|면|도|며|만|라|요|다|지|,)$/;
 const BREAK_END = /(서|고|데|니|까|면|도|며|만|라|요|다|지|,|랑|은|는|을|를|에|로|게|와|과|나)$/;
@@ -66,14 +66,134 @@ export function shotLenCap(shots: AutoEditShot[]): number {
   return Math.min(4, Math.max(2.4, d[Math.floor(d.length * 0.75)] + 0.5));
 }
 
-/** 후킹 지정 구간에서 실제로 쓸 수 있는 원본 길이(초). 샷 경계 안쪽만, 큰 조각 3개까지 (hookPieces와 같은 기준) */
+// ---------- 화면 모습 비교 (R13, 2026-11-13) ----------
+// 같은 영상의 다른 부분을 이어 붙였을 때 '같은 컷이 두 번 나온 것처럼' 보이는지를 실제 화면(작은 그림)으로 판단.
+// 예전엔 AI 장면 설명(묶음 이름)으로 판단해서, 한 번에 찍은 62초 영상(운동화 3번)의 동작마다 다른 묶음 이름이 붙어 허용돼 버렸음.
+// 처음 기준(11-13 오전): 12x20 RGB 평균 차이 46. 다른 제품에서 안 맞아 LOOK_SAME_SCORE 로 바꿈 (아래). LOOK_SAME 은 참고용으로만 남김
+export const LOOK_SAME = 46;
+/**
+ * '같은 컷처럼 보임' 기준 점수 (2026-11-13, 사용자가 사진 17쌍을 보고 고른 답으로 맞춤: 운동화·벨트·무릎보호대).
+ * 화면 차이 평균 하나로는 안 갈렸음 (같아 보임 23~49 / 괜찮음 38~58 이 겹침 — 벨트 01 3.70초는 49 인데 같아 보임, 운동화 01 2.87초는 39 인데 괜찮음).
+ * 점수 = 색 분포 차이/60 + 가만히 있는 절반(배경)의 차이/20. 같아 보임 0.45~1.39 / 괜찮음 1.85~2.79 (앞뒤 그림 한 장씩 바꿔 봐도) → 1.6
+ * 같은 파일끼리만 본다. 다른 파일끼리는 문장이 바뀌면서 컷이 바뀌면 괜찮다고 해서(사용자 11-13) 경고도 안 함
+ */
+export const LOOK_SAME_SCORE = 1.6;
+
+/** 메인 프로세스가 준 화면 모습(base64)을 샷에 붙임 (영상 단위로 같은 객체 공유). 없으면 그대로 */
+export function attachLooks(shots: AutoEditShot[], looks?: Record<string, string>, look?: { step: number; w: number; h: number }): AutoEditShot[] {
+  if (!looks || !look) return shots;
+  const decoded = new Map<string, ShotLooks>();
+  for (const [p, b64] of Object.entries(looks)) {
+    const data =
+      typeof atob === 'function' ? Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)) : new Uint8Array((globalThis as any).Buffer.from(b64, 'base64'));
+    decoded.set(p, { ...look, data });
+  }
+  return shots.map((s) => (decoded.has(s.path) ? { ...s, look: decoded.get(s.path) } : s));
+}
+
+/** 원본에서 원래 이어지는 컷인데 화면이 거의 똑같으면(장면 나누기가 잘못 나눈 곳) 툭 튀어 보임 → 이 값보다 작으면 막음 */
+export const LOOK_STUTTER = 12;
+
+/** 샷 안의 시각 t 에 가장 가까운 작은 그림 (샷 밖 그림은 안 씀 — 원본 컷 건너편 그림을 잘못 집지 않게) */
+function lookIn(sh: AutoEditShot, t: number): Uint8Array | undefined {
+  const l = sh.look;
+  if (!l) return undefined;
+  const n = l.w * l.h * 3;
+  const count = Math.floor(l.data.length / n);
+  // ffmpeg fps 로 뽑은 그림은 표시 시각보다 최대 약 0.1초 늦은 장면을 담음 → 샷 경계에서 0.2초 안쪽 그림만 (원본 컷 건너편 그림 방지)
+  const lo = Math.max(0, Math.ceil((sh.start + 0.2) / l.step));
+  const hi = Math.min(count - 1, Math.floor((sh.end - 0.2) / l.step));
+  if (hi < lo) return undefined;
+  const i = Math.min(hi, Math.max(lo, Math.round(t / l.step)));
+  return l.data.subarray(i * n, (i + 1) * n);
+}
+
+/** 두 순간의 화면 차이 (12x20 RGB 평균). 화면 모습이 없으면 undefined */
+export function lookDiff(a: AutoEditShot | undefined, ta: number, b: AutoEditShot | undefined, tb: number): number | undefined {
+  const fa = a ? lookIn(a, ta) : undefined;
+  const fb = b ? lookIn(b, tb) : undefined;
+  if (!fa || !fb || fa.length !== fb.length) return undefined;
+  let s = 0;
+  for (let i = 0; i < fa.length; i++) s += Math.abs(fa[i] - fb[i]);
+  return s / fa.length;
+}
+
+/** 색 분포 (채널마다 5칸, 칸 사이는 나눠 담음 — 밝기가 조금 달라도 칸이 확 바뀌지 않게) */
+function softHist(f: Uint8Array): Float32Array {
+  const h = new Float32Array(125);
+  for (let i = 0; i + 2 < f.length; i += 3) {
+    const lo = [0, 0, 0], fr = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const v = (f[i + k] / 255) * 4;
+      lo[k] = Math.min(3, Math.floor(v));
+      fr[k] = v - lo[k];
+    }
+    for (let m = 0; m < 8; m++) {
+      let w = 1, idx = 0;
+      for (let k = 0; k < 3; k++) {
+        const up = (m >> k) & 1;
+        w *= up ? fr[k] : 1 - fr[k];
+        idx = idx * 5 + lo[k] + up;
+      }
+      h[idx] += w;
+    }
+  }
+  return h;
+}
+
+/**
+ * 두 순간의 화면이 '같은 컷처럼 보이는' 정도 (작을수록 같아 보임, LOOK_SAME_SCORE 미만이면 같아 보임). 화면 모습이 없으면 undefined
+ *  = 색 분포 차이(같은 장소·같은 물건이면 색이 비슷) + 가장 비슷한 절반 칸의 차이(손·물건은 움직여도 배경은 그대로)
+ */
+export function lookScore(a: AutoEditShot | undefined, ta: number, b: AutoEditShot | undefined, tb: number): number | undefined {
+  const fa = a ? lookIn(a, ta) : undefined;
+  const fb = b ? lookIn(b, tb) : undefined;
+  if (!fa || !fb || fa.length !== fb.length) return undefined;
+  const ha = softHist(fa), hb = softHist(fb);
+  let hs = 0;
+  for (let i = 0; i < 125; i++) hs += Math.abs(ha[i] - hb[i]);
+  const hist = (hs / (fa.length / 3)) * 100;
+  const d: number[] = [];
+  for (let i = 0; i + 2 < fa.length; i += 3) d.push((Math.abs(fa[i] - fb[i]) + Math.abs(fa[i + 1] - fb[i + 1]) + Math.abs(fa[i + 2] - fb[i + 2])) / 3);
+  d.sort((x, y) => x - y);
+  const n = d.length >> 1;
+  let half = 0;
+  for (let i = 0; i < n; i++) half += d[i];
+  return hist / 60 + half / n / 20;
+}
+
+/**
+ * 같은 영상에서 앞 컷(원본 aEnd 에서 끝남) 다음에 b 를 원본 bStart 부터 붙이면 '같은 컷이 두 번 나온 것처럼' 보이는지 (R13).
+ *  - 원본에서 원래 이어지는 컷(b 가 바로 다음 샷이고 0.4초 안 건너뜀): 원본 편집자의 컷이라 허용. 화면이 거의 똑같을 때만(LOOK_STUTTER) 막음
+ *  - 시간을 건너뛰어 붙임: 화면이 비슷하면(lookScore < LOOK_SAME_SCORE) 막음 (운동화 01 12.43초, 02 47.95초, 벨트 01 3.70초)
+ * @returns undefined 면 화면 모습이 없어 판단 못 함
+ */
+export function jumpLooksSame(a: AutoEditShot | undefined, aEnd: number, b: AutoEditShot | undefined, bStart: number): boolean | undefined {
+  if (!a || !b || a.path !== b.path || a.id === b.id) return a && b && a.id === b.id ? false : undefined;
+  const d = lookDiff(a, aEnd, b, bStart);
+  if (d === undefined) return undefined;
+  const no = (id: string) => Number(id.split('-').pop());
+  const gap = bStart - aEnd;
+  const natural = no(b.id) === no(a.id) + 1 && gap > -0.05 && gap <= 0.4;
+  return natural ? d < LOOK_STUTTER : (lookScore(a, aEnd, b, bStart) ?? Infinity) < LOOK_SAME_SCORE;
+}
+
+/** 후킹 지정 구간에서 실제로 쓸 수 있는 원본 길이(초). 샷 경계 안쪽만, 큰 조각 3개까지 (hookPieces와 같은 기준).
+ *  R13: 같은 영상에서 앞 조각과 같아 보이는 조각은 이어 붙이면 '같은 컷 두 번'이라 하나로 침 (더 긴 쪽만) */
 export function hookCapacity(hs: HookSpec, shots: AutoEditShot[]): number {
-  const lens = shots
+  const pieces = shots
     .filter((x) => x.path === hs.path && x.end - EDGE > hs.from && x.start + EDGE < hs.to)
-    .map((x) => Math.min(x.end - EDGE, hs.to + 0.5) - Math.max(x.start + EDGE, hs.from))
-    .filter((l) => l >= 0.3)
-    .sort((a, b) => b - a);
-  return lens.slice(0, 3).reduce((a, b) => a + b, 0);
+    .map((x) => ({ x, a0: Math.max(x.start + EDGE, hs.from), a1: Math.min(x.end - EDGE, hs.to + 0.5) }))
+    .filter((p) => p.a1 - p.a0 >= 0.3)
+    .sort((p, q) => p.a0 - q.a0);
+  const runs: number[] = [];
+  for (let i = 0; i < pieces.length; i++) {
+    const len = pieces[i].a1 - pieces[i].a0;
+    const prev = pieces[i - 1];
+    if (prev && jumpLooksSame(prev.x, prev.a1, pieces[i].x, pieces[i].a0)) runs[runs.length - 1] = Math.max(runs[runs.length - 1], len);
+    else runs.push(len);
+  }
+  return runs.sort((a, b) => b - a).slice(0, 3).reduce((a, b) => a + b, 0);
 }
 
 /** 후킹도 일반 컷과 같은 최저 속도 (사용자 2026-11-07: 모든 컷 최저 0.6배로 안정성) */
@@ -245,6 +365,11 @@ export function hookPieces(slot: AutoEditSlot, hs: HookSpec, shots: AutoEditShot
           return sp;
         });
         pen += 0.5 * (m - 1) + 1.0 * pick[0] - 0.2 * cut.filter((c) => capset.some((x) => Math.abs(c - x) < 0.02)).length;
+        // R13: 이어 붙인 두 조각이 같아 보이면(같은 영상 한 장면을 건너뛴 것) 크게 벌점 → 한 조각으로 (운동화 01 후킹 1.70초, 2026-11-13)
+        for (let k = 1; k < pick.length; k++) {
+          const p = src[pick[k - 1]], q = src[pick[k]];
+          if (jumpLooksSame(p.x, p.a1, q.x, q.a0)) pen += 6;
+        }
         if (!best || pen < best.pen) best = { pen, edges, pick, sps };
       }
     }
@@ -280,8 +405,9 @@ export function fitAssignment(
   avoidIn: Array<[string, number, number]>,
   caps: number[],
   descs?: AutoEditShotDesc[]
-): { clips: PlanClip[]; warnings: string[] } {
+): { clips: PlanClip[]; warnings: string[]; /** AI가 고른 장면이 '앞 컷과 같아 보여서'(R13) 다른 장면으로 바뀐 자리 수 — 많으면 화면이 너무 자주 바뀜 */ lookSwaps: number } {
   const byId = new Map(shots.map((s) => [s.id, s]));
+  let lookSwaps = 0;
   const descById = new Map((descs || []).map((d) => [d.id, d]));
   const amap = new Map(assign.map((a) => [a.slot, a]));
   const avoid = [...avoidIn];
@@ -292,7 +418,14 @@ export function fitAssignment(
   // 후킹 바로 다음 컷은 후킹에 쓴 샷을 (다른 부분이라도) 쓰지 않음 → 후킹 장면이 그대로 이어져 보이는 것 방지 (사용자 2026-11-07)
   let hookShots = new Set<string>();
   let afterHook = false;
-  type Place = { sh: AutoEditShot; t0: number; sp: number; ok: boolean; why?: 'soft' };
+  type Place = { sh: AutoEditShot; t0: number; sp: number; ok: boolean; why?: 'soft' | 'look' | 'long' | 'sentence' };
+  // 이어 쓰기로 한 장면이 너무 오래 계속되지 않게 (R04·R20, 2026-11-13): 코드가 '대신 고를 때'는 이어 쓴 길이가 컷 길이 상한을 넘으면 안 씀.
+  //  (운동화 01: 같아 보이는 장면을 막은 자리에 앞 장면을 이어 붙여 한 장면이 7.67초 계속됨). AI가 직접 고른 이어 쓰기는 그대로 두고 검사기가 알림
+  const maxRun = maxCutLen(shotLenCap(shots));
+  let runStart = 0; // 지금 이어지고 있는 같은 장면이 타임라인에서 시작한 시각
+  // 새 문장이 시작되는 자리에서는 앞 컷의 장면을 그대로 이어 쓰지 않음 (R20b, 사용자 2026-11-13: '다음 문장인데도 기존 영상이 쭉 이어지는 것'이 가장 걸림).
+  //  이어 쓰기는 같은 문장(cont=true) 안에서만. cont 정보가 없는 자리(예전 기록 다시 넣기)는 판단하지 않음
+  let newSentence = false;
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
   // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
   const shotNo = (id: string) => Number(id.split('-').pop());
@@ -302,14 +435,31 @@ export function fitAssignment(
     !!prev &&
     prev.path === sh.path &&
     prev.shot !== sh.id &&
-    !(prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1) &&
-    looksSameShot(prev.shot ? descById.get(prev.shot) : undefined, descById.get(sh.id));
+    sameLookAfterPrev(sh);
+  // 앞 컷 끝 화면과 이 샷의 화면이 같아 보이는지 (R13, 2026-11-13)
+  //  화면 모습(작은 그림)이 있으면 실제 화면으로만 판단 — '원본의 바로 다음 장면' 예외도 화면이 같아 보이면 막음
+  //  (운동화 03: 3-07 → 3-08 이 같은 배경에서 5초 건너뛰어 붙음). 화면 모습이 없으면 예전처럼 장면 설명 + 바로 다음 장면 예외
+  //  여기(놓기 전)는 화면 모습이 없을 때만 판단. 화면 모습이 있으면 실제로 고른 시작 지점으로 place() 에서 판단 (jumpAfterPrev)
+  const sameLookAfterPrev = (sh: AutoEditShot) => {
+    if (!prev) return false;
+    const ps = prev.shot ? byId.get(prev.shot) : undefined;
+    if (ps?.look && sh.look) return false;
+    if (prev.shot && shotNo(sh.id) === shotNo(prev.shot) + 1) return false;
+    return looksSameShot(prev.shot ? descById.get(prev.shot) : undefined, descById.get(sh.id));
+  };
+  const jumpAfterPrev = (sh: AutoEditShot, t0: number) => {
+    if (!prev || !prev.shot || prev.path !== sh.path || prev.shot === sh.id) return false;
+    return jumpLooksSame(byId.get(prev.shot), prev.srcIn + (prev.end - prev.start) * prev.speed, sh, t0) === true;
+  };
   // 약한 화면 전환(sh.soft)이 컷의 처음·끝 SOFT_EDGE 초 안에 걸리면 원본의 다음 화면이 1~3프레임 번쩍임 (R28)
   const flashes = (sh: AutoEditShot, a: number, b: number) =>
     (sh.soft || []).some((x) => (x > a + 1e-3 && x < a + SOFT_EDGE) || (x > b - SOFT_EDGE && x < b - 1e-3));
-  const place = (sh: AutoEditShot, D: number, wantIn: number): Place => {
+  const place = (sh: AutoEditShot, D: number, wantIn: number, fromAI = true): Place => {
     const p = placeRaw(sh, D, wantIn);
+    if (p.ok && newSentence && prev && prev.shot === sh.id) return { ...p, ok: false, why: 'sentence' };
+    if (p.ok && !fromAI && prev && prev.shot === sh.id && prev.end - runStart + D > maxRun + 0.15) return { ...p, ok: false, why: 'long' };
     if (p.ok && flashes(sh, p.t0, p.t0 + D * p.sp)) return { ...p, ok: false, why: 'soft' };
+    if (p.ok && jumpAfterPrev(sh, p.t0)) return { ...p, ok: false, why: 'look' };
     return p;
   };
   const placeRaw = (sh: AutoEditShot, D: number, wantIn: number): Place => {
@@ -353,7 +503,7 @@ export function fitAssignment(
     return { sh, t0: s0, sp, ok: sp >= MIN_SPEED_HARD && overlap(sh.path, s0, s1, usedHere) <= 0.2 };
   };
   const why = (sh: AutoEditShot | undefined, p: Place | null) =>
-    !sh ? '없는 장면' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : jumpsSameVideo(sh) ? '앞 컷과 같은 영상의 다른 부분' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : p && (sh.soft || []).length && p.why === 'soft' ? '원본 화면 전환이 컷 끝에 걸림' : '이미 이 광고에서 씀';
+    !sh ? '없는 장면' : p?.why === 'sentence' ? '새 문장인데 앞 장면이 그대로 이어짐' : p?.why === 'long' ? '같은 장면이 너무 오래 이어짐' : afterHook && hookShots.has(sh.id) ? '후킹과 같은 장면' : jumpsSameVideo(sh) || p?.why === 'look' ? '앞 컷과 같은 영상의 다른 부분(같아 보임)' : p && p.sp < MIN_SPEED_HARD ? '자리보다 너무 짧음' : p && (sh.soft || []).length && p.why === 'soft' ? '원본 화면 전환이 컷 끝에 걸림' : '이미 이 광고에서 씀';
   const put = (s: AutoEditSlot, p: Place) => {
     const D = s.end - s.start;
     const c: PlanClip = { path: p.sh.path, file: p.sh.file, start: s.start, end: s.end, srcIn: p.t0, speed: p.sp, shot: p.sh.id, text: s.text, hook: s.hook };
@@ -361,11 +511,13 @@ export function fitAssignment(
     avoid.push([p.sh.path, p.t0, p.t0 + D * p.sp]);
     usedHere.push([p.sh.path, p.t0, p.t0 + D * p.sp]);
     if (p.sp < MIN_SPEED) warnings.push(`컷 ${s.slot}: 장면 ${p.sh.id} 이 짧아 ${p.sp.toFixed(2)}배속`);
+    if (!prev || prev.shot !== p.sh.id) runStart = s.start;
     prev = c;
     afterHook = false;
   };
   for (const s of slots) {
     const D = s.end - s.start;
+    newSentence = s.cont === false && !s.hook;
     if (s.hook && hook) {
       const pieces = hookPieces(s, hook, shots, caps);
       if (pieces.length) {
@@ -377,6 +529,7 @@ export function fitAssignment(
         hookShots = new Set(pieces.map((p) => p.shot || ''));
         afterHook = true;
         prev = pieces[pieces.length - 1];
+        runStart = prev.start;
         continue;
       }
       warnings.push('⚠️ 후킹 지정 구간에서 쓸 장면을 찾지 못함 (영상·초 확인) → 다른 장면으로 채움');
@@ -403,12 +556,16 @@ export function fitAssignment(
       if (hit(d.place) || hit(d.desc)) return 1;
       return 2;
     };
+    // AI 1순위가 '앞 컷과 같아 보임'(R13)으로 막혔으면 앞 컷과 같은 영상의 다른 장면도 비슷해 보이기 쉬움 (벨트 01 3.70초: 같은 사람·같은 방)
+    //  → 다른 영상 파일의 장면을 먼저 보고, 앞 컷과 같은 영상은 그다음 (핵심·근거 장면 우선 순서는 그대로, 2026-11-13)
+    const lookBlocked = p1?.why === 'look' && !!prev;
+    if (lookBlocked) lookSwaps++;
     const near = (x: AutoEditShot) =>
-      x === alt ? -1 : ref && x.path === ref.path ? (x.start >= ref.start ? x.start - ref.start : 1000 + ref.start - x.start) : 1e6 - x.dur;
+      x === alt ? -1 : lookBlocked && x.path === (prev as PlanClip).path ? 2e6 + Math.abs(x.start - (ref?.start ?? 0)) : ref && x.path === ref.path ? (x.start >= ref.start ? x.start - ref.start : 1000 + ref.start - x.start) : 1e6 - x.dur;
     const basisSet = new Set(s.basis || []); // 대본 근거 장면은 가장 먼저 (R25)
     const rank = (x: AutoEditShot) => (basisSet.has(x.id) ? -1 : focusRank(x)) * 1e7 + near(x);
     const pool = shots.filter((x) => x !== first).sort((x, y) => rank(x) - rank(y));
-    const p3 = pool.map((x) => place(x, D, x === alt ? x.start + EDGE : x.start + EDGE)).find((p) => p.ok);
+    const p3 = pool.map((x) => place(x, D, x.start + EDGE, x === alt)).find((p) => p.ok);
     const p2 = alt && alt !== first ? place(alt, D, alt.start + EDGE) : null;
     if (p3) {
       warnings.push(
@@ -439,7 +596,7 @@ export function fitAssignment(
       if (c.srcIn + dur * c.speed > hi) c.speed = Math.floor(((hi - c.srcIn) / dur) * 100) / 100;
     }
   }
-  return { clips, warnings };
+  return { clips, warnings, lookSwaps };
 }
 
 /** 장면 설명 두 개가 얼마나 비슷한지 (글자 두 개씩 묶어 겹치는 비율, 0~1) */
@@ -528,6 +685,22 @@ export function auditPlan(
       if (ov > 0.3) out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 컷이 ${fmt(a.start)} 컷과 같은 장면을 다시 씀` });
     }
   }
+  // 새 문장인데 앞 컷의 장면이 그대로 이어짐 (R20b)
+  for (let i = 1; i < cs.length; i++) {
+    const [a, b] = [cs[i - 1], cs[i]];
+    if (!b.shot || a.shot !== b.shot || b.hook) continue;
+    const sl = slots.find((x) => Math.abs(x.start - b.start) < 0.02);
+    if (sl?.cont === false) out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 새 문장인데 앞 컷의 장면이 그대로 이어짐 (화면이 안 바뀜)` });
+  }
+  // 이어 쓰기로 한 장면이 너무 오래 계속됨 (컷 자리는 나뉘어 있어도 화면은 안 바뀜, 2026-11-13)
+  for (let i = 0; i < cs.length; ) {
+    let j = i;
+    while (j + 1 < cs.length && cs[j + 1].shot && cs[j + 1].shot === cs[j].shot && Math.abs(cs[j + 1].srcIn - (cs[j].srcIn + (cs[j].end - cs[j].start) * cs[j].speed)) < 0.1) j++;
+    const len = cs[j].end - cs[i].start;
+    if (j > i && !cs[i].hook && len > maxCutLen(opts.hi) + 0.15)
+      out.push({ level: 'warn', at: cs[i].start, msg: `${fmt(cs[i].start)}~${fmt(cs[j].end)} 한 장면이 ${len.toFixed(2)}초 동안 계속됨 (화면이 오래 안 바뀜)` });
+    i = j + 1;
+  }
   // 한 문장 = 한 흐름: 한 문장 안에서 영상이 2번 넘게 바뀌면 템포가 너무 빠름
   const slotOf = (c: PlanClip) => slots.find((x) => c.start >= x.start - 0.02 && c.start < x.end - 0.02);
   let group: PlanClip[] = [];
@@ -546,14 +719,23 @@ export function auditPlan(
   // 같은 영상의 다른 부분을 연달아 (장면 분석이 없어도 확인, 규칙 R13). 이어 쓰기·바로 다음 장면은 괜찮음
   const sameVideoJump = new Set<number>();
   const descMap = new Map((opts.descs || []).map((d) => [d.id, d]));
+  const shotById = new Map(shots.map((x) => [x.id, x]));
   for (let i = 1; i < cs.length; i++) {
     const [a, b] = [cs[i - 1], cs[i]];
     if (!a.shot || !b.shot || a.shot === b.shot || a.path !== b.path) continue;
-    if (Number(b.shot.split('-').pop()) === Number(a.shot.split('-').pop()) + 1) continue;
-    if (!looksSameShot(descMap.get(a.shot), descMap.get(b.shot))) continue; // 같은 영상이라도 확실히 달라 보이면 괜찮음 (R13)
+    // 같은 영상이라도 확실히 달라 보이면 괜찮음 (R13). 화면 모습이 있으면 실제 화면으로만 (바로 다음 장면도),
+    //  없으면 장면 설명으로 + 바로 다음 장면은 예외
+    const sa = shotById.get(a.shot), sb = shotById.get(b.shot);
+    const vis = jumpLooksSame(sa, a.srcIn + (a.end - a.start) * a.speed, sb, b.srcIn);
+    if (vis === false) continue;
+    if (vis === undefined) {
+      if (Number(b.shot.split('-').pop()) === Number(a.shot.split('-').pop()) + 1) continue;
+      if (!looksSameShot(descMap.get(a.shot), descMap.get(b.shot))) continue;
+    }
     sameVideoJump.add(i);
     out.push({ level: 'warn', at: b.start, msg: `${fmt(b.start)} 앞 컷과 같은 영상의 다른 부분을 연달아 씀 (같은 컷이 두 번 나온 것처럼 보일 수 있음)` });
   }
+  // (서로 다른 영상 파일끼리 화면이 비슷한 것은 경고하지 않음 — 사용자 2026-11-13: 문장이 바뀌면서 컷이 바뀌면 괜찮음)
   if (opts.descs?.length) {
     const place = new Map(opts.descs.map((d) => [d.id, d.place]));
     const descOf = new Map(opts.descs.map((d) => [d.id, d.desc]));
@@ -561,6 +743,8 @@ export function auditPlan(
     for (let i = 1; i < cs.length; i++) {
       const [a, b] = [cs[i - 1], cs[i]];
       if (!a.shot || !b.shot || a.shot === b.shot || sameVideoJump.has(i)) continue;
+      // 후킹 조각끼리는 의뢰자가 정한 구간(원본에서 이어지는 컷)이라 '비슷한 장면' 경고를 띄우지 않음
+      if (a.hook && b.hook) continue;
       // 새 분석(비슷한 장면 묶음)이 있으면 그걸로 판단: 영상이 달라도 같은 묶음이면 비슷해 보임
       const ga = groupOf.get(a.shot);
       if (ga && ga === groupOf.get(b.shot)) {

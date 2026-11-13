@@ -58,6 +58,9 @@ type FileCache = {
   /** 약한 화면 전환(점수가 장면 전환 기준보다 낮은 점프 컷 등) 의심 시각들. softVersion 이 없으면 아직 안 찾음 */
   soft?: number[];
   softVersion?: number;
+  /** 화면 모습: 0.25초마다 12x20 RGB 작은 그림을 이어 붙인 것 (base64). R13 '같은 컷처럼 보이는지'를 실제 화면으로 비교 */
+  looks?: string;
+  lookVersion?: number;
 };
 
 /** 장면 설명 항목이 바뀌면 올림 → 예전 설명은 다음에 쓸 때 한 번만 다시 설명 (썸네일 시트·샷 나누기는 그대로 재사용) */
@@ -140,6 +143,18 @@ function run(ffmpegPath: string, args: string[]): Promise<string> {
  * 원본의 다음 화면이 1~3프레임 비친다 → 자동 배치가 피한다 (R28, 2026-11-11). ffmpeg 만 씀 (비용 없음)
  */
 const SOFT_VERSION = 1;
+/** 화면 모습 작은 그림 (R13): 0.25초마다 12x20 RGB. 자동 배치가 같은 영상의 다른 부분을 이어 붙일 때 '같은 컷처럼 보이는지' 비교 (2026-11-13) */
+export const LOOK = { step: 0.25, w: 12, h: 20 };
+const LOOK_VERSION = 1;
+async function computeLooks(ffmpegPath: string, file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, ['-v', 'error', '-i', file, '-vf', `fps=${1 / LOOK.step},scale=${LOOK.w}:${LOOK.h}:flags=area,format=rgb24`, '-f', 'rawvideo', '-'], { windowsHide: true });
+    const chunks: Buffer[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d));
+    proc.on('error', reject);
+    proc.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks).toString('base64')) : reject(new Error(`ffmpeg ${code}`))));
+  });
+}
 const SOFT_MIN = 0.05;
 const SOFT_RATIO = 5;
 function findSoftCuts(pts: number[], sc: number[], shots: Shot[]): number[] {
@@ -436,7 +451,8 @@ export async function analyzeMedia(
   media: Array<{ path: string; duration: number }>,
   product: string,
   onProgress: (msg: string) => void
-): Promise<{ shots: Shot[]; descs: ShotDesc[]; usage: UsageTotal; analyzedFiles: number }> {
+): Promise<{ shots: Shot[]; descs: ShotDesc[]; usage: UsageTotal; analyzedFiles: number; looks: Record<string, string>; look: typeof LOOK }> {
+  const looks: Record<string, string> = {};
   const usage: UsageTotal = { input: 0, output: 0 };
   const entries: Array<{ cachePath: string; cache: FileCache }> = [];
   const seen = new Set<string>();
@@ -506,6 +522,18 @@ export async function analyzeMedia(
         /* 못 찾으면 없는 것으로 */
       }
     }
+    // 화면 모습 작은 그림 (영상마다 한 번, ffmpeg 만) — R13
+    if (cache.lookVersion !== LOOK_VERSION) {
+      try {
+        onProgress(`화면 모습 저장 중 (${i + 1}/${media.length}): ${path.basename(m.path)}`);
+        cache.looks = await computeLooks(ffmpegPath, m.path);
+        cache.lookVersion = LOOK_VERSION;
+        fs.writeFileSync(cachePath, JSON.stringify(cache));
+      } catch {
+        /* 없으면 글 설명으로 판단 */
+      }
+    }
+    if (cache.looks) looks[m.path] = cache.looks;
     // 이번 미디어 목록 순서로 id 다시 매김 (캐시엔 'x-NN' 형태로 저장)
     const renum = (id: string) => id.replace(/^[^-]+-/, `${prefix}-`);
     const soft = cache.soft || [];
@@ -545,5 +573,7 @@ export async function analyzeMedia(
     descs: entries.flatMap((e) => e.cache.descs || []),
     usage,
     analyzedFiles: todo.length,
+    looks,
+    look: LOOK,
   };
 }

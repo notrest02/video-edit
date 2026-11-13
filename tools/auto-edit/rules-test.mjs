@@ -188,6 +188,10 @@ test('R14', '비슷한 장면 묶음 연달아 → 검사기 경고', () => {
   const descs = [{ id: '1-01', group: '타일벽에 붙이기' }, { id: '2-01', group: '타일벽에 붙이기' }];
   const clips = [{ path: 'a.mp4', start: 0, end: 2.5, srcIn: 0, speed: 1, shot: '1-01' }, { path: 'b.mp4', start: 2.5, end: 5, srcIn: 0, speed: 1, shot: '2-01' }];
   assert(has(issues(SLOTS4.slice(0, 2), clips, SH, { descs }), /비슷한 장면/), '비슷한 장면 연속을 못 잡음');
+  // 후킹 조각끼리는 의뢰자가 정한 구간이라 경고하지 않음 (2026-11-13)
+  const hookSlots = [slot(0, 0, 2.5, true), slot(1, 2.5, 5, true)];
+  const hookClips = clips.map((c) => ({ ...c, hook: true }));
+  assert(!has(issues(hookSlots, hookClips, SH, { descs }), /비슷한 장면/), '후킹 조각끼리 비슷한 장면 경고가 뜸');
 });
 
 test('R15', 'AI 1순위를 못 쓸 때도 문장 핵심(주인공)이 맞는 장면', () => {
@@ -298,6 +302,87 @@ test('R28', '원본의 약한 화면 전환이 컷 처음·끝 0.15초 안에 �
   // 약한 전환이 없으면 AI가 고른 시작점 그대로 (쓸데없이 옮기지 않음)
   const r2 = A.fitAssignment([slot(0, 0, 1)], [{ slot: 0, shot: '1-01', in: 1.0 }], [shot('1-01', 'a.mp4', 0, 3)], null, [], []);
   assert(Math.abs(r2.clips[0].srcIn - 1.0) < 0.06, `약한 전환이 없는데 시작점이 바뀜: ${r2.clips[0].srcIn}`);
+});
+
+test('R13b', '같은 영상 연달아: 실제 화면(작은 그림)이 같아 보이면 금지, 확실히 다르면 허용 — AI 묶음 이름과 상관없이 (운동화 01 12.43초·02 47.95초, 2026-11-13)', () => {
+  // a.mp4 를 0.5초마다 작은 그림으로: 0~9초는 같은 배경(한 번에 찍은 장면), 9초부터는 전혀 다른 화면
+  const W = 12, H = 20, N = W * H * 3, frames = 32;
+  const data = new Uint8Array(frames * N);
+  for (let f = 0; f < frames; f++) for (let i = 0; i < N; i++) data[f * N + i] = f * 0.5 < 9 ? 120 + (i % 7) + (f % 3) : 20 + ((i * 13) % 200);
+  const look = { step: 0.5, w: W, h: H, data };
+  const shots = SH.map((s) => (s.path === 'a.mp4' ? { ...s, look } : s));
+  // AI 는 동작마다 다른 묶음 이름을 붙임 (예전 판단 방식이면 '달라 보임'으로 허용됐던 경우)
+  const d = (id, group, firstFrame, desc) => ({ id, desc, place: '', motion: 'low', parts: [], note: '', group, firstFrame });
+  const descs = [d('1-01', '패치 크기 맞추기', '손에 든 파란 조각', '필름을 손에 들고 크기를 잼'), d('1-03', '패치 붙이기', '흰 운동화 뒤꿈치 안쪽', '뒤꿈치 안쪽에 꾹 눌러 붙임'), d('1-04', '신발 신어 보기', '초록 양말 신은 발', '발을 내밀어 신어 봄')];
+  assert(!A.looksSameShot(descs[0], descs[1]), '시험 준비 잘못: 글 설명만으로도 같아 보인다고 판단함 (예전 방식으로도 통과돼 버림)');
+  const r = A.fitAssignment(SLOTS4.slice(0, 2), [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-03', in: 6.1 }], shots, null, [], [], descs);
+  assert(r.clips[1].shot !== '1-03', `같은 배경(같아 보임)인데 묶음 이름이 달라 연달아 들어감: ${r.clips[1].shot}`);
+  // 같아 보여서 바꾼 자리는 세어서 알려 줌 (너무 많이 바뀌는 프로젝트를 알아채게), 대신 넣는 장면은 다른 영상 파일 먼저 (2026-11-13)
+  assert(r.lookSwaps === 1, `같아 보여서 바꾼 자리 수가 ${r.lookSwaps} (1이어야 함)`);
+  assert(r.clips[1].path !== 'a.mp4', `같아 보여서 막힌 자리에 또 같은 영상의 장면이 들어감: ${r.clips[1].shot}`);
+  // 9초 뒤(1-04)는 화면이 확실히 다름 → 같은 영상이라도 허용 (창문 유리 문장 같은 경우)
+  const r2 = A.fitAssignment(SLOTS4.slice(0, 2), [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-04', in: 9.1 }], shots, null, [], [], descs);
+  assert(r2.clips[1].shot === '1-04' && r2.lookSwaps === 0, `화면이 다른데 막힘: ${r2.clips[1].shot}`);
+  // 원본의 바로 다음 장면(1-02)이라도 같아 보이면 막음 (운동화 03 68.41초 3-07 → 3-08: 같은 배경에서 5초 건너뜀)
+  const r3 = A.fitAssignment(SLOTS4.slice(0, 2), [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-02', in: 4.5 }], shots, null, [], [], descs);
+  assert(r3.clips[1].shot !== '1-02' || Math.abs(r3.clips[1].srcIn - (r3.clips[0].srcIn + 2.5 * r3.clips[0].speed)) < 0.2, `바로 다음 장면이지만 같아 보이는데 건너뛰어 붙음: ${r3.clips[1].shot} ${r3.clips[1].srcIn}`);
+  // 검사기도 같은 기준
+  const bad = [{ path: 'a.mp4', start: 0, end: 2.5, srcIn: 0.06, speed: 1, shot: '1-01' }, { path: 'a.mp4', start: 2.5, end: 5, srcIn: 6.16, speed: 1, shot: '1-03' }];
+  assert(has(issues(SLOTS4.slice(0, 2), bad, shots, { descs }), /같은 영상의 다른 부분/), '같아 보이는데 검사기가 경고 안 함');
+  // 후킹: 지정 구간이 같은 배경 두 조각(0~3, 3.1~6)이면 하나로 쳐서 후킹 길이를 정하고, 조각을 이어 붙이지 않음 (운동화 01 후킹 1.70초)
+  const cap = A.hookCapacity({ path: 'a.mp4', from: 0, to: 6 }, shots);
+  assert(cap < 3.2, `같아 보이는 두 조각을 합쳐 후킹 길이 ${cap.toFixed(2)}초 (한 조각 길이여야 함)`);
+  const hp = A.hookPieces(slot(0, 0, 3, true), { path: 'a.mp4', from: 0, to: 6 }, shots, []);
+  assert(hp.length === 1, `후킹이 같아 보이는 조각 ${hp.length}개로 나뉨`);
+});
+
+test('R20b', '새 문장이 시작되면 앞 컷의 장면을 그대로 이어 쓰지 않음 (사용자 2026-11-13: 다음 문장인데 기존 영상이 쭉 이어지는 것이 가장 걸림)', () => {
+  const shots = [shot('1-01', 'a.mp4', 0, 8), shot('2-01', 'b.mp4', 0, 5), shot('3-01', 'c.mp4', 0, 5)];
+  const asg = [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-01', in: 0 }];
+  // 새 문장(cont=false): AI가 같은 장면을 골라도 다른 장면으로
+  const sl = [slot(0, 0, 2, false, { cont: false }), slot(1, 2, 4, false, { cont: false })];
+  const r = A.fitAssignment(sl, asg, shots, null, [], []);
+  assert(r.clips[1].shot !== '1-01', '새 문장인데 앞 장면이 그대로 이어짐');
+  // 같은 문장(cont=true)은 이어 쓰기 그대로 (R20)
+  const r2 = A.fitAssignment([sl[0], slot(1, 2, 4, false, { cont: true })], asg, shots, null, [], []);
+  assert(r2.clips[1].shot === '1-01', '같은 문장의 이어 쓰기가 막힘');
+  // 검사기도 알림
+  const bad = [{ path: 'a.mp4', start: 0, end: 2, srcIn: 0.06, speed: 1, shot: '1-01' }, { path: 'a.mp4', start: 2, end: 4, srcIn: 2.06, speed: 1, shot: '1-01' }];
+  assert(has(issues(sl, bad, shots), /새 문장인데/), '새 문장에서 장면이 이어지는데 검사기가 경고 안 함');
+  assert(!has(issues([sl[0], slot(1, 2, 4, false, { cont: true })], bad, shots), /새 문장인데/), '같은 문장 이어 쓰기에 경고가 뜸');
+  // 서로 다른 영상 파일끼리 화면이 비슷한 것은 경고하지 않음 (사용자 2026-11-13: 문장이 바뀌면서 컷이 바뀌면 괜찮음)
+  assert(!/다른 영상이지만 화면이 비슷/.test(fs.readFileSync(path.join(ROOT, 'src/utils/autoEdit.ts'), 'utf8')), '다른 파일 화면 비슷함 경고가 다시 들어감');
+});
+
+test('R13d', "'같아 보임' 기준이 사용자가 사진으로 고른 답과 맞음 (eval_data/look-pairs — 고객 자료라 이 PC 에만 있음, 없으면 건너뜀)", () => {
+  const f = path.join(ROOT, 'eval_data/look-pairs/pairs.json');
+  if (!fs.existsSync(f)) return;
+  const dec = (b64) => new Uint8Array(Buffer.from(b64, 'base64'));
+  const one = (p, data) => ({ ...shot('9-01', p, 0, 2), look: { step: 0.25, w: 12, h: 20, data: new Uint8Array([...data, ...data, ...data, ...data, ...data, ...data, ...data, ...data, ...data]) } });
+  const wrong = [];
+  for (const p of JSON.parse(fs.readFileSync(f, 'utf8'))) {
+    const sc = A.lookScore(one('x.mp4', dec(p.a)), 1, one('y.mp4', dec(p.b)), 1);
+    if (!p.limit && sc < A.LOOK_SAME_SCORE !== p.same) wrong.push(`${p.no}번(${p.what}) 점수 ${sc.toFixed(2)} — 사용자는 ${p.same ? '같아 보임' : '괜찮음'}`);
+  }
+  assert(!wrong.length, `사용자 답과 다른 쌍: ${wrong.join(' / ')}`);
+});
+
+test('R04b', '이어 쓰기로 한 장면이 너무 오래 계속되지 않음: 코드가 대신 고를 땐 안 잇고, AI가 고른 건 검사기가 알림 (운동화 01 8.63~16.30초, 2026-11-13)', () => {
+  const shots = [shot('1-01', 'a.mp4', 0, 20), shot('2-01', 'b.mp4', 0, 5), shot('3-01', 'c.mp4', 0, 5), shot('4-01', 'd.mp4', 0, 5)];
+  const sl = [slot(0, 0, 3.5), slot(1, 3.5, 7, false, { cont: true })];
+  const max = A.maxCutLen(A.shotLenCap(shots));
+  assert(7 > max + 0.15, '시험 준비 잘못: 두 컷을 이어도 상한 안쪽');
+  // AI 답이 틀려서(없는 장면) 코드가 대신 고름 → 앞 장면을 이어 붙여 7초짜리 한 장면을 만들면 안 됨
+  const r = A.fitAssignment(sl, [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '9-99', in: 0 }], shots, null, [], []);
+  assert(r.clips.length === 2 && r.clips[1].shot !== '1-01', `대신 고르면서 앞 장면을 이어 붙여 한 장면이 7초 계속됨 (${r.clips[1]?.shot})`);
+  // AI가 직접 이어 쓰기를 고르면 그대로 두되(R20) 검사기가 알림
+  const r2 = A.fitAssignment(sl, [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-01', in: 0 }], shots, null, [], []);
+  assert(r2.clips[1].shot === '1-01', 'AI가 고른 이어 쓰기가 바뀜');
+  assert(has(A.auditPlan(sl, r2.clips, shots, { hi: A.shotLenCap(shots), fps: 30 }), /한 장면이 .*계속됨/), '한 장면이 오래 계속되는데 검사기가 경고 안 함');
+  // 상한 안쪽 이어 쓰기는 경고 없음
+  const sl2 = [slot(0, 0, 2), slot(1, 2, 4, false, { cont: true })];
+  const r3 = A.fitAssignment(sl2, [{ slot: 0, shot: '1-01', in: 0 }, { slot: 1, shot: '1-01', in: 0 }], shots, null, [], []);
+  assert(!has(A.auditPlan(sl2, r3.clips, shots, { hi: A.shotLenCap(shots), fps: 30 }), /계속됨/), '짧은 이어 쓰기에 경고가 뜸');
 });
 
 test('R29', '컷은 자막이 바뀌기 3프레임 앞에서 (컷 자리 = 자막 시작 - 3프레임)', () => {

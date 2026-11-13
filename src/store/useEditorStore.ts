@@ -17,7 +17,7 @@ import {
 } from '../types/editor';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
 import { voiceStartCaption, withSnapLead } from '../utils/snapLead';
-import { auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
+import { attachLooks, auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
 import { clipAudioKey } from '../utils/forcedAligner';
 import {
   CaptionDiffItem,
@@ -3295,11 +3295,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const an = await api.autoEditAnalyze({ media: media.map((m) => ({ path: m.path, duration: m.duration })), product });
         off?.();
         usage.input += an.usage.input;
+        // 화면 모습 작은 그림을 샷에 붙임 (R13 '같은 컷처럼 보이는지' 실제 화면으로 비교). AI 에 보내는 샷 목록(an.shots)엔 안 붙임
+        const shotsV = attachLooks(an.shots, an.looks, an.look);
         usage.output += an.usage.output;
         // 2) 광고 구간마다: 자막 경계로 컷 자리 → Claude 배정 → 원본 구간/속도 맞추기
         //   규칙: 경계에서 반드시 컷(구간마다 따로 계산), 구간 첫 컷 = 그 광고 후킹, 같은 장면 재사용 금지는 광고 안에서만,
         //   다른 광고(다른 시퀀스 + 앞 구간)에서 쓴 장면은 되도록 피함 — 단 후킹(광고주 지정)은 겹쳐도 됨
-        const hi = shotLenCap(an.shots);
+        const hi = shotLenCap(shotsV);
         // 다른 시퀀스의 후킹 컷(후킹 지정 광고 구간의 첫 영상 컷)은 빼고 넘김 — 후킹은 광고주 지정이라 겹쳐도 됨 (R27)
         const otherClips = st.sequences
           .filter((s) => s.id !== st.activeSequenceId)
@@ -3307,10 +3309,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
             const hookStarts = (s.adSegments || []).filter((g) => g.hook).map((g) => g.start);
             return (s.clips || []).filter((c) => !(c.type === 'video' && hookStarts.some((t) => Math.abs(c.startTime - t) < 0.05)));
           });
-        const usedOther = usedRangesFromClips(otherClips, an.shots);
+        const usedOther = usedRangesFromClips(otherClips, shotsV);
         const allClips: AutoEditPlan['clips'] = [];
         const warnings: string[] = [];
         const issues: string[] = [];
+        // '앞 컷과 같아 보여서' 바꾼 자리 수 (R13): 너무 많으면 화면이 이 영상 저 영상으로 자주 바뀜 → 결과에 보여 주고, 한 광고에서 2개를 넘으면 알림
+        let lookSwapTotal = 0;
+        let aiSlotTotal = 0;
         for (let gi = 0; gi < segs.length; gi++) {
           const g = segs[gi];
           const segCaps = caps
@@ -3319,7 +3324,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           if (!segCaps.length) continue;
           // 후킹 지정 길이 + 그 구간에서 실제로 쓸 수 있는 원본 길이 → 후킹이 첫 문장 끝까지 덮을지 정함
           // 후킹 길이 = 대본 지정 초("3초 : n번 a~b초"의 3초). a~b 는 장면을 가져올 범위일 뿐 길이가 아님 (편집자 정답 32개 모두 3.0초)
-          const hookOpts = g.hook ? { hookSec: g.hook.sec || g.hook.to - g.hook.from, hookCap: hookCapacity(g.hook, an.shots) } : {};
+          const hookOpts = g.hook ? { hookSec: g.hook.sec || g.hook.to - g.hook.from, hookCap: hookCapacity(g.hook, shotsV) } : {};
           const slots = buildSlotsFromCaptions(segCaps, g.end - g.start, { hi, fps: st.fps, ...hookOpts }).map((s) => ({
             ...s,
             start: s.start + g.start,
@@ -3329,22 +3334,22 @@ export const useEditorStore = create<EditorState>((set, get) => {
           }));
           if (!g.hook) slots[0].hook = false; // 후킹 지정이 없으면 첫 컷도 AI 가 고름
           // 대본 만들기가 저장한 문장별 근거 장면 → 이 자리의 1순위 후보 (R25)
-          for (const sl of slots) sl.basis = basisShotIds(sl, st.scriptBasis, an.shots);
+          for (const sl of slots) sl.basis = basisShotIds(sl, st.scriptBasis, shotsV);
           const prevNonHook = allClips.filter((c) => !c.hook);
           const usedPrev = usedRangesFromClips(
             prevNonHook.map((c) => ({ type: 'video' as const, sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })),
-            an.shots
+            shotsV
           );
           const avoid = [...usedOther.ranges, ...usedPrev.ranges];
           const capTimes = caps.map((c) => c.startTime);
           // 후킹 지정 구간에서 장면을 못 찾으면(초를 잘못 적었거나 영상이 없음) 첫 컷도 AI가 고르게 → 빈 화면 방지
           let segHook = g.hook;
-          if (segHook && !hookPieces(slots[0], segHook, an.shots, capTimes).length) {
+          if (segHook && !hookPieces(slots[0], segHook, shotsV, capTimes).length) {
             warnings.push(`⚠️ ${g.name || '광고'}: 후킹 지정 구간에서 쓸 장면을 찾지 못해 AI가 첫 컷을 고름 (영상·초 확인)`);
             segHook = null;
             slots[0].hook = false;
           }
-          const hookOnly = segHook ? fitAssignment(slots.slice(0, 1), [], an.shots, segHook, avoid, capTimes, an.descs) : null;
+          const hookOnly = segHook ? fitAssignment(slots.slice(0, 1), [], shotsV, segHook, avoid, capTimes, an.descs) : null;
           const hookUsed = (hookOnly?.clips || []).map((c) => ({
             shot: c.shot || '',
             from: +c.srcIn.toFixed(2),
@@ -3361,18 +3366,23 @@ export const useEditorStore = create<EditorState>((set, get) => {
           });
           usage.input += res.usage.input;
           usage.output += res.usage.output;
-          const fitted = fitAssignment(slots, res.assign, an.shots, segHook, avoid, capTimes, an.descs);
+          const fitted = fitAssignment(slots, res.assign, shotsV, segHook, avoid, capTimes, an.descs);
           // AI가 '맞는 장면 없음(대체)'이라고 한 자리 → 확인 목록에
           for (const a of res.assign) {
             if (a.fit !== '대체') continue;
             const sl = slots.find((x) => x.slot === a.slot);
             if (sl) issues.push(`⚠️ ${segs.length > 1 ? `${g.name}: ` : ''}${sl.start.toFixed(2)}초 「${sl.text}」 딱 맞는 장면이 없어 대체함 (핵심: ${a.focus || '-'})`);
           }
+          const aiSlots = slots.filter((s) => !s.hook).length;
+          lookSwapTotal += fitted.lookSwaps;
+          aiSlotTotal += aiSlots;
+          if (fitted.lookSwaps > 2)
+            issues.push(`⚠️ ${segs.length > 1 ? `${g.name}: ` : ''}앞 컷과 같아 보여서 바꾼 자리가 컷 ${aiSlots}개 중 ${fitted.lookSwaps}개 (원본이 비슷한 화면 위주일 수 있음 — 장면이 너무 자주 바뀌지 않는지 확인)`);
           allClips.push(...fitted.clips);
           warnings.push(...fitted.warnings.map((w) => (segs.length > 1 ? `${g.name}: ${w}` : w)));
           // 결과 검사기: 절대 선(빈 화면·너무 느림·장면 경계·반복·꼬리 컷…)을 결과만 보고 다시 확인
           const segCapsAbs = caps.filter((c) => c.startTime >= g.start - 0.02 && c.startTime < g.end - 0.02);
-          for (const it of auditPlan(slots, fitted.clips, an.shots, { hi, fps: st.fps, caps: segCapsAbs, descs: an.descs }))
+          for (const it of auditPlan(slots, fitted.clips, shotsV, { hi, fps: st.fps, caps: segCapsAbs, descs: an.descs }))
             issues.push(`${it.level === 'error' ? '❌' : '⚠️'} ${segs.length > 1 ? `${g.name}: ` : ''}${it.msg}`);
         }
         // 3) 타임라인 배치 → 자막을 컷에 맞추기
@@ -3384,6 +3394,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         const msg =
           `AI 자동 배치 완료${segs.length > 1 ? ` (광고 ${segs.length}개)` : ''}: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
           `(새로 분석한 영상 ${an.analyzedFiles}개, 사용량 약 $${cost.toFixed(3)})` +
+          ` · 같아 보여서 바꾼 자리 ${lookSwapTotal}/${aiSlotTotal}` +
           (issues.length ? ` · 검사 결과 확인 필요 ${issues.length}개: ${issues.join(' / ')}` : ' · 검사 결과 문제 없음') +
           (fitted.warnings.length ? ` · 참고(자동으로 바꾼 것): ${fitted.warnings.join(' / ')}` : '');
         if (issues.length || fitted.warnings.length) console.warn('[자동 배치 검사]', { issues, warnings: fitted.warnings });

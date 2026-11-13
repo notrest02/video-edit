@@ -1,14 +1,9 @@
-import { blurPointsAt, maskPngDataUrl } from '../utils/blurMask';
-import { effectiveMasks } from '../utils/autoMask';
-import { hasTextMotionKeyframes, resolveTextAt, shiftKeyframes } from '../utils/keyframes';
 import React, { useEffect, useState } from 'react';
 import { Undo2, Redo2, Download, Loader2, Save, FolderOpen, FilePlus, Keyboard } from 'lucide-react';
 import { ShortcutSettingsModal } from './ShortcutSettingsModal';
 import { useEditorStore } from '../store/useEditorStore';
-import { renderSubtitleClipToPngDataUrl } from '../utils/subtitleCanvasRenderer';
-import { ensureFontsForValues } from '../utils/pcFonts';
-import { ensureGdiClipsReady } from '../utils/gdiFonts';
-import type { ExportCheckResult, TimelineClip } from '../types/editor';
+import type { ExportCheckResult } from '../types/editor';
+import { exportRange } from '../utils/exportRange';
 
 type CheckReport = { file: string; check: ExportCheckResult };
 
@@ -52,34 +47,6 @@ const ExportCheckModal: React.FC<{ reports: CheckReport[]; onClose: () => void }
     </div>
   );
 };
-
-/**
- * 렌더 구간 [rangeStart, rangeEnd) 안으로 클립을 잘라내고 0초 기준으로 당긴다.
- * 구간 밖 클립은 제외, 걸친 클립은 원본 시작점(sourceStart)도 함께 보정.
- */
-function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: number): TimelineClip | null {
-  const s = Math.max(c.startTime, rangeStart);
-  const e = Math.min(c.startTime + c.duration, rangeEnd);
-  if (e - s < 1e-4) return null;
-  return {
-    ...c,
-    // 앞을 잘라낸 만큼 키프레임 시각도 당김 (클립 안 시각 기준)
-    keyframes: shiftKeyframes(c.keyframes, s - c.startTime),
-    blurMasks: c.blurMasks?.map((m) => {
-      const cut = s - c.startTime;
-      return {
-        ...m,
-        keyframes: m.keyframes?.map((f) => ({ ...f, t: f.t - cut })),
-        from: m.from !== undefined ? m.from - cut : undefined,
-        to: m.to !== undefined ? m.to - cut : undefined,
-      };
-    }),
-    startTime: s - rangeStart,
-    duration: e - s,
-    sourceStart:
-      c.type === 'text' ? c.sourceStart : c.sourceStart + (s - c.startTime) * (c.speed && c.speed > 0 ? c.speed : 1),
-  };
-}
 
 export const TopHeader: React.FC = () => {
   const [isExporting, setIsExporting] = useState(false);
@@ -127,79 +94,7 @@ export const TopHeader: React.FC = () => {
   }, []);
 
   /** [rangeStart, rangeEnd] 구간을 MP4 로. outputPath 를 주면 저장 창 없이 그 경로로 (광고 구간별 내보내기) */
-  const renderRangeTo = async (rangeStart: number, rangeEnd: number, outputPath?: string) => {
-    const visibleTrackIds = new Set(tracks.filter((t) => t.visible !== false).map((t) => t.id));
-    const audioTracks = tracks.filter((t) => t.type === 'audio');
-    const anySolo = audioTracks.some((t) => t.solo);
-    const activeAudioTrackIds = new Set(audioTracks.filter((t) => (anySolo ? t.solo : !t.muted)).map((t) => t.id));
-    const fullDuration = getTotalDuration();
-    const ranged =
-      rangeStart > 0 || rangeEnd < fullDuration
-        ? (clips.map((c) => clipToRange(c, rangeStart, rangeEnd)).filter(Boolean) as TimelineClip[])
-        : clips;
-    const pick = (type: 'video' | 'audio', ok: (c: TimelineClip) => boolean) =>
-      ranged
-        .filter((c) => c.type === type && ok(c) && c.sourcePath)
-        .map((c) => ({
-          id: c.id,
-          sourcePath: c.sourcePath!,
-          startTime: c.startTime,
-          duration: c.duration,
-          sourceStart: c.sourceStart,
-          speed: c.speed && c.speed > 0 ? c.speed : 1,
-          volume: c.volume,
-          muted: c.muted,
-          ...(type === 'video'
-            ? { scale: c.scale, posX: c.posX, posY: c.posY, rotation: c.rotation, opacity: c.opacity, keyframes: c.keyframes }
-            : {}),
-        }));
-    const outW = sequence.width || 1920;
-    const outH = sequence.height || 1080;
-    await ensureFontsForValues(ranged.map((c) => c.fontFamily));
-    await ensureGdiClipsReady(ranged.filter((c) => c.type === 'text'));
-    const subtitleOverlays = ranged
-      .filter((c) => c.type === 'text' && visibleTrackIds.has(c.trackId) && c.text && c.text.trim().length > 0)
-      .map((c) => ({
-        id: c.id,
-        startTime: c.startTime,
-        endTime: c.startTime + c.duration,
-        pngDataUrl: renderSubtitleClipToPngDataUrl(resolveTextAt(c, 0), outW, outH),
-        // 모션 키프레임이 있는 자막: 프레임마다 그린 PNG (위치/크기/회전/불투명도가 움직임)
-        frames: hasTextMotionKeyframes(c)
-          ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, f) =>
-              renderSubtitleClipToPngDataUrl(resolveTextAt(c, f / (sequence.fps || fps)), outW, outH)
-            )
-          : undefined,
-      }))
-      .filter((s) => s.pngDataUrl.length > 0);
-    const withMasks = (vc: ReturnType<typeof pick>) =>
-      vc.map((v) => {
-        const c = ranged.find((x) => x.id === v.id);
-        const f = sequence.fps || fps;
-        return {
-          ...v,
-          masks: effectiveMasks(c?.blurMasks, c?.duration || 0).map((m) => ({
-            png: maskPngDataUrl(blurPointsAt(m, 0, outW, outH), outW, outH, m.feather),
-            blur: m.blur,
-            from: m.from,
-            to: m.to,
-            frames: m.keyframes?.length
-              ? Array.from({ length: Math.max(1, Math.ceil((c?.duration || 0) * f)) }, (_, k) => maskPngDataUrl(blurPointsAt(m, k / f, outW, outH), outW, outH, m.feather))
-              : undefined,
-          })),
-        };
-      });
-    return window.electronAPI!.exportVideo({
-      videoClips: withMasks(pick('video', (c) => visibleTrackIds.has(c.trackId))),
-      audioClips: pick('audio', (c) => activeAudioTrackIds.has(c.trackId)),
-      subtitleOverlays,
-      totalDuration: rangeEnd - rangeStart,
-      fps: sequence.fps || fps,
-      width: outW,
-      height: outH,
-      outputPath,
-    });
-  };
+  const renderRangeTo = (rangeStart: number, rangeEnd: number, outputPath?: string) => exportRange(rangeStart, rangeEnd, outputPath);
 
   /** 광고 구간마다 파일 하나씩: 저장 폴더 한 번 고르고 <구간 이름>.mp4 로 */
   const handleExportSegments = async () => {
@@ -241,13 +136,6 @@ export const TopHeader: React.FC = () => {
       await handleExportSegments();
       return;
     }
-    const visibleTrackIds = new Set(tracks.filter((t) => t.visible !== false).map((t) => t.id));
-    const audioTracks = tracks.filter((t) => t.type === 'audio');
-    const anySolo = audioTracks.some((t) => t.solo);
-    const activeAudioTrackIds = new Set(
-      audioTracks.filter((t) => (anySolo ? t.solo : !t.muted)).map((t) => t.id)
-    );
-
     if (clips.length === 0) {
       setStatusMessage('내보낼 클립이 타임라인에 없습니다.');
       return;
@@ -260,98 +148,12 @@ export const TopHeader: React.FC = () => {
       setStatusMessage('인/아웃 구간이 너무 짧거나 클립이 없는 위치입니다.');
       return;
     }
-    const rangedClips = useInOutRange
-      ? (clips
-          .map((c) => clipToRange(c, rangeStart, rangeEnd))
-          .filter(Boolean) as TimelineClip[])
-      : clips;
-
     setIsExporting(true);
     setExportProgress(1);
     setStatusMessage('MP4 렌더링 준비 중...');
 
     try {
-      const videoClips = rangedClips
-        .filter((c) => c.type === 'video' && visibleTrackIds.has(c.trackId) && c.sourcePath)
-        .map((c) => ({
-          id: c.id,
-          sourcePath: c.sourcePath!,
-          startTime: c.startTime,
-          duration: c.duration,
-          sourceStart: c.sourceStart,
-          speed: c.speed && c.speed > 0 ? c.speed : 1,
-          volume: c.volume,
-          muted: c.muted,
-          scale: c.scale,
-          posX: c.posX,
-          posY: c.posY,
-          rotation: c.rotation,
-          opacity: c.opacity,
-          keyframes: c.keyframes,
-          masks: effectiveMasks(c.blurMasks, c.duration).map((m) => ({
-            png: maskPngDataUrl(blurPointsAt(m, 0, sequence.width || 1920, sequence.height || 1080), sequence.width || 1920, sequence.height || 1080, m.feather),
-            blur: m.blur,
-            from: m.from,
-            to: m.to,
-            frames: m.keyframes?.length
-              ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, k) =>
-                  maskPngDataUrl(blurPointsAt(m, k / (sequence.fps || fps), sequence.width || 1920, sequence.height || 1080), sequence.width || 1920, sequence.height || 1080, m.feather)
-                )
-              : undefined,
-          })),
-        }));
-
-      const audioClips = rangedClips
-        .filter((c) => c.type === 'audio' && activeAudioTrackIds.has(c.trackId) && c.sourcePath)
-        .map((c) => ({
-          id: c.id,
-          sourcePath: c.sourcePath!,
-          startTime: c.startTime,
-          duration: c.duration,
-          sourceStart: c.sourceStart,
-          speed: c.speed && c.speed > 0 ? c.speed : 1,
-          volume: c.volume,
-          muted: c.muted,
-        }));
-
-      const outW = sequence.width || 1920;
-      const outH = sequence.height || 1080;
-
-      // 자막에 쓰인 내 PC 글꼴을 모두 불러온 뒤에 그려야 기본 글꼴로 렌더되지 않음
-      await ensureFontsForValues(rangedClips.map((c) => c.fontFamily));
-      // Windows(GDI) 렌더 글꼴은 자막에 쓰인 글자 윤곽선을 미리 받아둔다
-      await ensureGdiClipsReady(rangedClips.filter((c) => c.type === 'text'));
-
-      const subtitleOverlays = rangedClips
-        .filter(
-          (c) =>
-            c.type === 'text' &&
-            visibleTrackIds.has(c.trackId) &&
-            c.text &&
-            c.text.trim().length > 0
-        )
-        .map((c) => ({
-          id: c.id,
-          startTime: c.startTime,
-          endTime: c.startTime + c.duration,
-          pngDataUrl: renderSubtitleClipToPngDataUrl(resolveTextAt(c, 0), outW, outH),
-          frames: hasTextMotionKeyframes(c)
-            ? Array.from({ length: Math.max(1, Math.ceil(c.duration * (sequence.fps || fps))) }, (_, f) =>
-                renderSubtitleClipToPngDataUrl(resolveTextAt(c, f / (sequence.fps || fps)), outW, outH)
-              )
-            : undefined,
-        }))
-        .filter((s) => s.pngDataUrl.length > 0);
-
-      const res = await window.electronAPI.exportVideo({
-        videoClips,
-        audioClips,
-        subtitleOverlays,
-        totalDuration: rangeEnd - rangeStart,
-        fps: sequence.fps || fps,
-        width: outW,
-        height: outH,
-      });
+      const res = await exportRange(rangeStart, rangeEnd);
 
       if (res.canceled) {
         setStatusMessage('내보내기가 취소되었습니다.');

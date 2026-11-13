@@ -7,6 +7,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { createRequire } from 'module';
+import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -37,7 +38,8 @@ const norm = (p) => (p || '').split('\\').join('/').toLowerCase();
 const proj = JSON.parse(fs.readFileSync(projPath, 'utf8'));
 const seq = proj.sequences[0];
 const media = proj.assets.filter((a) => a.type === 'video');
-const shots = [], descs = [], seen = new Set();
+const shots0 = [], descs = [], seen = new Set();
+const looksByPath = {};
 media.forEach((v, i) => {
   if (!fs.existsSync(v.path)) return;
   const k = contentKey(v.path);
@@ -46,13 +48,21 @@ media.forEach((v, i) => {
   const f = path.join(CACHE, k + '.json');
   if (!fs.existsSync(f)) return;
   const c = JSON.parse(fs.readFileSync(f, 'utf8'));
-  for (const s of c.shots) shots.push({ ...s, id: `${i + 1}-${s.id.split('-')[1]}`, path: v.path });
+  // 화면 모습 작은 그림 (R13): 캐시에 없으면 여기서 ffmpeg 로 만듦 (앱과 같은 12x20, 0.25초)
+  let looks = c.looks;
+  if (!looks) {
+    const r = spawnSync(path.join(ROOT, 'node_modules/ffmpeg-static/ffmpeg.exe'), ['-v', 'error', '-i', v.path, '-vf', 'fps=4,scale=12:20:flags=area,format=rgb24', '-f', 'rawvideo', '-'], { maxBuffer: 2 ** 28 });
+    looks = r.stdout.toString('base64');
+  }
+  looksByPath[v.path] = looks;
+  for (const s of c.shots) shots0.push({ ...s, id: `${i + 1}-${s.id.split('-')[1]}`, path: v.path, ...(c.soft ? { soft: c.soft.filter((t) => t > s.start && t < s.end) } : {}) });
   for (const d of c.descs || []) descs.push({ ...d, id: `${i + 1}-${d.id.split('-')[1]}` });
 });
+const shots = A.attachLooks(shots0, looksByPath, { step: 0.25, w: 12, h: 20 });
 const hi = A.shotLenCap(shots);
 const RULE = [
   [/빈 화면/, 'R01'], [/너무 느림/, 'R02'], [/장면 경계/, 'R03'], [/짧음|김\b/, 'R04'], [/맺음말/, 'R05'], [/말 덩어리 중간/, 'R06'],
-  [/후킹 바로 다음/, 'R11'], [/같은 장면을 다시/, 'R12'], [/같은 영상의 다른 부분/, 'R13'], [/비슷한 장면/, 'R14'], [/한 문장 안에서/, 'R23'],
+  [/후킹 바로 다음/, 'R11'], [/같은 장면을 다시/, 'R12'], [/같은 영상의 다른 부분/, 'R13'], [/비슷한 장면/, 'R14'], [/계속됨/, 'R04 긴 장면'], [/새 문장인데/, 'R20b'], [/한 문장 안에서/, 'R23'],
 ];
 let bad = 0;
 const prevClips = [];
@@ -72,8 +82,13 @@ logFiles.forEach((lf, gi) => {
   const is = A.auditPlan(sl, r.clips, shots, { hi, fps: seq.fps || 30, descs });
   const hardRules = is.filter((i) => /R0[1-3]|R1[1-3]/.test(RULE.find(([re]) => re.test(i.msg))?.[1] || ''));
   bad += hardRules.length;
-  console.log(`\n■ ${g?.name || `광고 ${gi + 1}`} — 코드가 바꾼 것 ${r.warnings.length}개, 검사기 ${is.length}개`);
+  console.log(`\n■ ${g?.name || `광고 ${gi + 1}`} — 코드가 바꾼 것 ${r.warnings.length}개 (그중 같아 보여서 바꾼 자리 ${r.lookSwaps}/${assign.length}), 검사기 ${is.length}개`);
   for (const w of r.warnings) console.log(`   · ${w}`);
+  r.clips.forEach((c, k) => {
+    const p = r.clips[k - 1];
+    const same = p && p.path === c.path && p.shot !== c.shot;
+    console.log(`     ${c.start.toFixed(2)}~${c.end.toFixed(2)} ${c.hook ? '후킹 ' : ''}${c.shot} 원본 ${c.srcIn.toFixed(2)} x${c.speed.toFixed(2)}${same ? '  ← 앞 컷과 같은 영상' : ''}`);
+  });
   for (const i of is) console.log(`   ${i.level === 'error' ? '❌' : '⚠️'} [${RULE.find(([re]) => re.test(i.msg))?.[1] || '-'}] ${i.msg}`);
 });
 console.log(`\n코드로 막는 규칙(R01~R03, R11~R13) 위반: ${bad}개`);
