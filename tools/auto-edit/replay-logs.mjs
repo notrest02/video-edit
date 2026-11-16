@@ -65,7 +65,9 @@ const RULE = [
   [/후킹 바로 다음/, 'R11'], [/같은 장면을 다시/, 'R12'], [/같은 영상의 다른 부분/, 'R13'], [/비슷한 장면/, 'R14'], [/계속됨/, 'R04 긴 장면'], [/새 문장인데/, 'R20b'], [/한 문장 안에서/, 'R23'],
 ];
 let bad = 0;
-const prevClips = [];
+const prevClips = []; // 앞 광고의 컷 (앱과 같이 후킹은 빼고 — 후킹은 겹쳐도 됨, R27)
+const prevShotIds = [];
+const overlapTotal = { cross: 0, inner: 0, n: 0 };
 logFiles.forEach((lf, gi) => {
   const g = seq.adSegments?.[gi];
   const L = JSON.parse(fs.readFileSync(lf, 'utf8'));
@@ -78,7 +80,17 @@ logFiles.forEach((lf, gi) => {
   }
   const used = A.usedRangesFromClips(prevClips, shots);
   const r = A.fitAssignment(sl, assign, shots, hook, used.ranges, [], descs);
-  prevClips.push(...r.clips.map((c) => ({ type: 'video', sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })));
+  // 겹침 세기 (R39): 앞 광고에서 쓴 장면을 다시 쓴 컷 / 이 광고 안에서 같은 장면을 (이어 쓰기 아닌데) 다시 쓴 컷 — 후킹 제외
+  const prevShots = new Set(prevShotIds);
+  const nonHook = r.clips.filter((c) => !c.hook);
+  const crossDup = nonHook.filter((c) => prevShots.has(c.shot)).length;
+  const inDup = r.clips.filter((c, k) => !c.hook && r.clips.slice(0, k).some((p, j) => p.shot === c.shot && !(j === k - 1))).length;
+  overlapTotal.cross += crossDup;
+  overlapTotal.inner += inDup;
+  overlapTotal.n += nonHook.length;
+  console.log(`\n   겹침: 앞 광고에서 쓴 장면 다시 씀 ${crossDup}/${nonHook.length} · 이 광고 안 같은 장면 다시 씀 ${inDup} · 비슷한 장면으로 바꾼 자리 ${r.reuseSwaps ?? '-'}`);
+  prevShotIds.push(...nonHook.map((c) => c.shot));
+  prevClips.push(...r.clips.filter((c) => !c.hook).map((c) => ({ type: 'video', sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })));
   const is = A.auditPlan(sl, r.clips, shots, { hi, fps: seq.fps || 30, descs });
   const hardRules = is.filter((i) => /R0[1-3]|R1[1-3]/.test(RULE.find(([re]) => re.test(i.msg))?.[1] || ''));
   bad += hardRules.length;
@@ -87,10 +99,14 @@ logFiles.forEach((lf, gi) => {
   r.clips.forEach((c, k) => {
     const p = r.clips[k - 1];
     const same = p && p.path === c.path && p.shot !== c.shot;
-    console.log(`     ${c.start.toFixed(2)}~${c.end.toFixed(2)} ${c.hook ? '후킹 ' : ''}${c.shot} 원본 ${c.srcIn.toFixed(2)} x${c.speed.toFixed(2)}${same ? '  ← 앞 컷과 같은 영상' : ''}`);
+    const d = descs.find((x) => x.id === c.shot);
+    const reused = !c.hook && prevShots.has(c.shot);
+    console.log(`     ${c.start.toFixed(2)}~${c.end.toFixed(2)} ${c.hook ? '후킹 ' : ''}${c.shot} 원본 ${c.srcIn.toFixed(2)} x${c.speed.toFixed(2)}${same ? '  ← 앞 컷과 같은 영상' : ''}${reused ? '  ← 앞 광고에서 씀' : ''}`);
+    if (process.env.VERBOSE) console.log(`         「${c.text}」 [${d?.stage || '-'} / ${d?.subject || '-'} / ${d?.place || '-'}] ${d?.desc || ''}`);
   });
   for (const i of is) console.log(`   ${i.level === 'error' ? '❌' : '⚠️'} [${RULE.find(([re]) => re.test(i.msg))?.[1] || '-'}] ${i.msg}`);
 });
-console.log(`\n코드로 막는 규칙(R01~R03, R11~R13) 위반: ${bad}개`);
+console.log(`\n겹침 합계 (R39): 앞 광고와 같은 장면 ${overlapTotal.cross}/${overlapTotal.n} 컷 · 광고 안 같은 장면 다시 씀 ${overlapTotal.inner}`);
+console.log(`코드로 막는 규칙(R01~R03, R11~R13) 위반: ${bad}개`);
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(bad ? 1 : 0);

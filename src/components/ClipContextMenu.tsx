@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useEditorStore, clipSpeed, MIN_CLIP_SPEED, MAX_CLIP_SPEED } from '../store/useEditorStore';
 import { displayBinding, getShortcutMap } from '../utils/shortcuts';
+import { openSceneSwap } from './SceneSwapModal';
 
 const PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
@@ -64,7 +65,7 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
 
   // 화면 밖으로 나가지 않게 위치 보정
   const W = 250;
-  const H = isText ? 120 : 440;
+  const H = isText ? 120 : 480;
   const left = Math.min(x, window.innerWidth - W - 8);
   const top = Math.min(y, window.innerHeight - H - 8);
 
@@ -156,6 +157,14 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
       )}
       {clip.type === 'video' && (
         <>
+          <button
+            onClick={() => run(() => openSceneSwap(clipId))}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white"
+            title="이 컷 자막에 어울리는 다른 장면을 사진·설명과 함께 보여 줍니다 (비용 없음)"
+          >
+            다른 장면 후보 보기…
+          </button>
+          <div className="h-px bg-[#3a3a3a] my-1" />
           <button
             onClick={() => run(() => st.fitClipsToFrame(frameTargets, 'fill'))}
             className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"

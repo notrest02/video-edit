@@ -10,7 +10,7 @@ import ffmpegStatic from 'ffmpeg-static';
 import ffprobeStatic from 'ffprobe-static';
 import { GdiGlyphService } from './gdiGlyphHelper';
 import { clearClaudeKey, hasClaudeKey, saveClaudeKey, testClaudeKey } from './claudeService';
-import { analyzeMedia, sceneCuts } from './sceneAnalyzer';
+import { analyzeMedia, readCachedScenes, sceneCuts, sceneThumb } from './sceneAnalyzer';
 import { assignShots } from './autoEditAssign';
 import { factsFromVideos, generateScripts, parseOrder, planVersions, type ScriptGenParams } from './scriptGenerator';
 import { docxToText } from './docxText';
@@ -352,6 +352,9 @@ ipcMain.handle(
 // 손으로 편집할 때 쓰는 원본 장면 구간 (비용 없음) — R36
 ipcMain.handle('scene:cuts', async (_e, p: { path: string; duration: number }) => sceneCuts(resolvedFfmpegPath, p.path, p.duration));
 ipcMain.handle('autoEdit:assign', async (_e, params: Parameters<typeof assignShots>[0]) => assignShots(params));
+// 장면 바꾸기 도우미 (비용 없음): 저장된 분석만 읽기 + 장면 사진 한 장
+ipcMain.handle('scene:cached', async (_e, p: { media: Array<{ path: string }> }) => readCachedScenes(p.media));
+ipcMain.handle('scene:thumb', async (_e, p: { path: string; t: number }) => sceneThumb(resolvedFfmpegPath, p.path, p.t));
 
 // ---------- STEP 0 대본 만들기 (Claude) ----------
 ipcMain.handle('scriptGen:generate', async (e, params: ScriptGenParams) =>

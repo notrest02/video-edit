@@ -587,3 +587,47 @@ export async function analyzeMedia(
     look: LOOK,
   };
 }
+
+/**
+ * 장면 바꾸기 도우미용: 이미 저장된 분석만 읽음 (AI·ffmpeg 호출 없음 = 비용 없음).
+ * id 는 analyzeMedia 와 같은 방식 (미디어 순서 번호-샷 번호). 분석이 없는 영상은 missing 으로 알려 줌
+ */
+export function readCachedScenes(media: Array<{ path: string }>): { shots: Shot[]; descs: ShotDesc[]; missing: string[]; alias: Record<string, string> } {
+  const shots: Shot[] = [];
+  const descs: ShotDesc[] = [];
+  const missing: string[] = [];
+  // 내용이 같은 복사본(시퀀스별 폴더 등) → 먼저 나온 경로 하나로. 쓴 기록을 셀 때 복사본도 같은 장면으로 보려고 (R35)
+  const alias: Record<string, string> = {};
+  const seen = new Map<string, string>();
+  media.forEach((m, i) => {
+    try {
+      if (!fs.existsSync(m.path)) return void missing.push(m.path);
+      const key = cacheKey(m.path);
+      const first = seen.get(key);
+      if (first) return void (alias[m.path] = first);
+      seen.set(key, m.path);
+      alias[m.path] = m.path;
+      const f = path.join(cacheDir(), `${key}.json`);
+      if (!fs.existsSync(f)) return void missing.push(m.path);
+      const c = JSON.parse(fs.readFileSync(f, 'utf8')) as FileCache;
+      const renum = (id: string) => id.replace(/^[^-]+-/, `${i + 1}-`);
+      const file = path.basename(m.path);
+      for (const s of c.shots) shots.push({ ...s, id: renum(s.id), path: m.path, file });
+      for (const d of c.descs || []) descs.push({ ...d, id: renum(d.id) });
+      if (!c.descs) missing.push(m.path);
+    } catch {
+      missing.push(m.path);
+    }
+  });
+  return { shots, descs, missing, alias };
+}
+
+/** 장면 한 장 사진 (원본 t초, 세로 240px jpg). 한 번 만들면 저장해 두고 다시 씀 — ffmpeg 만, 비용 없음 */
+export async function sceneThumb(ffmpegPath: string, file: string, t: number): Promise<string> {
+  const dir = path.join(cacheDir(), 'thumbs');
+  fs.mkdirSync(dir, { recursive: true });
+  const out = path.join(dir, `${contentKey(file)}_${Math.round(t * 1000)}.jpg`);
+  if (fs.existsSync(out)) return out;
+  await run(ffmpegPath, ['-y', '-v', 'error', '-ss', t.toFixed(3), '-i', file, '-frames:v', '1', '-vf', 'scale=-2:240', '-q:v', '5', out]);
+  return out;
+}

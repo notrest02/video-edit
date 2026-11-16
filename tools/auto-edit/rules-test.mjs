@@ -479,6 +479,52 @@ test('R38', '자동 마스크: 같은 자리에서 문장만 바뀌면 마스크
   assert(ms.length === 2, `빈틈이 긴데 하나로 합쳐 글자 없는 곳까지 가림 (${ms.length}개)`);
 });
 
+test('R39', '이미 쓴 장면이면 비슷한 상황(주인공·단계 같은)의 안 쓴 장면으로, 없거나 더 느려지면 그대로 다시 씀 (사용자 2026-11-16 "영상이 너무 겹친다")', () => {
+  const shots = [shot('1-01', 'a.mp4', 0, 3), shot('2-01', 'b.mp4', 0, 3), shot('3-01', 'c.mp4', 0, 3), shot('4-01', 'd.mp4', 0, 1.3), shot('5-01', 'e.mp4', 0, 3)];
+  const D = (id, subject, stage, place = '실내', talk = false) => ({ id, subject, stage, place, talk, desc: subject });
+  const descs = [D('1-01', '손 동작(벨트 조임)', '실제사용'), D('2-01', '손 동작(벨트 조임)', '실제사용'), D('3-01', '사람(얼굴)', '실제사용', '실내', true), D('4-01', '손 동작(벨트 조임)', '실제사용'), D('5-01', '제품(버클)', '완성모습')];
+  const used = [['a.mp4', 0, 2]]; // 앞 광고가 1-01 을 씀
+  // ① 비슷한 안 쓴 장면(2-01)이 있으면 그쪽으로
+  const r1 = A.fitAssignment([slot(0, 0, 2)], [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }], shots, null, used, [], descs);
+  assert(r1.clips[0].shot === '2-01' && r1.reuseSwaps === 1, `이미 쓴 1-01 을 안 바꿈: ${r1.clips[0].shot}`);
+  // ② 카메라 보고 말하는 장면·단계가 다른 장면으로는 바꾸지 않음 (엉뚱한 장면 방지, R27) → 2-01 이 없으면 그대로 1-01
+  const noTwin = descs.filter((d) => d.id !== '2-01');
+  const r2 = A.fitAssignment([slot(0, 0, 2)], [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }], shots.filter((s) => s.id !== '2-01'), null, used, [], noTwin);
+  assert(r2.clips[0].shot === '1-01' && r2.reuseKept === 1, `비슷하지 않은 장면으로 바뀜: ${r2.clips[0].shot}`);
+  // ③ 비슷해도 더 느려지면(4-01 은 1.3초 → 2초 자리에 0.65배) 바꾸지 않음
+  const r3 = A.fitAssignment([slot(0, 0, 2)], [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }], shots.filter((s) => s.id !== '2-01'), null, used, [], descs);
+  assert(r3.clips[0].shot === '1-01', `느려지는 장면으로 바뀜: ${r3.clips[0].shot} x${r3.clips[0].speed}`);
+  // ④ 이 광고 안에서 앞 컷에 쓴 장면도 '이미 쓴 장면' (같은 장면 다른 부분 → 비슷한 장면으로)
+  const long = [shot('1-01', 'a.mp4', 0, 8), shot('2-01', 'b.mp4', 0, 3), shot('5-01', 'e.mp4', 0, 3)];
+  const r4 = A.fitAssignment([slot(0, 0, 2, false, { cont: false }), slot(1, 2, 4, false, { cont: false }), slot(2, 4, 6, false, { cont: false })],
+    [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }, { slot: 1, shot: '5-01', in: 0.1, focus: '버클' }, { slot: 2, shot: '1-01', in: 5, focus: '벨트 조임' }], long, null, [], [], descs);
+  assert(r4.clips[2].shot === '2-01', `광고 안에서 같은 장면 다른 부분을 다시 씀: ${r4.clips[2].shot}`);
+  // ⑤ 이어 쓰기(같은 문장, 바로 앞 컷과 같은 장면)는 겹침이 아님 → 바꾸지 않음
+  const r5 = A.fitAssignment([slot(0, 0, 2), slot(1, 2, 3.5, false, { cont: true })], [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }, { slot: 1, shot: '1-01', in: 2.1, focus: '벨트 조임' }], long, null, [], [], descs);
+  assert(r5.clips[1].shot === '1-01', `이어 쓰기가 바뀜: ${r5.clips[1].shot}`);
+  // ⑥ 장면 설명이 없으면 비슷한지 모름 → 바꾸지 않음 (R27 첫 확인과 같음)
+  const r6 = A.fitAssignment([slot(0, 0, 2)], [{ slot: 0, shot: '1-01', in: 0.1, focus: '벨트 조임' }], shots, null, used, []);
+  assert(r6.clips[0].shot === '1-01', `설명 없이 바뀜: ${r6.clips[0].shot}`);
+});
+
+test('R40', '장면 바꾸기 도우미: 비슷한 상황의 안 쓴 장면이 위, 이미 쓴 장면·카메라 보고 말하는 장면은 아래, 너무 짧으면 못 씀, 시작점은 안 쓴 부분', () => {
+  const SS = load('src/utils/sceneSwap.ts');
+  const shots = [shot('1-01', 'a.mp4', 0, 4), shot('2-01', 'b.mp4', 0, 4), shot('3-01', 'c.mp4', 0, 4), shot('4-01', 'd.mp4', 0, 4), shot('5-01', 'e.mp4', 0, 1), shot('6-01', 'f.mp4', 0, 8)];
+  const D = (id, subject, stage, talk = false) => ({ id, subject, stage, place: '실내', talk, desc: subject });
+  const descs = [D('1-01', '손 동작(벨트 조임)', '실제사용'), D('2-01', '손 동작(벨트 조임)', '실제사용'), D('3-01', '손 동작(벨트 조임)', '실제사용'), D('4-01', '사람(얼굴)', '실제사용', true), D('5-01', '손 동작(벨트 조임)', '실제사용'), D('6-01', '손 동작(벨트 조임)', '실제사용')];
+  const clip = { type: 'video', sourcePath: 'a.mp4', sourceStart: 0.1, duration: 2, speed: 1 };
+  const here = [{ type: 'video', sourcePath: 'c.mp4', sourceStart: 0, duration: 2 }, { type: 'video', sourcePath: 'f.mp4', sourceStart: 0, duration: 3 }];
+  const r = SS.rankSceneCandidates({ clip, text: '벨트 조임', shots, descs, hereClips: here, otherClips: [] });
+  const ids = r.list.map((c) => c.shot.id);
+  assert(r.current?.id === '1-01', `지금 장면을 못 찾음: ${r.current?.id}`);
+  assert(ids[0] === '2-01', `1등이 비슷하고 안 쓴 2-01 이 아님: ${ids.join(',')}`);
+  assert(ids.indexOf('3-01') > ids.indexOf('2-01') && ids.indexOf('4-01') > ids.indexOf('2-01'), `이미 쓴 장면·말하는 장면이 위에 있음: ${ids.join(',')}`);
+  const c5 = r.list.find((c) => c.shot.id === '5-01');
+  assert(c5 && !c5.ok && ids[ids.length - 1] === '5-01', `너무 짧은 장면이 쓸 수 있는 것으로 나옴: ${ids.join(',')}`);
+  const c6 = r.list.find((c) => c.shot.id === '6-01');
+  assert(c6 && c6.srcIn >= 3 - 0.05, `이미 쓴 부분(0~3초)과 겹치는 시작점: ${c6?.srcIn}`);
+});
+
 // ---------- 결과 ----------
 const failed = results.filter((r) => !r.ok);
 for (const r of results) console.log(`${r.ok ? '✅' : '❌'} ${r.id} ${r.name}${r.ok ? '' : `\n     → ${r.msg}`}`);

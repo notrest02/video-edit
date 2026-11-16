@@ -405,9 +405,17 @@ export function fitAssignment(
   avoidIn: Array<[string, number, number]>,
   caps: number[],
   descs?: AutoEditShotDesc[]
-): { clips: PlanClip[]; warnings: string[]; /** AI가 고른 장면이 '앞 컷과 같아 보여서'(R13) 다른 장면으로 바뀐 자리 수 — 많으면 화면이 너무 자주 바뀜 */ lookSwaps: number } {
+): {
+  clips: PlanClip[];
+  warnings: string[];
+  /** AI가 고른 장면이 '앞 컷과 같아 보여서'(R13) 다른 장면으로 바뀐 자리 수 — 많으면 화면이 너무 자주 바뀜 */ lookSwaps: number;
+  /** 이미 쓴 장면이라 비슷한 상황의 안 쓴 장면으로 바꾼 자리 수 (R39) */ reuseSwaps: number;
+  /** 이미 쓴 장면인데 비슷한 장면이 없어 다시 쓴 자리 수 (R39) */ reuseKept: number;
+} {
   const byId = new Map(shots.map((s) => [s.id, s]));
   let lookSwaps = 0;
+  let reuseSwaps = 0;
+  let reuseKept = 0;
   const descById = new Map((descs || []).map((d) => [d.id, d]));
   const amap = new Map(assign.map((a) => [a.slot, a]));
   const avoid = [...avoidIn];
@@ -426,6 +434,8 @@ export function fitAssignment(
   // 새 문장이 시작되는 자리에서는 앞 컷의 장면을 그대로 이어 쓰지 않음 (R20b, 사용자 2026-11-13: '다음 문장인데도 기존 영상이 쭉 이어지는 것'이 가장 걸림).
   //  이어 쓰기는 같은 문장(cont=true) 안에서만. cont 정보가 없는 자리(예전 기록 다시 넣기)는 판단하지 않음
   let newSentence = false;
+  // 이 장면을 이미 쓴 길이(초): 이 광고에서 놓은 컷 + 앞 광고·다른 시퀀스에서 쓴 구간 (avoid 에 모두 들어 있음) — R39
+  const usedSec = (sh: AutoEditShot) => overlap(sh.path, sh.start, sh.end, avoid);
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
   // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
   const shotNo = (id: string) => Number(id.split('-').pop());
@@ -537,15 +547,34 @@ export function fitAssignment(
     const a = amap.get(s.slot);
     const first = a ? byId.get(a.shot) : undefined;
     const p1 = first ? place(first, D, Number(a!.in)) : null;
+    const alt = a?.alt ? byId.get(a.alt) : undefined;
+    const words = focusWords(a?.focus);
     if (p1?.ok) {
+      // R39 (사용자 2026-11-16 '영상이 너무 겹친다'): AI가 고른 장면이 이미 쓴 장면이면 (이 광고 앞 컷 / 앞 광고 / 다른 시퀀스)
+      //  비슷한 상황(주인공·단계·장소가 같은)의 안 쓴 장면으로 바꾼다. 없으면 그대로 다시 쓴다 (시작점은 안 쓴 부분으로 — R27).
+      //  이어 쓰기(바로 앞 컷과 같은 장면)는 겹침이 아님. 비슷한지 판단할 설명이 없으면 바꾸지 않음 (R27: 엉뚱한 장면 방지)
+      const cont = !!prev && prev.shot === first!.id;
+      if (!cont && usedSec(first!) >= REUSE_MIN_SEC) {
+        const basisSet = new Set(s.basis || []);
+        const cands = shots
+          .filter((x) => x !== first && usedSec(x) < REUSE_MIN_SEC && similarSituation(descById.get(first!.id), descById.get(x.id), words, x === alt))
+          .sort((x, y) => (x === alt ? -2 : basisSet.has(x.id) ? -1 : 0) - (y === alt ? -2 : basisSet.has(y.id) ? -1 : 0));
+        // 겹침을 피하려고 화면이 더 느려지면 손해 → 원래 장면보다 느려지는(보통 속도 아래로) 장면으로는 바꾸지 않음
+        const sw = cands.map((x) => place(x, D, x.start + EDGE, false)).find((p) => p.ok && p.sp >= Math.min(p1.sp, MIN_SPEED) - 1e-6);
+        if (sw) {
+          reuseSwaps++;
+          warnings.push(`컷 ${s.slot}: AI가 고른 ${first!.id} 는 이미 쓴 장면 → 비슷한 상황의 안 쓴 장면 ${sw.sh.id} 로 바꿈`);
+          put(s, sw);
+          continue;
+        }
+        reuseKept++;
+      }
       put(s, p1);
       continue;
     }
-    const alt = a?.alt ? byId.get(a.alt) : undefined;
     // 1순위를 못 쓰면: AI가 적은 문장의 핵심(focus)과 화면 주인공(subject)이 맞는 장면이 먼저 (예: 핵심 '인형' → 주인공이 인형인 장면)
     //  같은 맞음 정도 안에서는 AI 2순위 → 1순위(또는 바로 앞 컷)와 같은 영상에서 이어지는 장면 → 같은 영상 → 나머지(긴 장면부터)
     const ref = first || (prev ? byId.get((prev as PlanClip).shot || '') : undefined);
-    const words = (a?.focus || '').split(/[\s,·()/]+/).map((w) => w.replace(/(을|를|이|가|은|는|에|로|으로|과|와|의|도)$/, '')).filter((w) => w.length >= 2);
     const focusRank = (x: AutoEditShot) => {
       const d = descById.get(x.id);
       if (!d || !words.length) return 1;
@@ -563,7 +592,8 @@ export function fitAssignment(
     const near = (x: AutoEditShot) =>
       x === alt ? -1 : lookBlocked && x.path === (prev as PlanClip).path ? 2e6 + Math.abs(x.start - (ref?.start ?? 0)) : ref && x.path === ref.path ? (x.start >= ref.start ? x.start - ref.start : 1000 + ref.start - x.start) : 1e6 - x.dur;
     const basisSet = new Set(s.basis || []); // 대본 근거 장면은 가장 먼저 (R25)
-    const rank = (x: AutoEditShot) => (basisSet.has(x.id) ? -1 : focusRank(x)) * 1e7 + near(x);
+    // 같은 맞음 정도 안에서는 아직 안 쓴 장면 먼저 (R39)
+    const rank = (x: AutoEditShot) => (basisSet.has(x.id) ? -1 : focusRank(x)) * 1e7 + (usedSec(x) >= REUSE_MIN_SEC ? 5e6 : 0) + near(x);
     const pool = shots.filter((x) => x !== first).sort((x, y) => rank(x) - rank(y));
     const p3 = pool.map((x) => place(x, D, x.start + EDGE, x === alt)).find((p) => p.ok);
     const p2 = alt && alt !== first ? place(alt, D, alt.start + EDGE) : null;
@@ -596,7 +626,43 @@ export function fitAssignment(
       if (c.srcIn + dur * c.speed > hi) c.speed = Math.floor(((hi - c.srcIn) / dur) * 100) / 100;
     }
   }
-  return { clips, warnings, lookSwaps };
+  return { clips, warnings, lookSwaps, reuseSwaps, reuseKept };
+}
+
+/** 이 길이(초) 이상 쓴 장면을 '이미 쓴 장면'으로 봄 (R39) */
+export const REUSE_MIN_SEC = 0.3;
+
+/** AI가 적은 문장 핵심(focus)을 낱말로 (조사 떼고 2글자 이상) */
+export function focusWords(focus?: string): string[] {
+  return (focus || '')
+    .split(/[\s,·()/]+/)
+    .map((w) => w.replace(/(을|를|이|가|은|는|에|로|으로|과|와|의|도)$/, ''))
+    .filter((w) => w.length >= 2);
+}
+
+/**
+ * 두 장면이 '비슷한 상황'인지 (R39: 이미 쓴 장면 대신 쓸 수 있는지). 장면 설명이 없으면 모름 → 아님.
+ *  - 카메라 보고 말하는 장면 여부(talk)·단계(stage)가 같아야 함
+ *  - AI 2순위(isAlt)는 AI가 같은 핵심을 보여 준다고 고른 장면이라 위 두 가지만 봄
+ *  - 그 밖에는 주인공(subject)이 비슷하거나 문장 핵심 낱말이 주인공에 들어 있어야 하고,
+ *    원래 장면의 장소가 핵심 낱말과 맞았으면(대사에 장소가 있음, R16) 바꿀 장면도 그 장소여야 함
+ */
+export function similarSituation(
+  a: Pick<AutoEditShotDesc, 'subject' | 'stage' | 'talk' | 'place'> | undefined,
+  b: Pick<AutoEditShotDesc, 'subject' | 'stage' | 'talk' | 'place'> | undefined,
+  words: string[],
+  isAlt = false
+): boolean {
+  if (!a || !b) return false;
+  if (!!a.talk !== !!b.talk) return false;
+  if (!a.stage || !b.stage || a.stage !== b.stage) return false;
+  if (isAlt) return true;
+  const hit = (t?: string) => words.some((w) => (t || '').includes(w));
+  const subjOk = (!!a.subject && !!b.subject && descSim(a.subject, b.subject) >= 0.5) || (hit(a.subject) && hit(b.subject));
+  if (!subjOk) return false;
+  const placeWords = words.filter((w) => (a.place || '').includes(w));
+  if (placeWords.length && !placeWords.some((w) => (b.place || '').includes(w))) return false;
+  return true;
 }
 
 /** 장면 설명 두 개가 얼마나 비슷한지 (글자 두 개씩 묶어 겹치는 비율, 0~1) */

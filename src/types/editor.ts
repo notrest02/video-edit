@@ -386,6 +386,10 @@ declare global {
         hookUsed: Array<{ shot: string; from: number; to: number }>;
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; alt?: string; focus?: string; fit?: string; why: string }>; usage: { input: number; output: number } }>;
+      /** 장면 바꾸기 도우미: 이미 저장된 장면 분석만 읽음 (AI 호출 없음, 비용 없음) */
+      sceneCached?: (params: { media: Array<{ path: string }> }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; missing: string[]; /** 경로 → 내용이 같은 대표 경로 */ alias: Record<string, string> }>;
+      /** 장면 사진 한 장 (원본 t초) → 저장된 jpg 경로 (ffmpeg, 비용 없음) */
+      sceneThumb?: (params: { path: string; t: number }) => Promise<string>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
       /** STEP 0 대본 만들기 (Claude Haiku: 생성 + 검수) */
       scriptGenGenerate?: (params: ScriptGenRequest) => Promise<{

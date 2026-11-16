@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   autoEditAnalyze: (params: unknown) => ipcRenderer.invoke('autoEdit:analyze', params),
   getSceneCuts: (params: unknown) => ipcRenderer.invoke('scene:cuts', params),
   autoEditAssign: (params: unknown) => ipcRenderer.invoke('autoEdit:assign', params),
+  sceneCached: (params: unknown) => ipcRenderer.invoke('scene:cached', params),
+  sceneThumb: (params: unknown) => ipcRenderer.invoke('scene:thumb', params),
   scriptGenGenerate: (params: unknown) => ipcRenderer.invoke('scriptGen:generate', params),
   scriptGenParseOrder: (order: string) => ipcRenderer.invoke('scriptGen:parseOrder', order),
   scriptGenFromVideos: (params: unknown) => ipcRenderer.invoke('scriptGen:fromVideos', params),

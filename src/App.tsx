@@ -8,6 +8,7 @@ import { ProjectMediaBin } from './components/ProjectMediaBin';
 import { TimelinePanel } from './components/TimelinePanel';
 import { SequenceSettingsModal } from './components/SequenceSettingsModal';
 import { RelinkMediaModal } from './components/RelinkMediaModal';
+import { SceneSwapModal } from './components/SceneSwapModal';
 import { useEditorStore } from './store/useEditorStore';
 import { LIMITS, fitBin, fitTopRow, useLayoutStore } from './store/useLayoutStore';
 import { Splitter } from './components/Splitter';
@@ -278,6 +279,9 @@ export const App: React.FC = () => {
 
       {/* 누락 미디어 재연결 모달 (Premiere Pro Link Media) */}
       <RelinkMediaModal />
+
+      {/* 장면 바꾸기 도우미 (클립 우클릭 → 다른 장면 후보) */}
+      <SceneSwapModal />
     </div>
   );
 };

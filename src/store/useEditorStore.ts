@@ -159,6 +159,8 @@ interface EditorState {
     customMaxChars?: number
   ) => Promise<void>;
   removePeriodsFromSubtitles: () => void;
+  /** 장면 바꾸기 도우미: 영상 클립의 원본 장면만 바꿈 (타임라인 위치·길이는 그대로). 자동 마스크는 원본이 바뀌어 지움 */
+  replaceClipSource: (clipId: string, src: { path: string; sourceStart: number; speed: number }) => void;
   applyScriptLinesDirectly: (customScript?: string) => CaptionDiffItem[];
   splitSubtitleClipAtTextCursor: (
     clipId: string,
@@ -1740,6 +1742,47 @@ export const useEditorStore = create<EditorState>((set, get) => {
         clips: updatedClips,
         sequences: syncActiveSequenceData(tracks, updatedClips),
         statusMessage: `[캡션 줄 구성 완료] '${modeLabel}' 설정으로 자막이 재구성되었습니다! (${beforeCount}개 → ${afterCount}개 클립)`,
+      });
+    },
+
+    replaceClipSource: (clipId, src) => {
+      const { clips, tracks, assets, sequence } = get();
+      const target = clips.find((c) => c.id === clipId);
+      if (!target || target.type !== 'video') return;
+      const key = (p: string) => p.split('\\').join('/').toLowerCase();
+      const asset = assets.find((a) => key(a.path) === key(src.path));
+      if (!asset) {
+        set({ statusMessage: '그 장면의 원본 영상이 미디어에 없습니다.' });
+        return;
+      }
+      pushHistory();
+      const autoMasks = (target.blurMasks || []).filter((m) => m.auto).length;
+      const keptMasks = (target.blurMasks || []).filter((m) => !m.auto);
+      const fs = fillScale(asset.width, asset.height, sequence.width, sequence.height);
+      const sameAsset = key(target.sourcePath || '') === key(asset.path);
+      const updatedClips = clips.map((c) =>
+        c.id !== clipId
+          ? c
+          : {
+              ...c,
+              name: `${asset.name} [V]`,
+              sourcePath: asset.path,
+              assetId: asset.id,
+              sourceStart: Number(src.sourceStart.toFixed(4)),
+              speed: Math.abs(src.speed - 1) > 1e-3 ? Number(src.speed.toFixed(3)) : undefined,
+              // 다른 원본이면 꽉 채우기 크기를 새 원본 기준으로 (R33)
+              ...(sameAsset ? {} : { scale: fs > 100 ? fs : undefined }),
+              blurMasks: keptMasks.length ? keptMasks : undefined,
+            }
+      );
+      set({
+        clips: updatedClips,
+        sequences: syncActiveSequenceData(tracks, updatedClips),
+        isDirty: true,
+        statusMessage:
+          `장면을 바꿨습니다 (${asset.name} ${src.sourceStart.toFixed(2)}초${Math.abs(src.speed - 1) > 1e-3 ? `, ${src.speed.toFixed(2)}배` : ''}). Ctrl+Z로 되돌릴 수 있습니다.` +
+          (autoMasks ? ` 원본이 바뀌어 자동 마스크 ${autoMasks}개를 지웠습니다 — 자동 마스크를 다시 적용해 주세요.` : '') +
+          (keptMasks.length ? ` 손으로 만든 마스크 ${keptMasks.length}개는 남겨 두었습니다 (위치 확인).` : ''),
       });
     },
 
@@ -3503,12 +3546,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
         //   다른 광고(다른 시퀀스 + 앞 구간)에서 쓴 장면은 되도록 피함 — 단 후킹(광고주 지정)은 겹쳐도 됨
         const hi = shotLenCap(shotsV);
         // 다른 시퀀스의 후킹 컷(후킹 지정 광고 구간의 첫 영상 컷)은 빼고 넘김 — 후킹은 광고주 지정이라 겹쳐도 됨 (R27)
+        // 다른 시퀀스가 내용이 같은 '다른 폴더 복사본'을 썼으면 이 시퀀스 원본 경로로 바꿔서 셈 (R39: 안 그러면 쓴 기록에 안 잡힘)
+        //  이미 저장된 분석·파일 내용만 봄 (비용 없음)
+        const alias =
+          (await api.sceneCached?.({ media: [...media, ...allVideos.filter((v) => !media.includes(v))].map((v) => ({ path: v.path })) }).catch(() => null))?.alias || {};
         const otherClips = st.sequences
           .filter((s) => s.id !== st.activeSequenceId)
           .flatMap((s) => {
             const hookStarts = (s.adSegments || []).filter((g) => g.hook).map((g) => g.start);
             return (s.clips || []).filter((c) => !(c.type === 'video' && hookStarts.some((t) => Math.abs(c.startTime - t) < 0.05)));
-          });
+          })
+          .map((c) => (c.sourcePath && alias[c.sourcePath] ? { ...c, sourcePath: alias[c.sourcePath] } : c));
         const usedOther = usedRangesFromClips(otherClips, shotsV);
         const allClips: AutoEditPlan['clips'] = [];
         const warnings: string[] = [];
@@ -3516,6 +3564,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
         // '앞 컷과 같아 보여서' 바꾼 자리 수 (R13): 너무 많으면 화면이 이 영상 저 영상으로 자주 바뀜 → 결과에 보여 주고, 한 광고에서 2개를 넘으면 알림
         let lookSwapTotal = 0;
         let aiSlotTotal = 0;
+        // 이미 쓴 장면이라 비슷한 장면으로 바꾼 자리 / 비슷한 장면이 없어 다시 쓴 자리 (R39)
+        let reuseSwapTotal = 0;
+        let reuseKeptTotal = 0;
         for (let gi = 0; gi < segs.length; gi++) {
           const g = segs[gi];
           const segCaps = caps
@@ -3575,6 +3626,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
           }
           const aiSlots = slots.filter((s) => !s.hook).length;
           lookSwapTotal += fitted.lookSwaps;
+          reuseSwapTotal += fitted.reuseSwaps;
+          reuseKeptTotal += fitted.reuseKept;
           aiSlotTotal += aiSlots;
           if (fitted.lookSwaps > 2)
             issues.push(`⚠️ ${segs.length > 1 ? `${g.name}: ` : ''}앞 컷과 같아 보여서 바꾼 자리가 컷 ${aiSlots}개 중 ${fitted.lookSwaps}개 (원본이 비슷한 화면 위주일 수 있음 — 장면이 너무 자주 바뀌지 않는지 확인)`);
@@ -3595,6 +3648,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           `AI 자동 배치 완료${segs.length > 1 ? ` (광고 ${segs.length}개)` : ''}: 컷 ${fitted.clips.length}개, 자막 ${snap.snappedStartCount}개를 컷에 맞춤. ` +
           `(새로 분석한 영상 ${an.analyzedFiles}개, 사용량 약 $${cost.toFixed(3)})` +
           ` · 같아 보여서 바꾼 자리 ${lookSwapTotal}/${aiSlotTotal}` +
+          ` · 이미 쓴 장면이라 비슷한 장면으로 바꾼 자리 ${reuseSwapTotal}, 비슷한 장면이 없어 다시 쓴 자리 ${reuseKeptTotal}` +
           (issues.length ? ` · 검사 결과 확인 필요 ${issues.length}개: ${issues.join(' / ')}` : ' · 검사 결과 문제 없음') +
           (fitted.warnings.length ? ` · 참고(자동으로 바꾼 것): ${fitted.warnings.join(' / ')}` : '');
         if (issues.length || fitted.warnings.length) console.warn('[자동 배치 검사]', { issues, warnings: fitted.warnings });
