@@ -20,7 +20,9 @@ import {
   TimelineTrack,
   TrackType,
   ScriptBasisEntry,
+  BlurMask,
 } from '../types/editor';
+import { replaceSourceAutoMasks, resolveClipMasks, srcKeyOf, writeBackClipMasks, type SourceMaskMap } from '../utils/sourceMask';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
 import { voiceStartCaption, withSnapLead } from '../utils/snapLead';
 import { attachLooks, auditPlan, basisShotIds, buildSlotsFromCaptions, fitAssignment, hookCapacity, hookPieces, selectMediaForSequence, shotLenCap, usedRangesFromClips } from '../utils/autoEdit';
@@ -41,6 +43,8 @@ interface HistorySnapshot {
   clips: TimelineClip[];
   /** 광고 구간 (무음 제거 등으로 같이 바뀌므로 되돌리기에도 포함) */
   adSegments?: AdSegment[];
+  /** 원본 마스크 (R41) — 마스크 수정도 되돌리기에 포함 */
+  sourceMasks?: SourceMaskMap;
 }
 
 interface EditorState {
@@ -85,6 +89,14 @@ interface EditorState {
   scriptText: string;
   /** 대본 만들기가 저장한 문장별 근거 장면 (프로젝트에 저장) */
   scriptBasis: ScriptBasisEntry[];
+  /** 원본 마스크 (R41): 원본 경로 키 → 마스크 (원본 초, 원본 화면 좌표). 그 원본을 쓰는 모든 컷에 보임 */
+  sourceMasks: SourceMaskMap;
+  /** 클립에 보일 마스크 (원본 마스크 + 이 클립만 마스크). 미리보기·편집·내보내기가 모두 이것을 씀 */
+  clipMasksOf: (clip: TimelineClip) => BlurMask[];
+  /** 클립 화면에서 고친 마스크 목록을 원본 마스크 / 이 클립만 마스크로 나눠 저장 */
+  setClipMasks: (clipId: string, next: BlurMask[], saveHistory?: boolean) => void;
+  /** 자동 마스크를 원본 단위로 넣기 (그 원본의 예전 자동 마스크만 바꿈) */
+  setSourceAutoMasks: (path: string, auto: BlurMask[], saveHistory?: boolean) => void;
   captionLineMode: CaptionLineMode;
   captionMaxCharsPerLine: number;
   autoSplitOnCaptionGenerate: boolean;
@@ -691,6 +703,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       adSegments: activeAdSegments(),
+      sourceMasks: get().sourceMasks,
     };
     set({
       past: [...past.slice(-29), snapshot],
@@ -777,6 +790,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     localWhisperModel: LOCAL_WHISPER_MODEL,
     scriptText: DEFAULT_SAMPLE_SCRIPT,
     scriptBasis: [],
+    sourceMasks: {},
     captionLineMode: 'single-line',
     captionMaxCharsPerLine: 13,
     autoSplitOnCaptionGenerate: false,
@@ -1756,8 +1770,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
         return;
       }
       pushHistory();
-      const autoMasks = (target.blurMasks || []).filter((m) => m.auto).length;
-      const keptMasks = (target.blurMasks || []).filter((m) => !m.auto);
+      // 원본 마스크(R41)는 새 원본 구간 것이 자동으로 따라옴. 클립에만 있던 마스크(이 클립만)는 편집자 것이라 그대로 두고 알림
+      const sameSrc = srcKeyOf(target.sourcePath) === srcKeyOf(asset.path);
+      const keptMasks = (target.blurMasks || []).filter((m) => sameSrc || !m.auto);
+      const newSrcHasAuto = !!get().sourceMasks[srcKeyOf(asset.path)]?.some((m) => m.auto);
       const fs = fillScale(asset.width, asset.height, sequence.width, sequence.height);
       const sameAsset = key(target.sourcePath || '') === key(asset.path);
       const updatedClips = clips.map((c) =>
@@ -1781,8 +1797,8 @@ export const useEditorStore = create<EditorState>((set, get) => {
         isDirty: true,
         statusMessage:
           `장면을 바꿨습니다 (${asset.name} ${src.sourceStart.toFixed(2)}초${Math.abs(src.speed - 1) > 1e-3 ? `, ${src.speed.toFixed(2)}배` : ''}). Ctrl+Z로 되돌릴 수 있습니다.` +
-          (autoMasks ? ` 원본이 바뀌어 자동 마스크 ${autoMasks}개를 지웠습니다 — 자동 마스크를 다시 적용해 주세요.` : '') +
-          (keptMasks.length ? ` 손으로 만든 마스크 ${keptMasks.length}개는 남겨 두었습니다 (위치 확인).` : ''),
+          (newSrcHasAuto ? ' 이 원본의 자동 마스크가 그대로 따라옵니다.' : ' 이 원본은 아직 자동 마스크 전입니다 (블러 마스크 → 원본에서 글자 찾기).') +
+          (keptMasks.length ? ` '이 클립만' 마스크 ${keptMasks.length}개는 남겨 두었습니다 (위치 확인).` : ''),
       });
     },
 
@@ -2283,6 +2299,46 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
     recordHistorySnapshot: () => {
       pushHistory();
+    },
+
+    clipMasksOf: (clip) => {
+      if (clip.type !== 'video') return clip.blurMasks || [];
+      const { assets, sequence, sourceMasks } = get();
+      const k = srcKeyOf(clip.sourcePath);
+      const a = assets.find((x) => x.id === clip.assetId) || assets.find((x) => srcKeyOf(x.path) === k);
+      return resolveClipMasks(clip, sourceMasks, { w: a?.width || 0, h: a?.height || 0 }, { w: sequence.width || 1080, h: sequence.height || 1920 });
+    },
+
+    setClipMasks: (clipId, next, saveHistory = false) => {
+      const st = get();
+      const clip = st.clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      if (clip.type !== 'video') {
+        st.updateClip(clipId, { blurMasks: next.length ? next : undefined }, saveHistory);
+        return;
+      }
+      if (saveHistory) pushHistory();
+      const k = srcKeyOf(clip.sourcePath);
+      const a = st.assets.find((x) => x.id === clip.assetId) || st.assets.find((x) => srcKeyOf(x.path) === k);
+      const r = writeBackClipMasks(clip, next, st.sourceMasks, { w: a?.width || 0, h: a?.height || 0 }, { w: st.sequence.width || 1080, h: st.sequence.height || 1920 });
+      const updatedClips = st.clips.map((c) => (c.id === clipId ? { ...c, blurMasks: r.clipMasks } : c));
+      set({ sourceMasks: r.map, clips: updatedClips, sequences: syncActiveSequenceData(st.tracks, updatedClips), isDirty: true });
+    },
+
+    setSourceAutoMasks: (path, auto, saveHistory = true) => {
+      if (saveHistory) pushHistory();
+      const st = get();
+      // 예전 방식(클립마다 복사한 자동 마스크)이 남아 있으면 같은 원본 클립에서 지움 → 두 번 가려지지 않게
+      const k = srcKeyOf(path);
+      const strip = (list: TimelineClip[]) =>
+        list.map((c) =>
+          c.type === 'video' && srcKeyOf(c.sourcePath) === k && c.blurMasks?.some((m) => m.auto)
+            ? { ...c, blurMasks: c.blurMasks.filter((m) => !m.auto).length ? c.blurMasks.filter((m) => !m.auto) : undefined }
+            : c
+        );
+      const updatedClips = strip(st.clips);
+      const seqs = syncActiveSequenceData(st.tracks, updatedClips).map((q) => (q.id === st.activeSequenceId ? q : { ...q, clips: strip(q.clips || []) }));
+      set({ sourceMasks: replaceSourceAutoMasks(st.sourceMasks, path, auto), clips: updatedClips, sequences: seqs, isDirty: true });
     },
 
     moveOrTrimClipWithLink: (
@@ -3695,11 +3751,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         tracks: JSON.parse(JSON.stringify(tracks)),
         clips: JSON.parse(JSON.stringify(clips)),
         adSegments: activeAdSegments(),
+        sourceMasks: get().sourceMasks,
       };
       set({
         tracks: previous.tracks,
         clips: previous.clips,
         sequences: withAdSegments(syncActiveSequenceData(previous.tracks, previous.clips), previous.adSegments),
+        ...(previous.sourceMasks ? { sourceMasks: previous.sourceMasks } : {}),
         past: past.slice(0, -1),
         future: [currentSnapshot, ...future.slice(0, 29)],
         statusMessage: '실행 취소(Undo) 완료',
@@ -3714,11 +3772,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
         tracks: JSON.parse(JSON.stringify(tracks)),
         clips: JSON.parse(JSON.stringify(clips)),
         adSegments: activeAdSegments(),
+        sourceMasks: get().sourceMasks,
       };
       set({
         tracks: next.tracks,
         clips: next.clips,
         sequences: withAdSegments(syncActiveSequenceData(next.tracks, next.clips), next.adSegments),
+        ...(next.sourceMasks ? { sourceMasks: next.sourceMasks } : {}),
         past: [...past, currentSnapshot],
         future: future.slice(1),
         statusMessage: '다시 실행(Redo) 완료',
@@ -3750,6 +3810,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         linkedSelection,
         scriptText,
         scriptBasis,
+        sourceMasks,
         captionLineMode,
         captionMaxCharsPerLine,
         autoSplitOnCaptionGenerate,
@@ -3778,6 +3839,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         linkedSelection,
         scriptText,
         scriptBasis,
+        sourceMasks,
         captionLineMode,
         captionMaxCharsPerLine,
         autoSplitOnCaptionGenerate,
@@ -3971,6 +4033,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         selectedBinItem: null,
         scriptText: data.scriptText || '',
         scriptBasis: Array.isArray(data.scriptBasis) ? data.scriptBasis : [],
+        sourceMasks: data.sourceMasks && typeof data.sourceMasks === 'object' ? data.sourceMasks : {},
         captionLineMode: data.captionLineMode || 'preserve',
         captionMaxCharsPerLine: data.captionMaxCharsPerLine || 13,
         autoSplitOnCaptionGenerate: data.autoSplitOnCaptionGenerate ?? true,
@@ -4023,6 +4086,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         future: [],
         scriptText: '',
         scriptBasis: [],
+        sourceMasks: {},
         statusMessage: '새 프로젝트가 생성되었습니다.',
       });
     },
@@ -4075,10 +4139,24 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
       const nextMissing = get().missingAssetIds.filter((id) => id !== assetId);
 
+      // 원본 마스크(R41)는 경로 키 → 새 경로로 옮김 (이미 있으면 합침). 안 옮기면 재연결 뒤 마스크가 사라져 원본 글자가 그대로 내보내짐
+      const oldKey = srcKeyOf(asset.path);
+      const newKey = srcKeyOf(newPath);
+      const sm = get().sourceMasks;
+      const movedMasks =
+        oldKey !== newKey && sm[oldKey]
+          ? (() => {
+              const out = { ...sm, [newKey]: [...(sm[newKey] || []), ...sm[oldKey].filter((m) => !(sm[newKey] || []).some((x) => x.id === m.id))] };
+              delete out[oldKey];
+              return out;
+            })()
+          : sm;
+
       set({
         assets: updatedAssets,
         clips: updatedClips,
         sequences: updatedSequences,
+        sourceMasks: movedMasks,
         missingAssetIds: nextMissing,
         isRelinkModalOpen: nextMissing.length > 0,
         isDirty: true,

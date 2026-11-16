@@ -123,7 +123,20 @@ export const PreviewPlayer: React.FC = () => {
       return true;
     }
   });
+  // 마스크 편집 중(마스크가 있는 영상 클립을 선택함)에는 자막 도구 막대를 자동으로 접음 — 화면 위쪽 마스크 꼭짓점을 막대가 가렸음 (사용자 2026-11-16)
+  //  접힌 '자막 도구 ▾' 를 누르면 다시 펼침. 마스크 편집이 끝나면 원래(사용자가 정한) 상태로. 저장된 펼침 상태는 안 바꿈
+  const maskEditing = useEditorStore((st) => {
+    const c = st.selectedClipId ? st.clips.find((x) => x.id === st.selectedClipId) : undefined;
+    return !!c && c.type === 'video' && st.clipMasksOf(c).length > 0;
+  });
+  const [maskFold, setMaskFold] = useState(false);
+  useEffect(() => setMaskFold(maskEditing), [maskEditing]);
+  const barOpen = subBarOpen && !maskFold;
   const toggleSubBar = (open: boolean) => {
+    if (open && maskFold) {
+      setMaskFold(false); // 마스크 편집 중 잠깐 펼침 (저장된 상태는 그대로)
+      if (subBarOpen) return;
+    }
     setSubBarOpen(open);
     try {
       localStorage.setItem('agy_subbar_open', open ? '1' : '0');
@@ -894,7 +907,7 @@ export const PreviewPlayer: React.FC = () => {
         }`}
       >
         {/* 상단 플로팅 화면 자막 즉시 제어 바 (보여지는 창 기준 나누기/합치기/이동) */}
-        {allSubtitleClips.length > 0 && !subBarOpen && (
+        {allSubtitleClips.length > 0 && !barOpen && (
           <button
             onClick={() => toggleSubBar(true)}
             className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 bg-[#12161f]/80 border border-[#388bfd]/40 px-2.5 py-0.5 rounded-full text-[10px] text-[#79b8ff] hover:text-white"
@@ -903,7 +916,7 @@ export const PreviewPlayer: React.FC = () => {
             자막 도구 ▾
           </button>
         )}
-        {allSubtitleClips.length > 0 && subBarOpen && (
+        {allSubtitleClips.length > 0 && barOpen && (
           <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 bg-[#12161f]/90 backdrop-blur border border-[#388bfd]/40 px-2.5 py-1 rounded-full shadow-lg text-[10px]">
             <button
               onClick={() => jumpToAdjacentSubtitle(-1)}

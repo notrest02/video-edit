@@ -436,6 +436,14 @@ export function fitAssignment(
   let newSentence = false;
   // 이 장면을 이미 쓴 길이(초): 이 광고에서 놓은 컷 + 앞 광고·다른 시퀀스에서 쓴 구간 (avoid 에 모두 들어 있음) — R39
   const usedSec = (sh: AutoEditShot) => overlap(sh.path, sh.start, sh.end, avoid);
+  // 원본 a~b 를 쓰면 '이미 쓴 화면'인지 (R39b): 화면 모습이 있으면 실제 화면으로, 없으면 예전처럼 장면 단위
+  //  같은 광고 안은 엄격하게 (같은 장면이면 다른 부분도 '이미 씀' — 시청자가 한 번에 봄), 다른 광고와는 화면 기준
+  //  (11-16 시험: 다른 광고 겹침을 피하려고 고른 장면이 같은 광고 안에서 쓴 장면의 다른 부분이었음 → 광고 안 반복이 생겨 더 나쁨)
+  const looksReused = (sh: AutoEditShot, a: number, b: number) => {
+    const real = byId.get(sh.id) || sh;
+    if (overlap(real.path, real.start, real.end, usedHere) >= REUSE_MIN_SEC) return true;
+    return looksReusedIn(shots, sh, a, b, avoidIn) ?? overlap(real.path, real.start, real.end, avoidIn) >= REUSE_MIN_SEC;
+  };
   // 한 장면을 이 자리에 놓는 방법: 이어서 재생 / 자리보다 길면 겹침 적은 시작점 / 짧으면 느리게(0.6배까지만)
   // 같은 영상의 '다른' 샷을 바로 이어 붙이면 같은 컷이 두 번 나온 것처럼 보임 (사용자 2026-11-08). 이어 쓰기·시간상 바로 다음 샷은 괜찮음
   const shotNo = (id: string) => Number(id.split('-').pop());
@@ -554,16 +562,38 @@ export function fitAssignment(
       //  비슷한 상황(주인공·단계·장소가 같은)의 안 쓴 장면으로 바꾼다. 없으면 그대로 다시 쓴다 (시작점은 안 쓴 부분으로 — R27).
       //  이어 쓰기(바로 앞 컷과 같은 장면)는 겹침이 아님. 비슷한지 판단할 설명이 없으면 바꾸지 않음 (R27: 엉뚱한 장면 방지)
       const cont = !!prev && prev.shot === first!.id;
-      if (!cont && usedSec(first!) >= REUSE_MIN_SEC) {
+      // R39b (11-16 3단계): '이미 씀'은 실제 화면으로 — 같은 영상에서 쓴 구간과 시간이 겹치거나 화면이 같아 보일 때만.
+      //  같은 장면이라도 AI가 고른 부분이 확실히 달라 보이면 그대로 씀 (긴 장면의 다른 부분)
+      if (!cont && looksReused(first!, p1.t0, p1.t0 + D * p1.sp)) {
         const basisSet = new Set(s.basis || []);
-        const cands = shots
-          .filter((x) => x !== first && usedSec(x) < REUSE_MIN_SEC && similarSituation(descById.get(first!.id), descById.get(x.id), words, x === alt))
-          .sort((x, y) => (x === alt ? -2 : basisSet.has(x.id) ? -1 : 0) - (y === alt ? -2 : basisSet.has(y.id) ? -1 : 0));
+        const fd = descById.get(first!.id);
+        // 후보 = 장면 + 장면 안 부분(parts, AI가 본 부분별 주인공·단계). 부분은 그 구간만 쓰는 장면으로 놓음
+        const units = shots.flatMap((x) => {
+          const d = descById.get(x.id);
+          const parts = (d?.parts || [])
+            .filter((pt) => pt.to - pt.from >= 0.8)
+            .map((pt) => ({
+              sh: { ...x, start: Math.max(x.start, pt.from - EDGE), end: Math.min(x.end, pt.to + EDGE), dur: Math.min(x.end, pt.to + EDGE) - Math.max(x.start, pt.from - EDGE) },
+              view: d ? { ...d, subject: pt.subject ?? d.subject, stage: pt.stage ?? d.stage, talk: pt.talk ?? d.talk } : undefined,
+            }));
+          return [{ sh: x, view: d }, ...parts];
+        });
+        // 순서: 같은 장면의 안 겹쳐 보이는 다른 부분(핵심이 그대로) → AI 2순위 → 대본 근거 장면 → 나머지
+        const pri = (x: AutoEditShot) => (x.id === first!.id ? -3 : x.id === alt?.id ? -2 : basisSet.has(x.id) ? -1 : 0);
+        const cands = units
+          .filter((u) => (u.sh.id === first!.id ? true : similarSituation(fd, u.view, words, u.sh.id === alt?.id)))
+          .sort((x, y) => pri(x.sh) - pri(y.sh));
         // 겹침을 피하려고 화면이 더 느려지면 손해 → 원래 장면보다 느려지는(보통 속도 아래로) 장면으로는 바꾸지 않음
-        const sw = cands.map((x) => place(x, D, x.start + EDGE, false)).find((p) => p.ok && p.sp >= Math.min(p1.sp, MIN_SPEED) - 1e-6);
+        const sw = cands
+          .map((u) => place(u.sh, D, u.sh.start + EDGE, false))
+          .find((p) => p.ok && p.sp >= Math.min(p1.sp, MIN_SPEED) - 1e-6 && !looksReused(p.sh, p.t0, p.t0 + D * p.sp));
         if (sw) {
           reuseSwaps++;
-          warnings.push(`컷 ${s.slot}: AI가 고른 ${first!.id} 는 이미 쓴 장면 → 비슷한 상황의 안 쓴 장면 ${sw.sh.id} 로 바꿈`);
+          warnings.push(
+            sw.sh.id === first!.id
+              ? `컷 ${s.slot}: AI가 고른 ${first!.id} 의 그 부분은 이미 쓴 화면 → 같은 장면의 안 겹쳐 보이는 부분(${sw.t0.toFixed(2)}초)으로`
+              : `컷 ${s.slot}: AI가 고른 ${first!.id} 는 이미 쓴 화면 → 비슷한 상황의 안 쓴 장면 ${sw.sh.id} 로 바꿈`
+          );
           put(s, sw);
           continue;
         }
@@ -627,6 +657,33 @@ export function fitAssignment(
     }
   }
   return { clips, warnings, lookSwaps, reuseSwaps, reuseKept };
+}
+
+/**
+ * 원본 a~b 구간(장면 sh)이 이미 쓴 구간(used)과 '같은 화면'인지 (R39b, 2026-11-16).
+ *  같은 영상에서 시간이 0.2초 넘게 겹치거나, 같은 장면 안의 다른 부분인데 처음·가운데·끝 화면의 '같아 보임' 점수 평균이 LOOK_SAME_SCORE 미만이면 같은 화면.
+ *  다른 장면끼리는 화면을 비교하지 않음 (같은 방에서 찍은 다른 동작이 배경 때문에 같아 보임 — 11-16 시험에서 확인).
+ *  다른 영상 파일끼리는 보지 않음 (R13 과 같음). 화면 모습이 없으면 undefined (판단 못 함)
+ */
+export function looksReusedIn(shots: AutoEditShot[], sh: AutoEditShot, a: number, b: number, used: Array<[string, number, number]>): boolean | undefined {
+  if (!sh.look) return undefined;
+  for (const [p, ua, ub] of used) {
+    if (p !== sh.path) continue;
+    if (Math.min(b, ub) - Math.max(a, ua) > 0.2) return true;
+    const um = (ua + ub) / 2;
+    const us = shots.find((x) => x.path === p && x.start <= um && um < x.end);
+    // 화면 비교는 '같은 장면 안의 다른 부분'끼리만. 같은 방의 다른 동작(다른 장면)은 배경이 같아 같아 보이지만 편집자에겐 다른 클립
+    if (!us || us.id !== sh.id) continue;
+    const pairs: Array<[number, number]> = [
+      [a + 0.1, ua + 0.1],
+      [(a + b) / 2, um],
+      [b - 0.1, ub - 0.1],
+    ];
+    const sc = pairs.map(([x, y]) => lookScore(sh, x, us, y));
+    if (sc.some((v) => v === undefined)) continue;
+    if ((sc as number[]).reduce((n, v) => n + v, 0) / sc.length < LOOK_SAME_SCORE) return true;
+  }
+  return false;
 }
 
 /** 이 길이(초) 이상 쓴 장면을 '이미 쓴 장면'으로 봄 (R39) */

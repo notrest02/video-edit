@@ -26,12 +26,15 @@ export const BlurMaskOverlay: React.FC<{
   const svgRef = useRef<SVGSVGElement | null>(null);
   const currentTime = useEditorStore((s) => s.currentTime);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
-  const updateClip = useEditorStore((s) => s.updateClip);
+  // 원본 마스크(R41)가 바뀌면 다시 그림
+  useEditorStore((s) => s.sourceMasks);
+  const clipMasksOf = useEditorStore((s) => s.clipMasksOf);
+  const setClipMasks = useEditorStore((s) => s.setClipMasks);
   const selectedMaskId = useEditorStore((s) => s.selectedMaskId);
   const setSelectedMaskId = useEditorStore((s) => s.setSelectedMaskId);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
-  const masks = clip?.blurMasks || [];
+  const masks = clip ? clipMasksOf(clip) : [];
   if (!clip || masks.length === 0) return null;
   const t = currentTime - clip.startTime;
   // 보이는 구간은 내보내기와 같은 계산 (자동 마스크: 컷 앞뒤 끝까지 늘림, 같은 자리 빈틈 잇기)
@@ -62,7 +65,7 @@ export const BlurMaskOverlay: React.FC<{
     if (!rect) return;
     const start = toN(rect, e);
     const orig = masks.map((m) => maskPointsAt(m, t));
-    updateClip(clip.id, { blurMasks: masks }, true); // 되돌리기 지점
+    useEditorStore.getState().recordHistorySnapshot(); // 되돌리기 지점
     const move = (ev: PointerEvent) => {
       const p = toN(rect, ev);
       let dx = (p[0] - start[0]) * rect.width; // 화면 px 기준으로 각도 계산 (가로세로 비율 반영)
@@ -76,7 +79,9 @@ export const BlurMaskOverlay: React.FC<{
       }
       const nx = dx / rect.width;
       const ny = dy / rect.height;
-      const cur = useEditorStore.getState().clips.find((c) => c.id === clip.id)?.blurMasks || masks;
+      const st = useEditorStore.getState();
+      const cc = st.clips.find((c) => c.id === clip.id);
+      const cur = cc ? st.clipMasksOf(cc) : masks;
       const next: BlurMask[] = cur.map((m, mi) => {
         if (![0, 1, 2, 3].some((k) => selection.has(key(mi, k)))) return m;
         const pts = orig[mi].map((q, k) =>
@@ -95,7 +100,7 @@ export const BlurMaskOverlay: React.FC<{
             }
           : { ...m, points: pts };
       });
-      updateClip(clip.id, { blurMasks: next });
+      setClipMasks(clip.id, next);
     };
     const up = () => {
       window.removeEventListener('pointermove', move);

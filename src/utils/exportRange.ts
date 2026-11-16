@@ -79,7 +79,8 @@ export async function exportRange(
               opacity: c.opacity,
               keyframes: c.keyframes,
               // 블러 마스크 (자동 마스크는 컷 앞뒤 끝까지 늘린 계산 — 미리보기와 같음, R26)
-              masks: effectiveMasks(c.blurMasks, c.duration).map((m) => ({
+              //  원본 마스크(R41)는 잘라낸 뒤의 원본 구간으로 다시 계산 (미리보기와 같은 clipMasksOf)
+              masks: effectiveMasks(useEditorStore.getState().clipMasksOf(c), c.duration).map((m) => ({
                 png: maskPngDataUrl(blurPointsAt(m, 0, outW, outH), outW, outH, m.feather),
                 blur: m.blur,
                 from: m.from,

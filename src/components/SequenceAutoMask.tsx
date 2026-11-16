@@ -8,7 +8,8 @@
 import React, { useState } from 'react';
 import { Loader2, Layers } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
-import { DEFAULT_MARGIN, mergeTrackGaps, tracksToMasks } from '../utils/autoMask';
+import { DEFAULT_MARGIN, mergeTrackGaps } from '../utils/autoMask';
+import { sourceMasksFromTracks, srcKeyOf } from '../utils/sourceMask';
 
 export const SequenceAutoMask: React.FC = () => {
   const clips = useEditorStore((s) => s.clips);
@@ -22,7 +23,10 @@ export const SequenceAutoMask: React.FC = () => {
 
   const videoClips = clips.filter((c) => c.type === 'video' && c.sourcePath);
   const sources = [...new Set(videoClips.map((c) => c.sourcePath as string))];
-  const withAuto = videoClips.filter((c) => c.blurMasks?.some((m) => m.auto)).length;
+  // 원본 마스크(R41): 자동 마스크가 이미 있는 원본을 쓰는 클립 수
+  const sourceMasks = useEditorStore((s) => s.sourceMasks);
+  const hasAuto = (p?: string) => !!sourceMasks[srcKeyOf(p)]?.some((m) => m.auto);
+  const withAuto = videoClips.filter((c) => hasAuto(c.sourcePath)).length;
 
   const run = async () => {
     if (!api?.textMaskAnalyze || !sources.length) return;
@@ -54,27 +58,26 @@ export const SequenceAutoMask: React.FC = () => {
           continue;
         }
         // 분석하는 동안 바뀌었을 수 있으니 지금 상태로 적용
+        // 원본 마스크(R41): 원본마다 한 번 → 이 원본을 쓰는 모든 컷(다른 시퀀스 포함)에 같이 보임
         const st = useEditorStore.getState();
-        const out = { w: st.sequence.width || 1080, h: st.sequence.height || 1920 };
-        for (const c of st.clips.filter((x) => x.type === 'video' && x.sourcePath === src)) {
-          if (skipDone && c.blurMasks?.some((m) => m.auto)) {
-            nSkip++;
-            continue;
-          }
-          const auto = tracksToMasks(tracks, c, srcSize, out, margin);
-          st.updateClip(c.id, { blurMasks: [...(c.blurMasks || []).filter((m) => !m.auto), ...auto] }, first);
-          first = false;
-          nClips++;
-          nMasks += auto.length;
+        const using = st.clips.filter((x) => x.type === 'video' && srcKeyOf(x.sourcePath) === srcKeyOf(src)).length;
+        if (skipDone && st.sourceMasks[srcKeyOf(src)]?.some((m) => m.auto)) {
+          nSkip += using;
+          continue;
         }
+        const auto = sourceMasksFromTracks(tracks, srcSize, asset?.duration || 0, margin);
+        st.setSourceAutoMasks(src, auto, first);
+        first = false;
+        nClips += using;
+        nMasks += auto.length;
       }
     } finally {
       off?.();
       setBusy(false);
     }
     const text =
-      `${cancelRef.current ? '취소됨 — 그 전까지 ' : ''}영상 클립 ${nClips}개에 자동 마스크 ${nMasks}개 적용` +
-      (nSkip ? `, 이미 있던 ${nSkip}개 건너뜀` : '') +
+      `${cancelRef.current ? '취소됨 — 그 전까지 ' : ''}원본 자동 마스크 ${nMasks}개 적용 (그 원본을 쓰는 영상 클립 ${nClips}개에 보임)` +
+      (nSkip ? `, 이미 자동 마스크가 있는 원본의 클립 ${nSkip}개 건너뜀` : '') +
       (failed.length ? ` / 실패: ${failed.join(', ')}` : '') +
       '. 되돌리기(Ctrl+Z) 한 번이면 전체 취소.';
     setMsg(text);

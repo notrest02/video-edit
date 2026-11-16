@@ -507,7 +507,32 @@ test('R39', '이미 쓴 장면이면 비슷한 상황(주인공·단계 같은)�
   assert(r6.clips[0].shot === '1-01', `설명 없이 바뀜: ${r6.clips[0].shot}`);
 });
 
-test('R40', '장면 바꾸기 도우미: 비슷한 상황의 안 쓴 장면이 위, 이미 쓴 장면·카메라 보고 말하는 장면은 아래, 너무 짧으면 못 씀, 시작점은 안 쓴 부분', () => {
+test('R39b', '이미 씀은 실제 화면으로: 다른 광고에서 쓴 장면이라도 확실히 달라 보이는 부분은 그대로, 같아 보이면 바꿈 / 같은 광고 안은 같은 장면이면 다른 부분도 이미 씀', () => {
+  // 8초짜리 한 장면: 0~4초 빨간 화면, 4~8초 파란 화면 (작은 그림 12x20, 0.25초 간격)
+  const W = 12, H = 20, n = W * H * 3, step = 0.25, frames = 40;
+  const data = new Uint8Array(n * frames);
+  for (let f = 0; f < frames; f++) for (let i = 0; i < W * H; i++) data.set(f * step < 4 ? [220, 30, 30] : [30, 30, 220], f * n + i * 3);
+  const look = { step, w: W, h: H, data };
+  const long = { ...shot('1-01', 'a.mp4', 0, 8), look };
+  const twin = { ...shot('2-01', 'b.mp4', 0, 4) };
+  const sh = [long, twin];
+  const descs = [{ id: '1-01', subject: '손 동작(벨트 조임)', stage: '실제사용', place: '실내', desc: '' }, { id: '2-01', subject: '손 동작(벨트 조임)', stage: '실제사용', place: '실내', desc: '' }];
+  const usedRed = [['a.mp4', 0.5, 2.5]]; // 다른 광고가 빨간 부분을 씀
+  assert(A.looksReusedIn(sh, long, 5, 7, usedRed) === false && A.looksReusedIn(sh, long, 2.8, 3.8, usedRed) === true, '같은 장면 안 다른 부분 화면 판단');
+  // ① AI가 파란 부분(5초)을 고름 → 다른 광고는 빨간 부분만 썼으니 그대로
+  const r1 = A.fitAssignment([slot(0, 0, 2)], [{ slot: 0, shot: '1-01', in: 5, focus: '벨트 조임' }], sh, null, usedRed, [], descs);
+  assert(r1.clips[0].shot === '1-01' && r1.reuseSwaps === 0, `달라 보이는 부분인데 바꿈: ${r1.clips[0].shot}`);
+  // ② AI가 빨간 부분(2.8초, 시간은 안 겹침)을 고름 → 같은 화면 → 같은 장면의 파란 부분이나 비슷한 장면으로
+  const r2 = A.fitAssignment([slot(0, 0, 1)], [{ slot: 0, shot: '1-01', in: 2.8, focus: '벨트 조임' }], sh, null, usedRed, [], descs);
+  const c2 = r2.clips[0];
+  assert(r2.reuseSwaps === 1 && (c2.shot === '2-01' || c2.srcIn >= 4), `같아 보이는 부분을 그대로 씀: ${c2.shot} ${c2.srcIn}`);
+  // ③ 같은 광고 안: 앞 컷이 빨간 부분을 썼으면 파란 부분이라도 '이미 씀' (광고 안 반복 금지) → 다른 장면으로
+  const r3 = A.fitAssignment([slot(0, 0, 2, false, { cont: false }), slot(1, 2, 4, false, { cont: false }), slot(2, 4, 6, false, { cont: false })],
+    [{ slot: 0, shot: '1-01', in: 0.5, focus: '벨트 조임' }, { slot: 1, shot: '3-01', in: 0.1 }, { slot: 2, shot: '1-01', in: 5.5, focus: '벨트 조임' }], [...sh, shot('3-01', 'c.mp4', 0, 3)], null, [], [], descs);
+  assert(r3.clips[2].shot === '2-01', `광고 안에서 같은 장면 다른 부분을 다시 씀: ${r3.clips[2].shot}`);
+});
+
+test('R40','장면 바꾸기 도우미: 비슷한 상황의 안 쓴 장면이 위, 이미 쓴 장면·카메라 보고 말하는 장면은 아래, 너무 짧으면 못 씀, 시작점은 안 쓴 부분', () => {
   const SS = load('src/utils/sceneSwap.ts');
   const shots = [shot('1-01', 'a.mp4', 0, 4), shot('2-01', 'b.mp4', 0, 4), shot('3-01', 'c.mp4', 0, 4), shot('4-01', 'd.mp4', 0, 4), shot('5-01', 'e.mp4', 0, 1), shot('6-01', 'f.mp4', 0, 8)];
   const D = (id, subject, stage, talk = false) => ({ id, subject, stage, place: '실내', talk, desc: subject });
@@ -523,6 +548,85 @@ test('R40', '장면 바꾸기 도우미: 비슷한 상황의 안 쓴 장면이 �
   assert(c5 && !c5.ok && ids[ids.length - 1] === '5-01', `너무 짧은 장면이 쓸 수 있는 것으로 나옴: ${ids.join(',')}`);
   const c6 = r.list.find((c) => c.shot.id === '6-01');
   assert(c6 && c6.srcIn >= 3 - 0.05, `이미 쓴 부분(0~3초)과 겹치는 시작점: ${c6?.srcIn}`);
+  // 클립 변경 (2026-11-16): 단계 칸 · 대사로 단계 추정 · 짧아도 고를 수 있음(경고만) · 어디서 썼는지 이름
+  assert(c5.fit === 'short' && r.list.length === shots.length - 1, '짧은 장면이 목록에서 빠짐 (편집자가 고를 수 있어야 함)');
+  assert(SS.guessStage('구멍 맞추는 것도 귀찮다고') === '문제상황' && SS.guessStage('쓱 당기기만 하면 딱 잡혀요') === '실제사용' && SS.guessStage('하루 종일 편하더라고요') === '완성모습', '대사로 단계 추정');
+  assert(SS.stageOf({ stage: '실제사용' }) === '실제사용' && SS.stageOf({ stage: '' }) === '기타', '단계 칸 이름');
+  const lab = SS.rankSceneCandidates({ clip, text: '', shots, descs, hereClips: [{ ...here[0], label: '벨트_02' }], otherClips: [{ type: 'video', sourcePath: 'c.mp4', sourceStart: 0, duration: 2, label: '다른 시퀀스' }] });
+  assert(lab.list.find((c) => c.shot.id === '3-01').usedIn.join('·') === '벨트_02·다른 시퀀스', '어디서 썼는지 이름');
+  // 편집자가 시작점을 옮기면: 장면 안으로만, 짧으면 느리게 + 경고, 약한 화면 전환이 컷 끝에 걸리면 경고 (막지 않음)
+  const sh = { ...shot('7-01', 'g.mp4', 0, 5), soft: [2.95] };
+  const p1 = SS.placeAt(sh, 2, 1, 0.1);
+  assert(p1.speed === 1 && p1.warnings.length === 1 && /번쩍/.test(p1.warnings[0]), `화면 전환 경고: ${JSON.stringify(p1)}`);
+  const p2 = SS.placeAt(sh, 2, 4, 0.1);
+  assert(p2.srcIn <= 4 && p2.speed < 0.9 && p2.warnings.some((w) => /느려/.test(w)), `짧을 때 느리게+경고: ${JSON.stringify(p2)}`);
+});
+
+test('R41', '원본 마스크: 원본마다 하나 → 같은 원본의 모든 컷에 같은 마스크, 한 컷에서 고치면 모두 반영, 이 클립만 마스크는 예외 (사용자 2026-11-16)', () => {
+  const SM = load('src/utils/sourceMask.ts');
+  const OUT = { w: 1080, h: 1920 };
+  const WIDE = { w: 1920, h: 1080 }; // 가로 원본 → 세로 화면에 맞추면 위아래 띠
+  // ① 원본 2~6초 글자 → 원본 마스크 1개. 원본 3초부터 쓰는 컷 A(2배속)와 5초부터 쓰는 컷 B 모두 같은 마스크
+  const src = SM.sourceMasksFromTracks([track('a', '鞋子刮破了', 2, 6)], SZ, 20);
+  assert(src.length === 1, `원본 마스크 개수 ${src.length}`);
+  const map = { [SM.srcKeyOf('C:\\v\\1.mp4')]: src };
+  const A = { sourcePath: 'C:/V/1.mp4', sourceStart: 3, duration: 1, speed: 2 };
+  const B = { sourcePath: 'c:\\v\\1.mp4', sourceStart: 5, duration: 3, speed: 1, blurMasks: [{ id: 'own', points: [[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]], blur: 20, feather: 4 }] };
+  const ra = SM.resolveClipMasks(A, map, SZ, OUT);
+  const rb = SM.resolveClipMasks(B, map, SZ, OUT);
+  assert(ra.length === 1 && rb.length === 2 && ra[0].src && rb[1].clipOnly, `컷마다 보이는 마스크: A ${ra.length}, B ${rb.length}`);
+  // 시간: 원본 2~6초(+앞당김·늦춤) → A 안에서는 (원본초-3)/2, B 안에서는 원본초-5
+  assert(Math.abs(ra[0].from - (src[0].from - 3) / 2) < 1e-3 && Math.abs(rb[0].to - (src[0].to - 5)) < 1e-3, `시간 변환: A ${ra[0].from}, B ${rb[0].to}`);
+  // 미리보기·내보내기 계산(effectiveMasks): 컷 처음·끝을 넘는 원본 마스크는 컷 끝까지 (R26)
+  const eb = M.effectiveMasks(rb, 3)[0];
+  assert(eb.from === undefined, `B 처음부터 안 가림: ${eb.from}`);
+  // ② 컷 A에서 꼭짓점을 고치면 → 원본 마스크가 바뀌고 컷 B에도 보임 (손으로 고친 자동 마스크도 원본에, 사용자 결정)
+  const movedA = [{ ...ra[0], points: ra[0].points.map(([x, y]) => [x, y - 0.05]) }];
+  const w1 = SM.writeBackClipMasks(A, movedA, map, SZ, OUT);
+  const rb2 = SM.resolveClipMasks(B, w1.map, SZ, OUT);
+  assert(Math.abs(rb2[0].points[0][1] - (rb[0].points[0][1] - 0.05)) < 1e-6 && rb2[0].auto, `컷 B에 반영 안 됨: ${rb2[0].points[0][1]}`);
+  // ③ 안 고친 마스크는 저장값 그대로 (좌표 변환 반올림이 쌓이지 않게) — 가로 원본(띠 있음)에서도
+  const wmap = { k: [{ id: 'w', points: [[0.123456, 0.2], [0.9, 0.2], [0.9, 0.3], [0.123456, 0.3]], blur: 30, feather: 6, from: 1.234567, to: 9 }] };
+  const C = { sourcePath: 'k', sourceStart: 2, duration: 3, speed: 1.3 };
+  const rc = SM.resolveClipMasks(C, wmap, WIDE, OUT);
+  assert(rc[0].points[0][1] > 0.3 && rc[0].points[0][1] < 0.5, `띠 있는 원본 좌표 맞춤: ${rc[0].points[0][1]}`);
+  const w2 = SM.writeBackClipMasks(C, rc, wmap, WIDE, OUT);
+  assert(w2.map.k[0] === wmap.k[0], '안 고친 원본 마스크가 다시 계산되어 바뀜');
+  // 고치면 되돌린 좌표가 원래 원본 좌표 기준으로 맞음
+  const w3 = SM.writeBackClipMasks(C, [{ ...rc[0], blur: 10 }], wmap, WIDE, OUT);
+  assert(Math.abs(w3.map.k[0].points[0][0] - 0.123456) < 1e-6 && Math.abs(w3.map.k[0].from - 1.234567) < 1e-3 && w3.map.k[0].blur === 10, `되돌린 값: ${JSON.stringify(w3.map.k[0].points[0])} from ${w3.map.k[0].from}`);
+  // ④ 이 클립만 마스크는 클립에만, 원본 마스크를 '이 클립만'으로 바꾸면 원본에서 빠짐, 컷에서 지우면 원본에서 지워짐
+  const w4 = SM.writeBackClipMasks(B, [{ ...rb[0], clipOnly: true }, rb[1]], map, SZ, OUT);
+  assert(!w4.map[SM.srcKeyOf('c:/v/1.mp4')] && w4.clipMasks.length === 2 && !w4.clipMasks.some((m) => m.src || m.clipOnly), '이 클립만으로 옮기기');
+  const w5 = SM.writeBackClipMasks(B, [rb[1]], map, SZ, OUT);
+  assert(!w5.map[SM.srcKeyOf('c:/v/1.mp4')], '컷에서 지운 원본 마스크가 남음');
+  // ⑤ 이 컷 구간 밖의 원본 마스크는 이 컷에서 고쳐도 그대로
+  const far = { [SM.srcKeyOf('x')]: [{ id: 'f', points: [[0, 0], [1, 0], [1, 0.1], [0, 0.1]], blur: 30, feather: 6, from: 15, to: 18 }] };
+  const w6 = SM.writeBackClipMasks({ sourcePath: 'x', sourceStart: 0, duration: 2, speed: 1 }, [], far, SZ, OUT);
+  assert(w6.map[SM.srcKeyOf('x')]?.length === 1, '다른 컷 구간의 원본 마스크가 지워짐');
+  // ⑥ 원본 단위로 만든 자동 마스크 = 예전 '원본 전체를 쓰는 클립' 계산과 같음 (R26·R38 그대로)
+  const tr = [track('c', '第一句话', 0, 1.0), track('d', '另外内容', 1.4, 4)];
+  const viaClip = M.tracksToMasks(tr, vclip(0, 4), SZ, SZ);
+  const viaSrc = SM.sourceMasksFromTracks(tr, SZ, 4);
+  assert(JSON.stringify(viaClip.map((m) => [m.from, m.to, m.points])) === JSON.stringify(viaSrc.map((m) => [m.from, m.to, m.points])), '원본 단위 자동 마스크가 클립 계산과 다름');
+  // ⑦ 다시 적용하면 그 원본의 자동 마스크만 바뀌고 손으로 만든 원본 마스크는 그대로
+  const mixed = { [SM.srcKeyOf('y')]: [{ id: 'h', points: [[0, 0], [1, 0], [1, 0.1], [0, 0.1]], blur: 30, feather: 6 }, { ...src[0], id: 'old' }] };
+  const re = SM.replaceSourceAutoMasks(mixed, 'Y', [{ ...src[0], id: 'new' }]);
+  assert(re[SM.srcKeyOf('y')].map((m) => m.id).join(',') === 'h,new', `다시 적용: ${re[SM.srcKeyOf('y')].map((m) => m.id)}`);
+  // ⑧ 화면의 다른 자리로 뛰어 옮겨 가는 글자(구석을 오가는 워터마크): 원본 전체를 한 상자로 덮지 않고 자리마다 작은 마스크 (11-16 검토)
+  const jumpTr = { id: 'w', text: '抖音号123', conf: 0.9, hasHan: true, start: 0, end: 12, samples: [] };
+  for (let t = 0; t <= 12; t += 0.2) jumpTr.samples.push({ t: +t.toFixed(1), box: t < 4 || t >= 8 ? [0.05, 0.05, 0.25, 0.08] : [0.7, 0.9, 0.9, 0.93] });
+  const jm = SM.sourceMasksFromTracks([jumpTr], SZ, 12);
+  const big = jm.some((m) => Math.max(...m.points.map((p) => p[0])) - Math.min(...m.points.map((p) => p[0])) > 0.5);
+  assert(jm.length >= 2 && !big, `뛰어 옮기는 글자를 큰 상자 하나로 덮음: ${jm.length}개`);
+  // ⑨ '이 클립만' → 원본으로 옮기면 새 id (자르기로 같은 id 가 다른 클립에 남아 있어도 겹치지 않게)
+  const w7 = SM.writeBackClipMasks(B, [{ ...rb[1], clipOnly: false }], {}, SZ, OUT);
+  assert(w7.map[SM.srcKeyOf('c:/v/1.mp4')]?.[0]?.id !== 'own', '원본으로 옮긴 마스크 id 가 그대로');
+  // 화면 코드가 클립 마스크를 직접 읽지 않고 같은 계산(clipMasksOf)을 거치는지 (미리보기·편집·막대·내보내기)
+  for (const f of ['src/components/BlurMaskOverlay.tsx', 'src/components/BlurMaskPanel.tsx', 'src/utils/exportRange.ts', 'src/components/TimelinePanel.tsx']) {
+    const code = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    assert(code.includes('clipMasksOf') && !/effectiveMasks\(c\.blurMasks|clip\.blurMasks\?\.length|clip\.blurMasks!\.map/.test(code), `${f}: 원본 마스크 계산을 안 거침`);
+  }
 });
 
 // ---------- 결과 ----------

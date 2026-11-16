@@ -254,9 +254,12 @@ export function mergeSamePlace(masks: BlurMask[]): BlurMask[] {
 export function effectiveMasks(masks: BlurMask[] | undefined, clipDuration: number): BlurMask[] {
   if (!masks?.length) return [];
   const out = masks.map((m) => {
-    if (!m.auto) return m;
     let from = m.from;
     let to = m.to;
+    // 원본 마스크(R41)는 구간이 클립 밖까지 걸쳐 있을 수 있음 → 클립 처음/끝을 넘으면 '끝까지'
+    if (from !== undefined && from <= 0) from = undefined;
+    if (to !== undefined && to >= clipDuration) to = undefined;
+    if (!m.auto) return from === m.from && to === m.to ? m : { ...m, from, to };
     if (from !== undefined && from < EDGE_SNAP) from = undefined;
     if (to !== undefined && clipDuration - to < EDGE_SNAP) to = undefined;
     return from === m.from && to === m.to ? m : { ...m, from, to };

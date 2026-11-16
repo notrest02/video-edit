@@ -66,6 +66,7 @@ export const TimelinePanel: React.FC = () => {
     selectedClipId,
     selectedClipIds,
     selectedMaskId,
+    clipMasksOf,
     selectedTrackId,
     snapThresholdFrames,
     setCurrentTime,
@@ -1318,12 +1319,13 @@ export const TimelinePanel: React.FC = () => {
                               </div>
                             )}
 
-                            {clip.type === 'video' && !!clip.blurMasks?.length && (
+                            {clip.type === 'video' && clipMasksOf(clip).length > 0 && (
                               <div className="absolute left-0 right-0 bottom-[1px] h-[9px] pointer-events-none z-[5]" title="블러 마스크 구간">
                                 {(() => {
                                   // 겹치는 구간은 줄을 나눠(최대 3줄) 그림
                                   const lanes: number[] = [];
-                                  return clip.blurMasks!.map((m) => {
+                                  // 원본 마스크(R41) + 이 클립만 마스크 — 미리보기와 같은 목록
+                                  return clipMasksOf(clip).map((m) => {
                                     const f = Math.max(0, m.from ?? 0);
                                     const e = Math.min(clip.duration, m.to ?? clip.duration);
                                     let lane = lanes.findIndex((end) => end <= f + 1e-4);

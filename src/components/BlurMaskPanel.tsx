@@ -6,6 +6,7 @@ import React from 'react';
 import { useEditorStore } from '../store/useEditorStore';
 import type { TimelineClip } from '../types/editor';
 import { maskPointsAt, newBlurMask } from '../utils/blurMask';
+import { srcKeyOf } from '../utils/sourceMask';
 import { EASE_LABEL, type KfEase } from '../utils/keyframes';
 import { Timer } from 'lucide-react';
 import { KeyframeStrip } from './KeyframeStrip';
@@ -14,9 +15,17 @@ import { MaskRangeBar } from './MaskRangeBar';
 import { SequenceAutoMask } from './SequenceAutoMask';
 
 export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
-  const updateClip = useEditorStore((s) => s.updateClip);
   const setStatusMessage = useEditorStore((s) => s.setStatusMessage);
-  const masks = clip.blurMasks || [];
+  // 원본 마스크(R41) + 이 클립만 마스크 (원본 마스크가 바뀌면 다시 그림)
+  useEditorStore((s) => s.sourceMasks);
+  const clipMasksOf = useEditorStore((s) => s.clipMasksOf);
+  const setClipMasks = useEditorStore((s) => s.setClipMasks);
+  const masks = clipMasksOf(clip);
+  // 같은 원본을 쓰는 컷 수 (원본 마스크를 고치면 모두 바뀜)
+  const sameSourceCount = useEditorStore((s) => s.clips.filter((c) => c.type === 'video' && srcKeyOf(c.sourcePath) === srcKeyOf(clip.sourcePath)).length);
+  const otherSeqCount = useEditorStore((s) =>
+    s.sequences.filter((q) => q.id !== s.activeSequenceId).reduce((n, q) => n + (q.clips || []).filter((c) => c.type === 'video' && srcKeyOf(c.sourcePath) === srcKeyOf(clip.sourcePath)).length, 0)
+  );
   const currentTime = useEditorStore((s) => s.currentTime);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const t = Math.min(clip.duration, Math.max(0, currentTime - clip.startTime));
@@ -32,18 +41,21 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   }, [selectedMaskId]);
   const pickMask = (m: NonNullable<TimelineClip['blurMasks']>[number]) => {
     setSelectedMaskId(m.id);
-    if (!visibleNow(m)) setCurrentTime(clip.startTime + (m.from ?? 0) + 0.02); // 안 보이는 시간이면 보이는 시간으로
+    if (!visibleNow(m)) setCurrentTime(clip.startTime + Math.max(0, m.from ?? 0) + 0.02); // 안 보이는 시간이면 보이는 시간으로
   };
   const shown = masks.map((m, i) => ({ m, i })).filter(({ m }) => showAll || visibleNow(m));
   // 블러 강도·가장자리 일괄 적용: 이 클립의 모든 마스크 / 시퀀스의 모든 영상 클립 마스크
   const applyLook = (m: NonNullable<TimelineClip['blurMasks']>[number], all: boolean) => {
     const st = useEditorStore.getState();
-    const targets = all ? st.clips.filter((c) => c.type === 'video' && c.blurMasks?.length) : [clip];
+    const targets = all ? st.clips.filter((c) => c.type === 'video' && st.clipMasksOf(c).length) : [clip];
     let n = 0;
     targets.forEach((c, i) => {
-      const cur = st.clips.find((x) => x.id === c.id)?.blurMasks || [];
+      const s2 = useEditorStore.getState();
+      const cc = s2.clips.find((x) => x.id === c.id);
+      if (!cc) return;
+      const cur = s2.clipMasksOf(cc);
       n += cur.length;
-      st.updateClip(c.id, { blurMasks: cur.map((x) => ({ ...x, blur: m.blur, feather: m.feather, expand: m.expand })) }, i === 0);
+      s2.setClipMasks(c.id, cur.map((x) => ({ ...x, blur: m.blur, feather: m.feather, expand: m.expand })), i === 0);
     });
     setStatusMessage(`블러 ${m.blur} / 가장자리 ${m.feather} / 범위 ${m.expand || 0} 를 ${all ? `영상 클립 ${targets.length}개의 ` : '이 클립의 '}마스크 ${n}개에 적용했습니다.`);
   };
@@ -53,18 +65,34 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   const setClipboard = useEditorStore((s) => s.setMaskClipboard);
   const selectedIds = useEditorStore((s) => s.selectedClipIds);
   const fresh = (list: NonNullable<TimelineClip['blurMasks']>, tag: string) =>
-    list.map((m, i) => ({ ...JSON.parse(JSON.stringify(m)), id: `mask_${Date.now()}_${tag}_${i}`, keyframes: undefined }));
+    // 붙여넣은 마스크는 '이 클립만' (다른 원본에 붙일 수도 있으니)
+    list.map((m, i) => ({ ...JSON.parse(JSON.stringify(m)), id: `mask_${Date.now()}_${tag}_${i}`, keyframes: undefined, src: undefined, clipOnly: true }));
   // 붙여넣기: 선택한 영상 클립이 여러 개면 모두에, 아니면 이 클립에 (기존 마스크 뒤에 더함)
   const paste = () => {
     if (!clipboard?.length) return;
     const st = useEditorStore.getState();
     const targets = st.clips.filter((c) => c.type === 'video' && (selectedIds.length > 1 ? selectedIds.includes(c.id) : c.id === clip.id));
-    targets.forEach((c, i) => st.updateClip(c.id, { blurMasks: [...(c.blurMasks || []), ...fresh(clipboard, String(i))] }, i === 0));
+    targets.forEach((c, i) => {
+      const s2 = useEditorStore.getState();
+      const cc = s2.clips.find((x) => x.id === c.id);
+      if (cc) s2.setClipMasks(c.id, [...s2.clipMasksOf(cc), ...fresh(clipboard, String(i))], i === 0);
+    });
     setStatusMessage(`블러 마스크 ${clipboard.length}개를 영상 클립 ${targets.length}개에 붙여넣었습니다.`);
   };
-  const setMasks = (next: TimelineClip['blurMasks'], history = false) => updateClip(clip.id, { blurMasks: next }, history);
+  const setMasks = (next: NonNullable<TimelineClip['blurMasks']>, history = false) => setClipMasks(clip.id, next, history);
+  // 클립 안에서 보이는 구간 (원본 마스크는 클립 밖까지 걸칠 수 있어 잘라서 보여 줌)
+  const fromIn = (m: { from?: number }) => (m.from !== undefined && m.from > 0 ? m.from : undefined);
+  const toIn = (m: { to?: number }) => (m.to !== undefined && m.to < clip.duration ? m.to : undefined);
   // 마스크가 보이는 구간 (클립 안 초). 클립 전체면 from/to 없앰
   const setRange = (id: string, from: number | undefined, to: number | undefined, history = true) => {
+    const cur = masks.find((x) => x.id === id);
+    if (cur?.src) {
+      // 원본 마스크: 클립 처음/끝까지 끌면, 원래 클립 밖까지 이어지던 구간은 그대로 둠 (다른 컷에서 쓰는 부분이 잘리지 않게)
+      const f = from === undefined || from <= 1e-4 ? (cur.from === undefined || cur.from <= 0 ? cur.from : 0) : from;
+      const e = to === undefined || to >= clip.duration - 1e-4 ? (cur.to === undefined || cur.to >= clip.duration ? cur.to : clip.duration) : to;
+      setMasks(masks.map((x) => (x.id === id ? { ...x, from: f, to: e } : x)), history);
+      return;
+    }
     const whole = (from ?? 0) <= 1e-4 && (to ?? clip.duration) >= clip.duration - 1e-4;
     setMasks(
       masks.map((x) => (x.id === id ? { ...x, from: whole ? undefined : from, to: whole ? undefined : to } : x)),
@@ -74,19 +102,6 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   const stop = (fn: () => void) => (e: React.MouseEvent) => {
     e.stopPropagation();
     fn();
-  };
-
-  const applyToSameSource = () => {
-    const st = useEditorStore.getState();
-    const targets = st.clips.filter((c) => c.type === 'video' && c.sourcePath === clip.sourcePath && c.id !== clip.id);
-    targets.forEach((c, i) =>
-      st.updateClip(
-        c.id,
-        { blurMasks: masks.map((m) => ({ ...JSON.parse(JSON.stringify(m)), id: `${m.id}_${i}`, keyframes: undefined })) },
-        i === 0
-      )
-    );
-    setStatusMessage(`같은 원본(${(clip.sourcePath || '').split(/[\\/]/).pop()}) 영상 클립 ${targets.length}개에 블러 마스크를 적용했습니다.`);
   };
 
   return (
@@ -122,7 +137,7 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
         </span>
       </div>
       <SequenceAutoMask />
-      <AutoMaskSection key={clip.id} clip={clip} />
+      <AutoMaskSection key={`${clip.id}|${clip.sourcePath}`} clip={clip} />
       {masks.length === 0 ? (
         <div className="text-[10px] text-[#888888] leading-relaxed">
           원본에 박힌 중국어 자막·워터마크를 흐리게 가립니다. [+ 마스크 추가] 후 미리보기에서 꼭짓점을 끌어 맞추세요.
@@ -151,8 +166,8 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
                   <MaskRangeBar
                     clipStart={clip.startTime}
                     duration={clip.duration}
-                    from={m.from}
-                    to={m.to}
+                    from={fromIn(m)}
+                    to={toIn(m)}
                     selected={m.id === selectedMaskId}
                     onSelect={() => pickMask(m)}
                     onChange={(f, e, h) => setRange(m.id, f, e, h)}
@@ -179,24 +194,41 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
                   {m.id === selectedMaskId ? '▶ ' : ''}마스크 {i + 1}
                   {visibleNow(m) && <span className="ml-1 text-[9px] text-[#3fb950]">지금 보임</span>}
                   {m.auto && <span className="ml-1 text-[9px] text-[#79b8ff]">자동</span>}
-                  {(m.from !== undefined || m.to !== undefined) && (
+                  {m.clipOnly ? (
+                    <span className="ml-1 text-[9px] text-[#e5a038]" title="이 클립에만 있는 마스크">이 클립만</span>
+                  ) : (
+                    <span className="ml-1 text-[9px] text-[#3fb950]" title={`원본 마스크: 고치면 이 원본을 쓰는 컷 ${sameSourceCount + otherSeqCount}개 모두에 반영`}>
+                      원본
+                    </span>
+                  )}
+                  {(fromIn(m) !== undefined || toIn(m) !== undefined) && (
                     <span className="ml-1 text-[9px] text-[#888888]">
-                      ({(m.from ?? 0).toFixed(1)}~{(m.to ?? clip.duration).toFixed(1)}초만)
+                      ({(fromIn(m) ?? 0).toFixed(1)}~{(toIn(m) ?? clip.duration).toFixed(1)}초만)
                     </span>
                   )}
                 </span>
-                <button
-                  onClick={stop(() => setMasks(masks.filter((x) => x.id !== m.id), true))}
-                  className="px-1.5 py-0.5 rounded bg-[#2b2b2b] text-[#ff9b9b] text-[10px]"
-                >
-                  삭제
-                </button>
+                <span className="flex gap-1">
+                  <button
+                    onClick={stop(() => setMasks(masks.map((x) => (x.id === m.id ? { ...x, clipOnly: !m.clipOnly } : x)), true))}
+                    className="px-1.5 py-0.5 rounded bg-[#2b2b2b] text-[#dddddd] text-[10px]"
+                    title={m.clipOnly ? '원본 마스크로 옮김 → 이 원본을 쓰는 모든 컷에 보임' : '이 클립에만 남김 → 다른 컷에서는 안 보임'}
+                  >
+                    {m.clipOnly ? '원본으로' : '이 클립만'}
+                  </button>
+                  <button
+                    onClick={stop(() => setMasks(masks.filter((x) => x.id !== m.id), true))}
+                    className="px-1.5 py-0.5 rounded bg-[#2b2b2b] text-[#ff9b9b] text-[10px]"
+                    title={m.clipOnly ? '이 클립에서 지움' : `원본 마스크라 이 원본을 쓰는 컷 ${sameSourceCount + otherSeqCount}개 모두에서 지워짐`}
+                  >
+                    삭제
+                  </button>
+                </span>
               </div>
               {/* 보이는 구간: 재생헤드 위치로 시작/끝 정하기 */}
               <div className="flex items-center gap-1 text-[10px]">
                 <span className="text-[#999999] shrink-0">구간</span>
                 <span className="font-mono text-[#dddddd] shrink-0">
-                  {(m.from ?? 0).toFixed(2)}~{(m.to ?? clip.duration).toFixed(2)}초
+                  {(fromIn(m) ?? 0).toFixed(2)}~{(toIn(m) ?? clip.duration).toFixed(2)}초
                 </span>
                 <button
                   onClick={stop(() => t < (m.to ?? clip.duration) - 1e-3 && setRange(m.id, +t.toFixed(4), m.to))}
@@ -366,13 +398,6 @@ export const BlurMaskPanel: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
               </div>
             </div>
           ))}
-          <button
-            onClick={applyToSameSource}
-            className="w-full py-1 rounded bg-[#242933] hover:bg-[#2e3542] border border-[#3b4454] text-[#cccccc] text-[10px]"
-            title="같은 원본 파일에서 잘라 쓴 모든 영상 클립에 지금 마스크를 복사 (기존 마스크는 바뀜)"
-          >
-            같은 원본의 모든 클립에 적용
-          </button>
         </>
       )}
     </div>

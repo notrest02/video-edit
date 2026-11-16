@@ -15,7 +15,8 @@ const require = createRequire(import.meta.url);
 const esbuild = require(path.join(ROOT, 'node_modules/esbuild'));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'autoedit-replay-'));
 const out = path.join(tmp, 'autoEdit.cjs');
-esbuild.buildSync({ entryPoints: [path.join(ROOT, 'src/utils/autoEdit.ts')], bundle: true, format: 'cjs', platform: 'node', outfile: out, logLevel: 'error' });
+// AUTOEDIT_TS 를 주면 다른 버전 파일로 (전/후 비교용)
+esbuild.buildSync({ entryPoints: [process.env.AUTOEDIT_TS || path.join(ROOT, 'src/utils/autoEdit.ts')], bundle: true, format: 'cjs', platform: 'node', outfile: out, logLevel: 'error' });
 const A = require(out);
 
 const [projPath, ...logFiles] = process.argv.slice(2);
@@ -67,7 +68,7 @@ const RULE = [
 let bad = 0;
 const prevClips = []; // 앞 광고의 컷 (앱과 같이 후킹은 빼고 — 후킹은 겹쳐도 됨, R27)
 const prevShotIds = [];
-const overlapTotal = { cross: 0, inner: 0, n: 0 };
+const overlapTotal = { cross: 0, inner: 0, n: 0, look: 0 };
 logFiles.forEach((lf, gi) => {
   const g = seq.adSegments?.[gi];
   const L = JSON.parse(fs.readFileSync(lf, 'utf8'));
@@ -84,11 +85,18 @@ logFiles.forEach((lf, gi) => {
   const prevShots = new Set(prevShotIds);
   const nonHook = r.clips.filter((c) => !c.hook);
   const crossDup = nonHook.filter((c) => prevShots.has(c.shot)).length;
+  // 화면으로 봐서 겹침 (R39b): 앞 광고에서 쓴 구간과 시간이 겹치거나 같은 화면으로 보이는 컷
+  const prevRanges = used.ranges;
+  const lookDup = nonHook.filter((c) => {
+    const sh = shots.find((x) => x.id === c.shot);
+    return sh && A.looksReusedIn(shots, sh, c.srcIn, c.srcIn + (c.end - c.start) * c.speed, prevRanges) === true;
+  }).length;
+  overlapTotal.look += lookDup;
   const inDup = r.clips.filter((c, k) => !c.hook && r.clips.slice(0, k).some((p, j) => p.shot === c.shot && !(j === k - 1))).length;
   overlapTotal.cross += crossDup;
   overlapTotal.inner += inDup;
   overlapTotal.n += nonHook.length;
-  console.log(`\n   겹침: 앞 광고에서 쓴 장면 다시 씀 ${crossDup}/${nonHook.length} · 이 광고 안 같은 장면 다시 씀 ${inDup} · 비슷한 장면으로 바꾼 자리 ${r.reuseSwaps ?? '-'}`);
+  console.log(`\n   겹침: 앞 광고와 같은 화면 ${lookDup}/${nonHook.length} · 앞 광고에서 쓴 장면 번호 ${crossDup}/${nonHook.length} · 이 광고 안 같은 장면 다시 씀 ${inDup} · 비슷한 장면으로 바꾼 자리 ${r.reuseSwaps ?? '-'}`);
   prevShotIds.push(...nonHook.map((c) => c.shot));
   prevClips.push(...r.clips.filter((c) => !c.hook).map((c) => ({ type: 'video', sourcePath: c.path, sourceStart: c.srcIn, duration: c.end - c.start, speed: c.speed })));
   const is = A.auditPlan(sl, r.clips, shots, { hi, fps: seq.fps || 30, descs });
@@ -106,7 +114,7 @@ logFiles.forEach((lf, gi) => {
   });
   for (const i of is) console.log(`   ${i.level === 'error' ? '❌' : '⚠️'} [${RULE.find(([re]) => re.test(i.msg))?.[1] || '-'}] ${i.msg}`);
 });
-console.log(`\n겹침 합계 (R39): 앞 광고와 같은 장면 ${overlapTotal.cross}/${overlapTotal.n} 컷 · 광고 안 같은 장면 다시 씀 ${overlapTotal.inner}`);
+console.log(`\n겹침 합계 (R39): 앞 광고와 같은 화면 ${overlapTotal.look}/${overlapTotal.n} 컷 · 같은 장면 번호 ${overlapTotal.cross}/${overlapTotal.n} 컷 · 광고 안 같은 장면 다시 씀 ${overlapTotal.inner}`);
 console.log(`코드로 막는 규칙(R01~R03, R11~R13) 위반: ${bad}개`);
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(bad ? 1 : 0);

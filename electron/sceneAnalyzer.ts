@@ -592,7 +592,16 @@ export async function analyzeMedia(
  * 장면 바꾸기 도우미용: 이미 저장된 분석만 읽음 (AI·ffmpeg 호출 없음 = 비용 없음).
  * id 는 analyzeMedia 와 같은 방식 (미디어 순서 번호-샷 번호). 분석이 없는 영상은 missing 으로 알려 줌
  */
-export function readCachedScenes(media: Array<{ path: string }>): { shots: Shot[]; descs: ShotDesc[]; missing: string[]; alias: Record<string, string> } {
+export function readCachedScenes(media: Array<{ path: string }>): {
+  shots: Shot[];
+  descs: ShotDesc[];
+  missing: string[];
+  alias: Record<string, string>;
+  /** 화면 모습 작은 그림 (R13 '앞뒤 컷과 같아 보이는지' 경고용) */
+  looks: Record<string, string>;
+  look: typeof LOOK;
+} {
+  const looks: Record<string, string> = {};
   const shots: Shot[] = [];
   const descs: ShotDesc[] = [];
   const missing: string[] = [];
@@ -612,14 +621,20 @@ export function readCachedScenes(media: Array<{ path: string }>): { shots: Shot[
       const c = JSON.parse(fs.readFileSync(f, 'utf8')) as FileCache;
       const renum = (id: string) => id.replace(/^[^-]+-/, `${i + 1}-`);
       const file = path.basename(m.path);
-      for (const s of c.shots) shots.push({ ...s, id: renum(s.id), path: m.path, file });
+      // 약한 화면 전환(R28): 클립 변경에서 고른 시작점이 걸리면 경고
+      const soft = c.soft || [];
+      for (const s of c.shots) {
+        const inShot = soft.filter((t) => t > s.start && t < s.end);
+        shots.push({ ...s, id: renum(s.id), path: m.path, file, ...(inShot.length ? { soft: inShot } : {}) });
+      }
+      if (c.looks) looks[m.path] = c.looks;
       for (const d of c.descs || []) descs.push({ ...d, id: renum(d.id) });
       if (!c.descs) missing.push(m.path);
     } catch {
       missing.push(m.path);
     }
   });
-  return { shots, descs, missing, alias };
+  return { shots, descs, missing, alias, looks, look: LOOK };
 }
 
 /** 장면 한 장 사진 (원본 t초, 세로 240px jpg). 한 번 만들면 저장해 두고 다시 씀 — ffmpeg 만, 비용 없음 */

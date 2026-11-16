@@ -7,18 +7,23 @@ import React, { useState } from 'react';
 import { Loader2, ScanText } from 'lucide-react';
 import { useEditorStore } from '../store/useEditorStore';
 import type { AutoTextTrack, TimelineClip } from '../types/editor';
-import { DEFAULT_MARGIN, mergeTrackGaps, tracksToMasks } from '../utils/autoMask';
+import { DEFAULT_MARGIN, mergeTrackGaps } from '../utils/autoMask';
+import { sourceMasksFromTracks, srcKeyOf } from '../utils/sourceMask';
 
 export const AutoMaskSection: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
   const assets = useEditorStore((s) => s.assets);
-  const sequence = useEditorStore((s) => s.sequence);
+  // 이 원본을 쓰는 영상 클립 수 (지금 시퀀스 + 다른 시퀀스) — 원본 마스크가 보이는 곳
+  const usingCount = useEditorStore(
+    (s) =>
+      s.clips.filter((c) => c.type === 'video' && srcKeyOf(c.sourcePath) === srcKeyOf(clip.sourcePath)).length +
+      s.sequences.filter((q) => q.id !== s.activeSequenceId).reduce((n, q) => n + (q.clips || []).filter((c) => c.type === 'video' && srcKeyOf(c.sourcePath) === srcKeyOf(clip.sourcePath)).length, 0)
+  );
   const setStatusMessage = useEditorStore((s) => s.setStatusMessage);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
   const [tracks, setTracks] = useState<AutoTextTrack[] | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [margin, setMargin] = useState(DEFAULT_MARGIN);
-  const selectedIds = useEditorStore((s) => s.selectedClipIds);
   const asset = assets.find((a) => a.id === clip.assetId) || assets.find((a) => a.path === clip.sourcePath);
   const api = window.electronAPI;
   const sp = clip.speed && clip.speed > 0 ? clip.speed : 1;
@@ -43,22 +48,13 @@ export const AutoMaskSection: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
     }
   };
 
-  const apply = (all: boolean) => {
-    if (!tracks) return;
-    const st = useEditorStore.getState();
+  // 원본 마스크(R41): 원본에 한 번 넣으면 이 원본을 쓰는 모든 컷에 보임. 예전 자동 마스크만 바뀌고 손으로 만든 마스크는 그대로
+  const apply = () => {
+    if (!tracks || !clip.sourcePath) return;
     const chosen = tracks.filter((t) => checked.has(t.id));
-    // 기본: 선택한 클립(타임라인에서 여러 개 고르면 그중 같은 원본 클립 모두), all = 같은 원본 모든 클립
-    const picked = selectedIds.length > 1 ? selectedIds : [clip.id];
-    const targets = st.clips.filter(
-      (c) => c.type === 'video' && c.sourcePath === clip.sourcePath && (all || picked.includes(c.id))
-    );
-    let n = 0;
-    targets.forEach((c, i) => {
-      const auto = tracksToMasks(chosen, c, { w: asset?.width || 1080, h: asset?.height || 1920 }, { w: sequence.width || 1080, h: sequence.height || 1920 }, margin);
-      n += auto.length;
-      st.updateClip(c.id, { blurMasks: [...(c.blurMasks || []).filter((m) => !m.auto), ...auto] }, i === 0);
-    });
-    setStatusMessage(`자동 마스크 ${n}개를 영상 클립 ${targets.length}개에 적용했습니다. (손으로 만든 마스크는 그대로)`);
+    const auto = sourceMasksFromTracks(chosen, { w: asset?.width || 1080, h: asset?.height || 1920 }, asset?.duration || 0, margin);
+    useEditorStore.getState().setSourceAutoMasks(clip.sourcePath, auto, true);
+    setStatusMessage(`원본 자동 마스크 ${auto.length}개를 넣었습니다 — 이 원본을 쓰는 영상 클립 ${usingCount}개에 보입니다. (손으로 만든 마스크는 그대로)`);
   };
 
   return (
@@ -109,14 +105,13 @@ export const AutoMaskSection: React.FC<{ clip: TimelineClip }> = ({ clip }) => {
             <span className="font-mono text-[#6cb6ff] w-10 text-right">{Math.round(margin * 100)}%</span>
           </div>
           <div className="text-[9px] text-[#777777]">글자 끝이 덜 가려지면 여백을 늘리고 다시 적용하세요 (두 줄 큰 글자는 작게).</div>
-          <div className="flex gap-1">
-            <button onClick={() => apply(false)} className="flex-1 py-1 rounded bg-[#2d8ceb] hover:bg-[#1e78d6] text-white text-[10px] font-semibold">
-              {selectedIds.length > 1 ? `선택한 클립에 적용 (${selectedIds.length}개)` : '이 클립에 적용'}
-            </button>
-            <button onClick={() => apply(true)} className="flex-1 py-1 rounded bg-[#242933] hover:bg-[#2e3542] border border-[#3b4454] text-[#dddddd] text-[10px]">
-              같은 원본 모든 클립에 적용
-            </button>
-          </div>
+          <button
+            onClick={apply}
+            className="w-full py-1 rounded bg-[#2d8ceb] hover:bg-[#1e78d6] text-white text-[10px] font-semibold"
+            title="원본에 자동 마스크를 넣습니다 — 이 원본을 쓰는 모든 컷(다른 시퀀스 포함)에 같이 보입니다"
+          >
+            원본에 적용 (이 원본을 쓰는 클립 {usingCount}개)
+          </button>
         </>
       )}
     </div>

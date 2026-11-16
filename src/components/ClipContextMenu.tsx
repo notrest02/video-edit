@@ -160,9 +160,9 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
           <button
             onClick={() => run(() => openSceneSwap(clipId))}
             className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white"
-            title="이 컷 자막에 어울리는 다른 장면을 사진·설명과 함께 보여 줍니다 (비용 없음)"
+            title="AI가 나눈 장면을 단계별로 보고 이 컷의 장면을 바꿉니다 (타임라인 길이는 그대로, 비용 없음)"
           >
-            다른 장면 후보 보기…
+            클립 변경…
           </button>
           <div className="h-px bg-[#3a3a3a] my-1" />
           <button

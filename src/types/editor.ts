@@ -164,6 +164,10 @@ export type BlurMask = {
   to?: number;
   /** 자동 마스크로 만든 것 (찾은 글자 덩어리 id). 다시 적용하면 바뀜 */
   auto?: string;
+  /** (화면 계산용, 저장 안 함) 원본 마스크에서 온 것 — 원본 저장 키. 고치면 그 원본을 쓰는 모든 컷에 반영 (R41) */
+  src?: string;
+  /** (화면 계산용) '이 클립만' 마스크 — 클립에만 저장. false 로 바꾸면 원본 마스크로 옮김 */
+  clipOnly?: boolean;
 };
 
 /** 자동 마스크: 원본에서 찾은 글자 덩어리 (원본 좌표 0~1, 원본 초) */
@@ -341,6 +345,8 @@ export interface ProjectFileData {
   scriptText?: string;
   /** 대본 만들기(STEP 0)가 저장한 문장별 근거 장면 — 자동 배치가 1순위로 씀 */
   scriptBasis?: ScriptBasisEntry[];
+  /** 원본 마스크 (R41): 원본 경로 키 → 마스크 (원본 초, 원본 화면 좌표) */
+  sourceMasks?: Record<string, BlurMask[]>;
   captionLineMode?: string;
   captionMaxCharsPerLine?: number;
   autoSplitOnCaptionGenerate?: boolean;
@@ -387,7 +393,7 @@ declare global {
         usedElsewhere: Array<{ shot: string; from: number; to: number }>;
       }) => Promise<{ assign: Array<{ slot: number; shot: string; in: number; alt?: string; focus?: string; fit?: string; why: string }>; usage: { input: number; output: number } }>;
       /** 장면 바꾸기 도우미: 이미 저장된 장면 분석만 읽음 (AI 호출 없음, 비용 없음) */
-      sceneCached?: (params: { media: Array<{ path: string }> }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; missing: string[]; /** 경로 → 내용이 같은 대표 경로 */ alias: Record<string, string> }>;
+      sceneCached?: (params: { media: Array<{ path: string }> }) => Promise<{ shots: AutoEditShot[]; descs: AutoEditShotDesc[]; missing: string[]; /** 경로 → 내용이 같은 대표 경로 */ alias: Record<string, string>; looks?: Record<string, string>; look?: { step: number; w: number; h: number } }>;
       /** 장면 사진 한 장 (원본 t초) → 저장된 jpg 경로 (ffmpeg, 비용 없음) */
       sceneThumb?: (params: { path: string; t: number }) => Promise<string>;
       onAutoEditProgress?: (callback: (msg: string) => void) => () => void;
