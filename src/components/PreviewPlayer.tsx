@@ -8,6 +8,7 @@ import {
   StepForward,
 } from 'lucide-react';
 import { useEditorStore, clipSpeed } from '../store/useEditorStore';
+import { srcAt } from '../utils/clipTime';
 import { matchAction } from '../utils/shortcuts';
 import { formatFullTimecode } from '../utils/subtitleSnapper';
 import { TimelineClip } from '../types/editor';
@@ -626,8 +627,8 @@ export const PreviewPlayer: React.FC = () => {
 
     const previewPath = previewProxyMap[activeVideoClip.sourcePath] || activeVideoClip.sourcePath;
     const mediaUrl = `media://local?path=${encodeURIComponent(previewPath)}`;
-    const targetMediaTime =
-      activeVideoClip.sourceStart + (currentTime - activeVideoClip.startTime) * clipSpeed(activeVideoClip);
+    // 원본 위치 (거꾸로 재생이면 끝에서부터 — clipTime.srcAt, 내보내기와 같은 계산)
+    const targetMediaTime = srcAt(activeVideoClip, currentTime - activeVideoClip.startTime);
 
     if (preparedRef.current && preparedRef.current.idx === frontIdxRef.current) preparedRef.current = null;
     // 다음 클립으로 넘어왔을 때:
@@ -737,7 +738,15 @@ export const PreviewPlayer: React.FC = () => {
       lastVideoSeekWallRef.current = now;
     }
 
-    if (isPlaying) {
+    if (activeVideoClip.reverse) {
+      // 거꾸로 재생: 브라우저 영상은 거꾸로 못 틀어서, 멈춘 채로 시간이 갈 때마다 원본 위치를 뒤로 옮겨 보여 줌
+      //  (미리보기는 조금 끊겨 보일 수 있음. 내보내기는 ffmpeg reverse 라 매끄러움)
+      if (!videoEl.paused) videoEl.pause();
+      if (isPlaying && !isClipChanged && !videoEl.seeking && timeDiff > 0.02) {
+        videoEl.currentTime = Math.max(0, targetMediaTime);
+        lastVideoSeekWallRef.current = now;
+      }
+    } else if (isPlaying) {
       if (atClipEnd && !isClipChanged) {
         if (!videoEl.paused) videoEl.pause();
       } else if (videoEl.paused) {
@@ -775,7 +784,7 @@ export const PreviewPlayer: React.FC = () => {
     if (!back.paused) back.pause();
     back.muted = true;
     back.playbackRate = clipSpeed(next);
-    seekVideoWhenReady(back, next.sourceStart);
+    seekVideoWhenReady(back, srcAt(next, 0));
     preparedRef.current = { idx: 1 - frontIdxRef.current, clipId: next.id };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeVideoClip, currentTime, clips, previewProxyMap]);

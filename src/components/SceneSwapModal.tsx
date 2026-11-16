@@ -3,7 +3,8 @@ import { X, Repeat2, AlertTriangle } from 'lucide-react';
 import { useEditorStore, MIN_CLIP_SPEED } from '../store/useEditorStore';
 import type { AutoEditShot, AutoEditShotDesc, TimelineClip } from '../types/editor';
 import { FIT_SPEED, STAGES, guessStage, placeAt, rankSceneCandidates, shotOfClip, stageOf, type SceneCandidate, type Stage } from '../utils/sceneSwap';
-import { attachLooks, jumpLooksSame, selectMediaForSequence } from '../utils/autoEdit';
+import { attachLooks, jumpLooksSame } from '../utils/autoEdit';
+import { videosForSequence } from '../utils/sourcePick';
 import { mergeTrackGaps } from '../utils/autoMask';
 import { sourceMasksFromTracks, srcKeyOf } from '../utils/sourceMask';
 
@@ -17,6 +18,9 @@ import { sourceMasksFromTracks, srcKeyOf } from '../utils/sourceMask';
  *  - 이미 저장된 장면 분석만 씀 → 비용 없음
  */
 export const openSceneSwap = (clipId: string) => window.dispatchEvent(new CustomEvent('scene-swap:open', { detail: clipId }));
+/** 빈 자리에 장면 넣기 (사용자 2026-11-16): 영상 트랙 빈 자리 우클릭 → 같은 창으로 골라 빈 자리 길이에 딱 맞게 새 클립 */
+export const openSceneFill = (gap: { trackId: string; start: number; end: number }) => window.dispatchEvent(new CustomEvent('scene-swap:fill', { detail: gap }));
+const FILL_ID = '__fill__';
 
 const mediaUrl = (p: string) => `media://local?path=${encodeURIComponent(p)}`;
 
@@ -120,17 +124,38 @@ export const SceneSwapModal: React.FC = () => {
   const [tab, setTab] = useState<Stage | null>(null);
   const [selId, setSelId] = useState<string | null>(null);
   const [start, setStart] = useState<number | null>(null);
-  const clip = useEditorStore((s) => (clipId ? s.clips.find((c) => c.id === clipId) : undefined));
+  const [fill, setFill] = useState<{ trackId: string; start: number; end: number } | null>(null);
+  const storeClip = useEditorStore((s) => (clipId && clipId !== FILL_ID ? s.clips.find((c) => c.id === clipId) : undefined));
+  // 빈 자리 넣기: 그 자리를 '원본 없는 클립'으로 보고 같은 계산을 씀 (지금 장면 없음)
+  const fillClip = useMemo<TimelineClip | undefined>(
+    () => (fill ? { id: FILL_ID, trackId: fill.trackId, type: 'video', name: '', startTime: fill.start, duration: fill.end - fill.start, sourceStart: 0, volume: 1, muted: true } : undefined),
+    [fill]
+  );
+  const clip = fill ? fillClip : storeClip;
+  const mineRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const on = (e: Event) => {
-      setClipId((e as CustomEvent<string>).detail);
+    const reset = () => {
       setTab(null);
       setSelId(null);
       setStart(null);
     };
+    const on = (e: Event) => {
+      setFill(null);
+      setClipId((e as CustomEvent<string>).detail);
+      reset();
+    };
+    const onFill = (e: Event) => {
+      setFill((e as CustomEvent<{ trackId: string; start: number; end: number }>).detail);
+      setClipId(FILL_ID);
+      reset();
+    };
     window.addEventListener('scene-swap:open', on);
-    return () => window.removeEventListener('scene-swap:open', on);
+    window.addEventListener('scene-swap:fill', onFill);
+    return () => {
+      window.removeEventListener('scene-swap:open', on);
+      window.removeEventListener('scene-swap:fill', onFill);
+    };
   }, []);
 
   useEffect(() => {
@@ -145,11 +170,19 @@ export const SceneSwapModal: React.FC = () => {
     // 이 시퀀스가 쓰는 원본(자동 배치와 같은 고르기)을 먼저 → 내용이 같은 복사본이 여러 폴더에 있으면 이 시퀀스 쪽이 대표가 됨
     const st = useEditorStore.getState();
     const vids = st.assets.filter((a) => a.type === 'video');
-    const mine = selectMediaForSequence(vids, st.sequences.find((s) => s.id === st.activeSequenceId), st.sequences.filter((s) => s.id !== st.activeSequenceId), st.clips);
+    // 이 시퀀스에 쓸 원본(R42)만 후보로 — 다른 제품 장면이 섞이지 않게. 나머지 영상은 '쓴 기록' 셈(복사본 묶기)에만 씀
+    const mine = videosForSequence(vids, st.sequences.find((s) => s.id === st.activeSequenceId), st.sequences.filter((s) => s.id !== st.activeSequenceId), st.clips).list;
+    mineRef.current = new Set(mine.map((v) => v.path));
     const media = [...mine, ...vids.filter((v) => !mine.includes(v))].map((a) => ({ path: a.path }));
     api
       .sceneCached({ media })
-      .then((r) => setData({ ...r, shots: attachLooks(r.shots, r.looks, r.look) }))
+      .then((r) => {
+        // 후보 장면은 이 시퀀스 원본 것만 (대표 경로 기준), 쓴 기록은 alias 로 전체를 셈
+        const ok = new Set([...mineRef.current].map((p) => r.alias?.[p] || p));
+        const shots = r.shots.filter((x) => ok.has(x.path));
+        const ids = new Set(shots.map((x) => x.id));
+        setData({ ...r, shots: attachLooks(shots, r.looks, r.look), descs: r.descs.filter((d) => ids.has(d.id)) });
+      })
       .catch((e) => setErr(String(e?.message || e)));
   }, [clipId]);
 
@@ -191,7 +224,8 @@ export const SceneSwapModal: React.FC = () => {
   }, [clip, data]);
 
   const curStage = stageOf(ranked?.currentDesc);
-  const openTab: Stage = tab || ranked?.guess || curStage;
+  // 빈 자리는 지금 장면이 없으니 대사로 단계를 못 정하면 '실제사용' 칸부터
+  const openTab: Stage = tab || ranked?.guess || (fill ? '실제사용' : curStage);
   const inTab = ranked ? ranked.list.filter((c) => c.stage === openTab) : [];
   const sel = ranked?.list.find((c) => c.shot.id === selId) || null;
   const D = clip?.duration || 0;
@@ -214,8 +248,12 @@ export const SceneSwapModal: React.FC = () => {
   const apply = () => {
     if (!sel || !placed || !clip) return;
     const st = useEditorStore.getState();
-    const swappedId = clipId;
-    st.replaceClipSource(clipId, { path: sel.shot.path, sourceStart: placed.srcIn, speed: placed.speed });
+    let swappedId = clipId;
+    if (fill) {
+      const id = st.insertSceneClip(fill.trackId, fill.start, D, { path: sel.shot.path, sourceStart: placed.srcIn, speed: placed.speed });
+      if (!id) return close();
+      swappedId = id;
+    } else st.replaceClipSource(clipId, { path: sel.shot.path, sourceStart: placed.srcIn, speed: placed.speed });
     // 원본 마스크: 자동 마스크를 이미 쓰는 프로젝트인데 이 원본만 아직이면 글자 찾기를 돌려 넣음 (로컬, 비용 없음)
     const sm = st.sourceMasks;
     const usingAuto = Object.values(sm).some((l) => l.some((m) => m.auto)) || st.clips.some((c) => c.blurMasks?.some((m) => m.auto));
@@ -224,7 +262,7 @@ export const SceneSwapModal: React.FC = () => {
       const asset = st.assets.find((x) => srcKeyOf(x.path) === srcKeyOf(sel.shot.path));
       const w = asset?.width || 1080;
       const h = asset?.height || 1920;
-      st.setStatusMessage(`장면을 바꿨습니다. 이 원본은 자동 마스크 전이라 글자를 찾는 중... (${sel.shot.file})`);
+      st.setStatusMessage(`장면을 ${fill ? '넣었' : '바꿨'}습니다. 이 원본은 자동 마스크 전이라 글자를 찾는 중... (${sel.shot.file})`);
       api
         .textMaskAnalyze({ path: sel.shot.path, width: w, height: h })
         .then((r) => {
@@ -235,9 +273,9 @@ export const SceneSwapModal: React.FC = () => {
           const auto = sourceMasksFromTracks(mergeTrackGaps(r.tracks).filter((t) => t.hasHan), { w, h }, asset?.duration || 0);
           // 되돌리기 한 번으로 이 자동 마스크만 뺄 수 있게 따로 기록
           now.setSourceAutoMasks(sel.shot.path, auto, true);
-          now.setStatusMessage(`장면을 바꿨습니다. 이 원본의 자동 마스크 ${auto.length}개를 넣었습니다.`);
+          now.setStatusMessage(`장면을 ${fill ? '넣었' : '바꿨'}습니다. 이 원본의 자동 마스크 ${auto.length}개도 넣었습니다.`);
         })
-        .catch((e) => useEditorStore.getState().setStatusMessage(`장면은 바꿨지만 글자 찾기 실패: ${(e as Error).message}`));
+        .catch((e) => useEditorStore.getState().setStatusMessage(`장면은 ${fill ? '넣었' : '바꿨'}지만 글자 찾기 실패: ${(e as Error).message}`));
     }
     close();
   };
@@ -251,7 +289,7 @@ export const SceneSwapModal: React.FC = () => {
       <div className="w-[1040px] max-w-full h-[90vh] flex flex-col bg-[#1b1b1b] border border-[#3a3a3a] rounded-lg shadow-xl" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#333]">
           <Repeat2 size={16} className="text-[#2d8ceb]" />
-          <div className="text-sm text-white font-medium">클립 변경</div>
+          <div className="text-sm text-white font-medium">{fill ? '빈 자리에 장면 넣기' : '클립 변경'}</div>
           <div className="text-[11px] text-[#888]">AI가 나눈 장면을 단계별로 · 저장된 분석만 씀(비용 없음) · 바꾼 뒤 Ctrl+Z로 되돌리기</div>
           <button className="ml-auto text-[#999] hover:text-white" onClick={close}>
             <X size={16} />
@@ -279,7 +317,9 @@ export const SceneSwapModal: React.FC = () => {
               )}
               <div className="flex-1 min-w-0 text-[12px]">
                 <div className="text-[11px] text-[#888]">
-                  지금 컷 · {clip.startTime.toFixed(2)}~{(clip.startTime + D).toFixed(2)}초 ({D.toFixed(2)}초) · 장면 {ranked.current?.id || '?'} ({curStage})
+                  {fill
+                    ? `빈 자리 · ${clip.startTime.toFixed(2)}~${(clip.startTime + D).toFixed(2)}초 (${D.toFixed(2)}초) — 이 길이에 딱 맞게 넣습니다`
+                    : `지금 컷 · ${clip.startTime.toFixed(2)}~${(clip.startTime + D).toFixed(2)}초 (${D.toFixed(2)}초) · 장면 ${ranked.current?.id || '?'} (${curStage})`}
                 </div>
                 <div className="text-white mt-0.5 leading-snug">「{ranked.text || '(자막 없음)'}」</div>
                 <div className="text-[11px] text-[#9a9a9a] mt-1 truncate">{ranked.currentDesc?.desc || ''}</div>
@@ -310,7 +350,7 @@ export const SceneSwapModal: React.FC = () => {
                   >
                     {stg} <span className="opacity-70">{n}</span>
                     {ranked.guess === stg && <span className="text-[9px] px-1 rounded bg-black/30">대사</span>}
-                    {curStage === stg && <span className="text-[9px] px-1 rounded bg-black/30">지금 장면</span>}
+                    {!fill && curStage === stg && <span className="text-[9px] px-1 rounded bg-black/30">지금 장면</span>}
                   </button>
                 );
               })}
@@ -385,7 +425,7 @@ export const SceneSwapModal: React.FC = () => {
                       </div>
                     )}
                     <button onClick={apply} className="py-1.5 rounded bg-[#2d8ceb] hover:bg-[#1e78d6] text-white text-[12px] font-medium">
-                      이 장면으로 바꾸기
+                      {fill ? '이 장면으로 넣기' : '이 장면으로 바꾸기'}
                     </button>
                   </>
                 )}

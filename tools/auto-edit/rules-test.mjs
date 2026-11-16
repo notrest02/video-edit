@@ -629,6 +629,62 @@ test('R41', '원본 마스크: 원본마다 하나 → 같은 원본의 모든 �
   }
 });
 
+test('R42', '이 시퀀스에 쓸 원본: 미디어에 두 제품 영상이 있으면 묶음을 나눠 처음 한 번 고르게, 단서로 미리 체크 (사용자 2026-11-16 물막이·제거기)', () => {
+  const SP = load('src/utils/sourcePick.ts');
+  const V = (p) => ({ path: p, name: p.split('\\').pop(), type: 'video' });
+  // ① 폴더 두 개에 이름이 같은 영상 (스크린샷 상황): 시퀀스 '물막이' + 음성 '물막이02_음성.mp3' → 물막이 폴더 미리 체크, 확인 필요
+  const two = ['D:\\일\\물막이\\1.mp4', 'D:\\일\\물막이\\2.mp4', 'D:\\일\\물막이\\3.mp4', 'D:\\일\\제거기\\1.mp4', 'D:\\일\\제거기\\2.mp4', 'D:\\일\\제거기\\3.mp4'].map(V);
+  const seqA = { name: '물막이', clips: [{ type: 'audio', name: '물막이02_음성.mp3' }], adSegments: [] };
+  const g1 = SP.guessSources(two, seqA, []);
+  assert(g1.ambiguous && g1.groups.length === 2 && g1.suggested.every((p) => p.includes('물막이')) && g1.suggested.length === 3, `폴더 둘: ${JSON.stringify(g1.suggested)}`);
+  const v1 = SP.videosForSequence(two, seqA, []);
+  assert(v1.needsChoice && v1.list.length === 3, '처음엔 확인 필요');
+  // 편집자가 정하면 그 영상만, 다시 묻지 않음
+  const v2 = SP.videosForSequence(two, { ...seqA, sourceVideos: g1.suggested }, []);
+  assert(!v2.needsChoice && v2.list.length === 3 && v2.list.every((v) => v.path.includes('물막이')), '정한 원본만');
+  // ② 한 폴더에 이름이 다른 영상 (물막이1.mp4, 제거기1.mp4 …) → 이름 앞부분으로 묶음
+  const one = ['D:\\원본\\물막이1.mp4', 'D:\\원본\\물막이2.mp4', 'D:\\원본\\제거기1.mp4', 'D:\\원본\\제거기 2.mp4'].map(V);
+  const g2 = SP.guessSources(one, { name: '제거기_01', clips: [], adSegments: [] }, []);
+  assert(g2.ambiguous && g2.groups.length === 2 && g2.suggested.length === 2 && g2.suggested.every((p) => p.includes('제거기')), `한 폴더: ${JSON.stringify(g2.groups.map((g) => g.label))} ${JSON.stringify(g2.suggested)}`);
+  // ③ 이름 단서가 없어도: 다른 시퀀스가 이미 쓴 묶음은 빼고 남은 하나
+  const other = { name: '물막이', clips: [{ type: 'video', sourcePath: 'D:\\일\\물막이\\1.mp4' }], adSegments: [] };
+  const g3 = SP.guessSources(two, { name: '새 시퀀스', clips: [], adSegments: [] }, [other]);
+  assert(g3.suggested.length === 3 && g3.suggested.every((p) => p.includes('제거기')) && g3.groups.find((g) => g.label.startsWith('물막이')).usedBy[0] === '물막이', `다른 시퀀스가 쓴 묶음 빼기: ${JSON.stringify(g3.suggested)}`);
+  // ④ 묶음이 하나면 묻지 않고 전부
+  const v4 = SP.videosForSequence(two.slice(0, 3), seqA, []);
+  assert(!v4.needsChoice && v4.list.length === 3, '묶음 하나인데 물음');
+  // 자동 배치는 정하지 않았으면 멈춤 (store 코드에 있는지)
+  const store = fs.readFileSync(path.join(ROOT, 'src/store/useEditorStore.ts'), 'utf8');
+  assert(/videosForSequence\(allVideos/.test(store) && /pickSrc\.needsChoice\) return/.test(store), '자동 배치가 고른 원본을 안 씀');
+});
+
+test('R43', '거꾸로 재생: 클립 처음 = 원본 구간 끝. 자르기 조각·늘리기 한계·마스크 시간이 모두 같은 계산 (사용자 2026-11-16)', () => {
+  const CT = load('src/utils/clipTime.ts');
+  const TB = load('src/utils/trimBounds.ts');
+  const SM = load('src/utils/sourceMask.ts');
+  const c = { sourceStart: 10, duration: 2, speed: 1, reverse: true };
+  assert(Math.abs(CT.srcAt(c, 0) - 12) < 0.05 && Math.abs(CT.srcAt(c, 2) - 10) < 1e-6 && Math.abs(CT.srcAt(c, 1.5) - 10.5) < 0.05, `원본 위치: ${CT.srcAt(c, 0)}, ${CT.srcAt(c, 2)}`);
+  // 0.5초에서 자르면: 앞 조각 = 원본 11.5~12 (거꾸로), 뒤 조각 = 원본 10~11.5 → 이어 붙이면 원래와 같음
+  assert(CT.srcOfPiece(c, 0, 0.5) === 11.5 && CT.srcOfPiece(c, 0.5, 2) === 10, `조각: ${CT.srcOfPiece(c, 0, 0.5)} / ${CT.srcOfPiece(c, 0.5, 2)}`);
+  assert(CT.srcOfPiece({ ...c, reverse: false }, 0.5, 2) === 10.5, '앞으로 재생 조각');
+  // 다듬기: 앞(왼쪽)을 줄이면 원본 끝이 줄어 sourceStart 그대로, 뒤(오른쪽)를 1초 늘리면 원본 앞쪽 1초가 더 들어감
+  assert(CT.srcAfterFrontCut(c, 0.5) === 10 && CT.srcAfterBackChange(c, 1) === 9, '다듬기');
+  // 늘리기 한계 (원본 10초짜리): 왼쪽은 원본 끝(12)~10초까지 = 8초, 오른쪽은 원본 처음(0)까지 = 길이 2+10
+  const b = TB.computeTrimBounds({ id: 'x', type: 'video', trackId: 't', startTime: 20, duration: 2, sourceStart: 10, speed: 1, reverse: true }, [], 20);
+  assert(Math.abs(b.minStartDelta + 8) < 1e-6 && Math.abs(b.maxDuration - 12) < 1e-6, `한계: ${b.minStartDelta}, ${b.maxDuration}`);
+  // 마스크: 원본 10.5~11초 글자 → 거꾸로 클립에서는 1.0~1.5초 (처음·끝이 바뀜), 고쳐서 되돌리면 원래 원본 시간
+  const map = { k: [{ id: 'm', points: [[0, 0], [1, 0], [1, 0.1], [0, 0.1]], blur: 30, feather: 6, from: 10.5, to: 11 }] };
+  const r = SM.resolveClipMasks({ ...c, sourcePath: 'k' }, map, { w: 1080, h: 1920 }, { w: 1080, h: 1920 });
+  assert(Math.abs(r[0].from - 1) < 1e-3 && Math.abs(r[0].to - 1.5) < 1e-3, `거꾸로 마스크 시간: ${r[0].from}~${r[0].to}`);
+  const w = SM.writeBackClipMasks({ ...c, sourcePath: 'k' }, [{ ...r[0], to: 1.8 }], map, { w: 1080, h: 1920 }, { w: 1080, h: 1920 });
+  assert(Math.abs(w.map.k[0].from - 10.2) < 1e-3 && Math.abs(w.map.k[0].to - 11) < 1e-3, `되돌린 원본 시간: ${w.map.k[0].from}~${w.map.k[0].to}`);
+  // 화면 코드가 같은 계산을 씀 (미리보기·내보내기·자르기)
+  const pv = fs.readFileSync(path.join(ROOT, 'src/components/PreviewPlayer.tsx'), 'utf8');
+  const ex = fs.readFileSync(path.join(ROOT, 'src/utils/exportRange.ts'), 'utf8');
+  const mn = fs.readFileSync(path.join(ROOT, 'electron/main.ts'), 'utf8');
+  assert(/srcAt\(activeVideoClip/.test(pv) && /srcOfPiece\(c, s - c.startTime/.test(ex) && /clip\.reverse \? 'reverse,'/.test(mn), '미리보기·내보내기가 같은 계산을 안 씀');
+});
+
 // ---------- 결과 ----------
 const failed = results.filter((r) => !r.ok);
 for (const r of results) console.log(`${r.ok ? '✅' : '❌'} ${r.id} ${r.name}${r.ok ? '' : `\n     → ${r.msg}`}`);

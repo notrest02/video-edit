@@ -27,6 +27,8 @@ export interface SequenceItem {
   autoEditHook?: { sec: number; fileNo: number; from: number; to: number; note: string; path?: string } | null;
   /** 한 시퀀스에 광고 여러 개를 이어 만들 때의 광고 구간 (없으면 시퀀스 전체 = 광고 1개) */
   adSegments?: AdSegment[];
+  /** 이 시퀀스에 쓸 원본 영상 경로 (편집자가 고름, R42). 없으면 자동으로 추정 */
+  sourceVideos?: string[];
   /** STEP 0 대본 만들기로 생긴 시퀀스: 그 버전 대본 (후킹 줄 포함). 시퀀스를 열면 STEP 2 대본 칸에 들어감 */
   script?: string;
 }
@@ -220,6 +222,7 @@ export interface TimelineClip {
   muted: boolean;
   scale?: number;        // 비디오 클립 크기 비율 (기본 100%)
   speed?: number;        // 재생 속도 (1 = 100%). 타임라인 길이 = 원본 사용 길이 ÷ 속도
+  reverse?: boolean;     // 거꾸로 재생 (원본 구간은 그대로, 재생 방향만 반대) — 계산은 utils/clipTime.ts
   blurMasks?: BlurMask[]; // 영상 클립: 원본에 박힌 글자 등을 흐리게 가리는 마스크
   posX?: number;         // 모션: 위치 X (출력 화면 px, 0 = 가운데)
   posY?: number;         // 모션: 위치 Y

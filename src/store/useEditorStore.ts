@@ -22,6 +22,8 @@ import {
   ScriptBasisEntry,
   BlurMask,
 } from '../types/editor';
+import { videosForSequence } from '../utils/sourcePick';
+import { srcAfterBackChange, srcOfPiece } from '../utils/clipTime';
 import { replaceSourceAutoMasks, resolveClipMasks, srcKeyOf, writeBackClipMasks, type SourceMaskMap } from '../utils/sourceMask';
 import { snapSubtitleClipsToMediaCuts } from '../utils/subtitleSnapper';
 import { voiceStartCaption, withSnapLead } from '../utils/snapLead';
@@ -173,6 +175,10 @@ interface EditorState {
   removePeriodsFromSubtitles: () => void;
   /** 장면 바꾸기 도우미: 영상 클립의 원본 장면만 바꿈 (타임라인 위치·길이는 그대로). 자동 마스크는 원본이 바뀌어 지움 */
   replaceClipSource: (clipId: string, src: { path: string; sourceStart: number; speed: number }) => void;
+  /** 빈 자리에 장면 넣기: 영상 트랙의 start~start+duration 에 원본 장면 클립을 새로 넣음 (소리 끔·꽉 채우기는 자동 배치와 같음). 새 클립 id */
+  insertSceneClip: (trackId: string, start: number, duration: number, src: { path: string; sourceStart: number; speed: number }) => string | null;
+  /** 거꾸로 재생 켜기/끄기 (영상 클립 여러 개). 원본 구간은 그대로, 재생 방향만 바뀜. 하나라도 꺼져 있으면 모두 켬, 모두 켜져 있으면 모두 끔 */
+  toggleClipsReverse: (clipIds: string[]) => void;
   applyScriptLinesDirectly: (customScript?: string) => CaptionDiffItem[];
   splitSubtitleClipAtTextCursor: (
     clipId: string,
@@ -258,6 +264,8 @@ interface EditorState {
   importAutoEditPlan: (plan: AutoEditPlan) => Promise<string>;
   /** 지금 시퀀스의 광고 구간 저장 (null = 지움 → 시퀀스 전체가 광고 1개) */
   setAdSegments: (segs: AdSegment[] | null) => void;
+  /** 이 시퀀스에 쓸 원본 영상 정하기 (R42). null = 자동 추정으로 되돌림 */
+  setSequenceSources: (paths: string[] | null) => void;
   /**
    * 한 음성에 대본 여러 버전이 들어 있을 때: 오타 변환으로 알아낸 버전 구간마다 새 시퀀스를 만들어
    * 그 구간의 음성/자막(그리고 다른 클립)을 0초부터 옮겨 담음. 후킹 지정도 시퀀스에 기억. 지금 시퀀스는 그대로.
@@ -399,6 +407,7 @@ function overwriteOverlappingClips(
         nextList.push({
           ...c,
           duration: Number(leftRemain.toFixed(4)),
+          ...(c.type !== 'text' && c.reverse ? { sourceStart: Number(srcOfPiece(c, 0, leftRemain).toFixed(4)) } : {}),
         });
       } else if (leftRemain < minRemain && rightRemain >= minRemain) {
         // 3) 기존 클립의 왼쪽 부분이 덮인 경우 -> 겹친 앞부분 삭제 및 sourceStart 이동
@@ -407,8 +416,7 @@ function overwriteOverlappingClips(
           ...c,
           startTime: Number(aEnd.toFixed(4)),
           duration: Number(rightRemain.toFixed(4)),
-          sourceStart:
-            c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta * clipSpeed(c)).toFixed(4)),
+          sourceStart: c.type === 'text' ? 0 : Number(Math.max(0, srcOfPiece(c, cutDelta, cutDelta + rightRemain)).toFixed(4)),
         });
       } else {
         // 4) 새 클립이 기존 긴 클립의 한가운데 올라온 경우 -> 가운데 겹친 구간을 삭제하고 앞/뒤로 분할
@@ -417,14 +425,14 @@ function overwriteOverlappingClips(
           {
             ...c,
             duration: Number(leftRemain.toFixed(4)),
+            ...(c.type !== 'text' && c.reverse ? { sourceStart: Number(srcOfPiece(c, 0, leftRemain).toFixed(4)) } : {}),
           },
           {
             ...c,
             id: `${c.id}_ow_${Date.now().toString(36).slice(-4)}_${Math.random().toString(36).slice(2, 5)}`,
             startTime: Number(aEnd.toFixed(4)),
             duration: Number(rightRemain.toFixed(4)),
-            sourceStart:
-              c.type === 'text' ? 0 : Number(Math.max(0, c.sourceStart + cutDelta * clipSpeed(c)).toFixed(4)),
+            sourceStart: c.type === 'text' ? 0 : Number(Math.max(0, srcOfPiece(c, cutDelta, cutDelta + rightRemain)).toFixed(4)),
           }
         );
       }
@@ -1759,6 +1767,65 @@ export const useEditorStore = create<EditorState>((set, get) => {
       });
     },
 
+    toggleClipsReverse: (clipIds) => {
+      const { clips, tracks } = get();
+      const targets = clips.filter((c) => clipIds.includes(c.id) && c.type === 'video');
+      if (!targets.length) return;
+      const on = targets.some((c) => !c.reverse);
+      pushHistory();
+      const ids = new Set(targets.map((c) => c.id));
+      const updatedClips = clips.map((c) => (ids.has(c.id) ? { ...c, reverse: on || undefined } : c));
+      set({
+        clips: updatedClips,
+        sequences: syncActiveSequenceData(tracks, updatedClips),
+        isDirty: true,
+        statusMessage: `영상 클립 ${targets.length}개를 ${on ? '거꾸로 재생으로 바꿨습니다 (미리보기는 조금 끊겨 보일 수 있고, 내보낸 영상은 매끄럽습니다)' : '원래 방향으로 되돌렸습니다'}. Ctrl+Z로 되돌릴 수 있습니다.`,
+      });
+    },
+
+    insertSceneClip: (trackId, start, duration, src) => {
+      const { clips, tracks, assets, sequence } = get();
+      const asset = assets.find((a) => srcKeyOf(a.path) === srcKeyOf(src.path));
+      if (!asset) {
+        set({ statusMessage: '그 장면의 원본 영상이 미디어에 없습니다.' });
+        return null;
+      }
+      // 겹치면 넣지 않음 (빈 자리 계산이 틀렸거나 그사이 바뀜)
+      const end = start + duration;
+      if (clips.some((c) => c.trackId === trackId && c.startTime < end - 1e-3 && c.startTime + c.duration > start + 1e-3)) {
+        set({ statusMessage: '그 자리에 이미 클립이 있습니다. 빈 자리를 다시 우클릭해 주세요.' });
+        return null;
+      }
+      pushHistory();
+      const fs = fillScale(asset.width, asset.height, sequence.width, sequence.height);
+      const id = `clip_v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const clip: TimelineClip = {
+        id,
+        trackId,
+        type: 'video',
+        name: `${asset.name} [V]`,
+        startTime: Number(start.toFixed(4)),
+        duration: Number(duration.toFixed(4)),
+        sourceStart: Number(src.sourceStart.toFixed(4)),
+        sourcePath: asset.path,
+        assetId: asset.id,
+        volume: 1,
+        muted: true, // B롤: 원본 소리 끔 (R34)
+        speed: Math.abs(src.speed - 1) > 1e-3 ? Number(src.speed.toFixed(3)) : undefined,
+        ...(fs > 100 ? { scale: fs } : {}),
+      };
+      const updatedClips = [...clips, clip];
+      set({
+        clips: updatedClips,
+        sequences: syncActiveSequenceData(tracks, updatedClips),
+        selectedClipId: id,
+        selectedClipIds: [id],
+        isDirty: true,
+        statusMessage: `빈 자리(${start.toFixed(2)}~${end.toFixed(2)}초)에 ${asset.name} ${src.sourceStart.toFixed(2)}초 장면을 넣었습니다. Ctrl+Z로 되돌릴 수 있습니다.`,
+      });
+      return id;
+    },
+
     replaceClipSource: (clipId, src) => {
       const { clips, tracks, assets, sequence } = get();
       const target = clips.find((c) => c.id === clipId);
@@ -2380,7 +2447,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
           sourceStart:
             c.type === 'text'
               ? 0
-              : Number(Math.max(0, c.sourceStart + deltaSourceStart * clipSpeed(c)).toFixed(4)),
+              : c.reverse
+                ? Number(Math.max(0, srcAfterBackChange(c, deltaDuration + deltaSourceStart)).toFixed(4))
+                : Number(Math.max(0, c.sourceStart + deltaSourceStart * clipSpeed(c)).toFixed(4)),
           snappedToClip: snapped ?? c.snappedToClip,
           // 검토 표시된 자막을 사용자가 직접 옮기거나 길이를 바꾸면 검토 완료로 본다
           ...(c.needsReview && (deltaStart !== 0 || deltaDuration !== 0) ? { needsReview: false } : {}),
@@ -2613,7 +2682,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
         const secondId = `${clip.id}_s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
         nextClips.push(
-          { ...clip, duration: firstDuration },
+          { ...clip, duration: firstDuration, ...(clip.type !== 'text' && clip.reverse ? { sourceStart: Number(srcOfPiece(clip, 0, firstDuration).toFixed(4)) } : {}) },
           {
             ...clip,
             id: secondId,
@@ -2622,7 +2691,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             sourceStart:
               clip.type === 'text'
                 ? 0
-                : Number((clip.sourceStart + firstDuration * clipSpeed(clip)).toFixed(4)),
+                : Number(srcOfPiece(clip, firstDuration, firstDuration + secondDuration).toFixed(4)),
             linkedGroupId: secondGroupId,
           }
         );
@@ -2798,14 +2867,14 @@ export const useEditorStore = create<EditorState>((set, get) => {
           continue;
         }
         nextClips.push(
-          { ...c, duration: firstDur },
+          { ...c, duration: firstDur, ...(c.type !== 'text' && c.reverse ? { sourceStart: Number(srcOfPiece(c, 0, firstDur).toFixed(4)) } : {}) },
           {
             ...c,
             id: `${c.id}_rz_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
             startTime: Number(splitTime.toFixed(4)),
             duration: secondDur,
             sourceStart:
-              c.type === 'text' ? 0 : Number((c.sourceStart + firstDur * clipSpeed(c)).toFixed(4)),
+              c.type === 'text' ? 0 : Number(srcOfPiece(c, firstDur, firstDur + secondDur).toFixed(4)),
             linkedGroupId: newLinkGroupId,
           }
         );
@@ -2964,7 +3033,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             name: `${tClip.name.replace(/\s*#\d+$/, '')} #${idx + 1}`,
             startTime: Number(startT.toFixed(4)),
             duration: Number(segDur.toFixed(4)),
-            sourceStart: Number((tClip.sourceStart + k.a * tsp).toFixed(4)),
+            sourceStart: Number((tClip.type === 'text' ? tClip.sourceStart + k.a * tsp : srcOfPiece(tClip, k.a, k.b)).toFixed(4)),
             linkedGroupId: tClip.linkedGroupId ? segmentGroupIds[idx] : undefined,
           });
         });
@@ -3403,6 +3472,15 @@ export const useEditorStore = create<EditorState>((set, get) => {
       });
     },
 
+    setSequenceSources: (paths) => {
+      const { activeSequenceId, sequences } = get();
+      if (!activeSequenceId) return;
+      set({
+        sequences: sequences.map((s) => (s.id === activeSequenceId ? { ...s, sourceVideos: paths && paths.length ? paths : undefined } : s)),
+        isDirty: true,
+      });
+    },
+
     splitVariantsIntoSequences: (ranges) => {
       const st = get();
       if (!st.activeSequenceId || ranges.length === 0) return '나눌 버전이 없습니다.';
@@ -3423,7 +3501,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             id: `${c.id}_v${r.variant + 1}_${Math.random().toString(36).slice(2, 6)}`,
             startTime: Number((a - r.start).toFixed(4)),
             duration: Number((b - a).toFixed(4)),
-            sourceStart: Number((c.sourceStart + (c.type === 'text' ? 0 : cut * (c.speed ?? 1))).toFixed(4)),
+            sourceStart: Number((c.type === 'text' ? c.sourceStart : srcOfPiece(c, cut, cut + (b - a))).toFixed(4)),
             voiceEndTime: c.voiceEndTime !== undefined ? Number((Math.min(c.voiceEndTime, r.end) - r.start).toFixed(4)) : undefined,
           });
         }
@@ -3568,7 +3646,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const activeSeq = st.sequences.find((s) => s.id === st.activeSequenceId);
       const otherSeqs = st.sequences.filter((s) => s.id !== st.activeSequenceId);
       const allVideos = st.assets.filter((a) => a.type === 'video');
-      const media = selectMediaForSequence(allVideos, activeSeq, otherSeqs, st.clips);
+      // 이 시퀀스에 쓸 원본 (R42): 편집자가 고른 목록, 없으면 추정. 묶음이 여러 개인데 안 골랐으면 멈춤 (다른 제품 장면이 섞이지 않게)
+      const pickSrc = videosForSequence(allVideos, activeSeq, otherSeqs, st.clips);
+      if (pickSrc.needsChoice) return '미디어에 원본 영상 묶음이 여러 개입니다. 자동 배치 칸의 [이번에 쓸 원본]에서 이 시퀀스에 쓸 영상을 먼저 골라 주세요.';
+      const media = pickSrc.list;
       if (media.length === 0) return '미디어에 원본 영상이 없습니다. 영상을 미디어에 올려 주세요.';
       // 광고 구간: 저장된 구간이 있으면 구간별로, 없으면 시퀀스 전체가 광고 1개 (UI 의 후킹 지정 사용)
       const savedSegs = activeSeq?.adSegments || [];

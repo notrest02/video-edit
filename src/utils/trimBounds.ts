@@ -13,7 +13,7 @@ export interface TrimBounds {
  * - 미디어 클립은 원본 파일 범위(0초 ~ assetDuration) 안에서만 늘어남
  */
 export function computeTrimBounds(
-  clip: Pick<TimelineClip, 'id' | 'type' | 'trackId' | 'startTime' | 'duration' | 'sourceStart' | 'speed'>,
+  clip: Pick<TimelineClip, 'id' | 'type' | 'trackId' | 'startTime' | 'duration' | 'sourceStart' | 'speed' | 'reverse'>,
   allClips: ReadonlyArray<Pick<TimelineClip, 'id' | 'trackId' | 'startTime' | 'duration'>>,
   assetDuration?: number
 ): TrimBounds {
@@ -35,15 +35,29 @@ export function computeTrimBounds(
 
   const safePrevEnd = Math.min(clip.startTime, prevEnd);
   const byNeighborStart = safePrevEnd - clip.startTime;
-  const bySourceStart = clip.type === 'text' ? -clip.startTime : -clip.sourceStart / sp;
+  // 거꾸로 재생: 왼쪽 끝 = 원본 구간의 끝, 오른쪽 끝 = 원본 구간의 처음 → 늘릴 수 있는 한계가 서로 바뀜
+  const spanEnd = clip.sourceStart + clip.duration * sp;
+  const hasAsset = typeof assetDuration === 'number' && assetDuration > 0;
+  const bySourceStart =
+    clip.type === 'text'
+      ? -clip.startTime
+      : clip.reverse
+        ? hasAsset
+          ? -(assetDuration! - spanEnd) / sp
+          : -Infinity
+        : -clip.sourceStart / sp;
   const minStartDelta = Math.max(byNeighborStart, bySourceStart);
 
   const safeNextStart = Math.max(clipEnd, nextStart);
   const byNeighborEnd = safeNextStart - clip.startTime;
   const bySourceEnd =
-    clip.type !== 'text' && typeof assetDuration === 'number' && assetDuration > 0
-      ? Math.max(clip.duration, (assetDuration - clip.sourceStart) / sp)
-      : Infinity;
+    clip.type === 'text'
+      ? Infinity
+      : clip.reverse
+        ? clip.duration + clip.sourceStart / sp
+        : hasAsset
+          ? Math.max(clip.duration, (assetDuration! - clip.sourceStart) / sp)
+          : Infinity;
   const maxDuration = Math.min(byNeighborEnd, bySourceEnd);
 
   return { minStartDelta, maxDuration };

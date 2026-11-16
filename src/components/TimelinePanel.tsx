@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { ClipContextMenu } from './ClipContextMenu';
+import { openSceneFill } from './SceneSwapModal';
 import {
   useEditorStore,
   clipSpeed,
@@ -112,7 +113,7 @@ export const TimelinePanel: React.FC = () => {
   }, [assetsForCuts]);
   // 클립 우클릭 메뉴 (속도/길이 조절, 자르기, 복사/붙여넣기)
   const [clipMenu, setClipMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
-  const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);
+  const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number; gap?: { trackId: string; start: number; end: number } } | null>(null);
   const openClipMenu = (e: React.MouseEvent, clip: TimelineClip) => {
     e.preventDefault();
     e.stopPropagation();
@@ -122,10 +123,29 @@ export const TimelinePanel: React.FC = () => {
     setClipMenu({ clipId: clip.id, x: e.clientX, y: e.clientY });
   };
   const openEmptyMenu = (e: React.MouseEvent) => {
-    if (useEditorStore.getState().copiedClips.length === 0) return;
+    const st = useEditorStore.getState();
+    // 영상 트랙 빈 자리 (앞 클립 끝 ~ 뒤 클립 시작) → '이 빈 자리에 장면 넣기' (사용자 2026-11-16)
+    let gap: { trackId: string; start: number; end: number } | undefined;
+    const lane = (e.target as HTMLElement).closest('[data-track-id]') as HTMLElement | null;
+    const track = lane ? st.tracks.find((t) => t.id === lane.dataset.trackId) : undefined;
+    if (lane && track && track.type === 'video' && !track.locked) {
+      const t = Math.max(0, (e.clientX - lane.getBoundingClientRect().left) / zoomPxPerSec);
+      const on = st.clips.filter((c) => c.trackId === track.id).sort((a, b) => a.startTime - b.startTime);
+      const inside = on.some((c) => t >= c.startTime && t < c.startTime + c.duration);
+      if (!inside) {
+        const prev = [...on].reverse().find((c) => c.startTime + c.duration <= t + 1e-3);
+        const next = on.find((c) => c.startTime >= t - 1e-3);
+        // 앞·뒤 클립이 없으면 그 위치 자막의 처음·끝까지
+        const cap = st.clips.find((c) => c.type === 'text' && t >= c.startTime && t < c.startTime + c.duration);
+        const start = prev ? prev.startTime + prev.duration : cap ? Math.max(0, cap.startTime) : t;
+        const end = next ? next.startTime : cap ? cap.startTime + cap.duration : t + 2;
+        if (end - start >= 0.1) gap = { trackId: track.id, start: +start.toFixed(4), end: +end.toFixed(4) };
+      }
+    }
+    if (!gap && st.copiedClips.length === 0) return;
     e.preventDefault();
     setClipMenu(null);
-    setEmptyMenu({ x: e.clientX, y: e.clientY });
+    setEmptyMenu({ x: e.clientX, y: e.clientY, gap });
   };
   // 타임라인 본문(트랙 헤더 + 레인) 전체: 휠 조작(이동/줌/트랙 높이)을 받는 영역
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
@@ -1303,6 +1323,11 @@ export const TimelinePanel: React.FC = () => {
                                     ⚠ 검토
                                   </span>
                                 )}
+                                {showIconBadge && clip.type === 'video' && clip.reverse && (
+                                  <span className="text-[9px] bg-black/50 text-[#8ad4ff] px-1 rounded shrink-0" title="거꾸로 재생 (우클릭으로 끄기)">
+                                    ◀
+                                  </span>
+                                )}
                                 {showTextBadge && clip.type !== 'text' && clipSpeed(clip) !== 1 && (
                                   <span
                                     className="text-[9px] bg-black/50 text-[#ffd479] px-1 rounded shrink-0"
@@ -1519,22 +1544,37 @@ export const TimelinePanel: React.FC = () => {
           <div
             style={{
               left: Math.min(emptyMenu.x, window.innerWidth - 230),
-              top: Math.min(emptyMenu.y, window.innerHeight - 48),
+              top: Math.min(emptyMenu.y, window.innerHeight - 80),
               width: 220,
             }}
             onContextMenu={(e) => e.preventDefault()}
             className="fixed z-[100] bg-[#232323] border border-[#3d3d3d] rounded shadow-2xl text-[11px] text-[#dddddd] py-1 select-none"
           >
-            <button
-              onClick={() => {
-                useEditorStore.getState().pasteCopiedClips();
-                setEmptyMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
-            >
-              <span>현재 재생 위치에 붙여넣기</span>
-              <span className="text-[#888888]">Ctrl+V</span>
-            </button>
+            {emptyMenu.gap && (
+              <button
+                onClick={() => {
+                  openSceneFill(emptyMenu.gap!);
+                  setEmptyMenu(null);
+                }}
+                className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+                title="이 빈 자리 길이에 딱 맞게, AI가 나눈 장면을 단계별로 보고 골라 넣습니다 (비용 없음)"
+              >
+                <span>이 빈 자리에 장면 넣기…</span>
+                <span className="text-[#888888]">{(emptyMenu.gap.end - emptyMenu.gap.start).toFixed(2)}초</span>
+              </button>
+            )}
+            {useEditorStore.getState().copiedClips.length > 0 && (
+              <button
+                onClick={() => {
+                  useEditorStore.getState().pasteCopiedClips();
+                  setEmptyMenu(null);
+                }}
+                className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+              >
+                <span>현재 재생 위치에 붙여넣기</span>
+                <span className="text-[#888888]">Ctrl+V</span>
+              </button>
+            )}
           </div>
         </>
       )}

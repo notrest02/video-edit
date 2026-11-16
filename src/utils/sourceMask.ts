@@ -37,14 +37,16 @@ function touches(m: BlurMask, s0: number, s1: number) {
 }
 
 /** 원본 마스크 하나 → 클립에서 보이는 모습 (클립 안 초, 클립 기본 화면 좌표). from/to 는 클립 밖이어도 자르지 않음 (되돌릴 때 원본 구간이 줄지 않게) */
-function toClip(m: BlurMask, key: string, s0: number, sp: number, fit: ReturnType<typeof fitMapper>): BlurMask {
-  const t = (s: number) => +((s - s0) / sp).toFixed(4);
+type Dir = { rev: boolean; dur: number };
+function toClip(m: BlurMask, key: string, s0: number, sp: number, fit: ReturnType<typeof fitMapper>, d: Dir = { rev: false, dur: 0 }): BlurMask {
+  const t = (s: number) => +(d.rev ? d.dur - (s - s0) / sp : (s - s0) / sp).toFixed(4);
+  const [fa, ta] = d.rev ? [m.to, m.from] : [m.from, m.to];
   const out: BlurMask = {
     ...m,
     points: m.points.map(fit.toOut),
-    from: m.from === undefined ? undefined : t(m.from),
-    to: m.to === undefined ? undefined : t(m.to),
-    keyframes: m.keyframes?.map((f) => ({ ...f, t: t(f.t), points: f.points.map(fit.toOut) })),
+    from: fa === undefined ? undefined : t(fa),
+    to: ta === undefined ? undefined : t(ta),
+    keyframes: m.keyframes?.map((f) => ({ ...f, t: t(f.t), points: f.points.map(fit.toOut) })).sort((a, b) => a.t - b.t),
     src: key,
   };
   if (!out.keyframes) delete out.keyframes;
@@ -53,14 +55,15 @@ function toClip(m: BlurMask, key: string, s0: number, sp: number, fit: ReturnTyp
 }
 
 /** 클립에서 보이는 모습 → 원본 마스크 */
-function toSource(m: BlurMask, s0: number, sp: number, fit: ReturnType<typeof fitMapper>): BlurMask {
-  const s = (t: number) => +(s0 + t * sp).toFixed(4);
+function toSource(m: BlurMask, s0: number, sp: number, fit: ReturnType<typeof fitMapper>, d: Dir = { rev: false, dur: 0 }): BlurMask {
+  const s = (t: number) => +(d.rev ? s0 + (d.dur - t) * sp : s0 + t * sp).toFixed(4);
+  const [fa, ta] = d.rev ? [m.to, m.from] : [m.from, m.to];
   const out: BlurMask = {
     ...m,
     points: m.points.map(fit.toSrc),
-    from: m.from === undefined ? undefined : s(m.from),
-    to: m.to === undefined ? undefined : s(m.to),
-    keyframes: m.keyframes?.map((f) => ({ ...f, t: s(f.t), points: f.points.map(fit.toSrc) })),
+    from: fa === undefined ? undefined : s(fa),
+    to: ta === undefined ? undefined : s(ta),
+    keyframes: m.keyframes?.map((f) => ({ ...f, t: s(f.t), points: f.points.map(fit.toSrc) })).sort((a, b) => a.t - b.t),
   };
   if (!out.keyframes) delete out.keyframes;
   delete out.src;
@@ -84,7 +87,7 @@ function same(a: BlurMask, b: BlurMask): boolean {
 
 /** 클립에 보일 마스크 = 원본 마스크(바꿔서) + 이 클립만 마스크. 순서: 원본 마스크 먼저 */
 export function resolveClipMasks(
-  clip: Pick<TimelineClip, 'sourcePath' | 'sourceStart' | 'duration' | 'speed' | 'blurMasks'>,
+  clip: Pick<TimelineClip, 'sourcePath' | 'sourceStart' | 'duration' | 'speed' | 'blurMasks' | 'reverse'>,
   map: SourceMaskMap | undefined,
   src: Dim,
   out: Dim
@@ -94,7 +97,8 @@ export function resolveClipMasks(
   const s0 = clip.sourceStart;
   const s1 = s0 + clip.duration * sp;
   const fit = fitMapper(src, out);
-  const fromSrc = (map?.[key] || []).filter((m) => touches(m, s0, s1)).map((m) => toClip(m, key, s0, sp, fit));
+  const dir = { rev: !!clip.reverse, dur: clip.duration };
+  const fromSrc = (map?.[key] || []).filter((m) => touches(m, s0, s1)).map((m) => toClip(m, key, s0, sp, fit, dir));
   const own = (clip.blurMasks || []).map((m) => ({ ...m, clipOnly: true }));
   return [...fromSrc, ...own];
 }
@@ -106,7 +110,7 @@ export function resolveClipMasks(
  *  - 바뀌지 않은 원본 마스크는 저장된 값을 그대로 둠 (좌표 변환 반올림이 쌓이지 않게)
  */
 export function writeBackClipMasks(
-  clip: Pick<TimelineClip, 'sourcePath' | 'sourceStart' | 'duration' | 'speed' | 'blurMasks'>,
+  clip: Pick<TimelineClip, 'sourcePath' | 'sourceStart' | 'duration' | 'speed' | 'blurMasks' | 'reverse'>,
   next: BlurMask[],
   map: SourceMaskMap | undefined,
   src: Dim,
@@ -131,8 +135,9 @@ export function writeBackClipMasks(
       continue;
     }
     const orig = byId.get(m.id);
-    const unchanged = !!orig && same(toClip(orig, key, s0, sp, fit), m);
-    const sm = unchanged ? orig! : toSource(m, s0, sp, fit);
+    const dir = { rev: !!clip.reverse, dur: clip.duration };
+    const unchanged = !!orig && same(toClip(orig, key, s0, sp, fit, dir), m);
+    const sm = unchanged ? orig! : toSource(m, s0, sp, fit, dir);
     // '이 클립만' → 원본으로 옮길 때는 새 id (자르기·복사로 같은 id 의 이 클립만 마스크가 다른 클립에도 있을 수 있음 → id 가 겹치면 지우기·고치기가 둘 다에 걸림)
     if (!orig && m.clipOnly === false) sm.id = `${m.id}_s${Math.random().toString(36).slice(2, 7)}`;
     nextSrc.push(sm);

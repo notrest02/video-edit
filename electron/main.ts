@@ -1261,6 +1261,8 @@ ipcMain.handle(
         duration: number;
         sourceStart: number;
         speed?: number;
+        /** 거꾸로 재생 (원본 구간은 sourceStart~ 그대로, 재생 방향만 반대) */
+        reverse?: boolean;
         volume: number;
         muted: boolean;
         /** 블러 마스크: 흑백 PNG(흰색=흐리게, 출력 크기) + 블러 강도 */
@@ -1382,7 +1384,8 @@ ipcMain.handle(
         //  (클립 시작이 프레임 경계와 미세하게 어긋날 때, AI 자동 배치에서 자주) → 마지막 프레임을 2프레임 복제해 메움.
         //  보이는 구간은 아래 overlay enable 이 정하므로 다음 장면이 비치지는 않음 (2026-11-02)
         filterParts.push(
-          `[${vIdx}:v]setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${startAt(clip.startTime)}/TB${vScaled}`
+          // 거꾸로 재생: 잘라 온 구간(-ss ~ -t)을 통째로 뒤집은 뒤 같은 처리 (컷이 짧아 메모리 문제 없음)
+          `[${vIdx}:v]${clip.reverse ? 'reverse,' : ''}setpts=(PTS-STARTPTS)/${vSpeed.toFixed(5)},scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps=${fps},tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(4)},setpts=PTS-STARTPTS+${startAt(clip.startTime)}/TB${vScaled}`
         );
         // 블러 마스크: 클립 화면을 흐리게 한 복사본을 마스크 모양(흰 곳)만 원래 화면 위에 덮음
         let clipLabel = vScaled;
@@ -1470,7 +1473,7 @@ ipcMain.handle(
           const delayMs = Math.round(clip.startTime * 1000);
           const aLabel = `[vaud_${i}]`;
           filterParts.push(
-            `[${vIdx}:a]aresample=44100${atempoChain(vSpeed)},volume=${clip.volume.toFixed(2)},adelay=${delayMs}|${delayMs}${aLabel}`
+            `[${vIdx}:a]${clip.reverse ? 'areverse,' : ''}aresample=44100${atempoChain(vSpeed)},volume=${clip.volume.toFixed(2)},adelay=${delayMs}|${delayMs}${aLabel}`
           );
           audioMixLabels.push(aLabel);
         }

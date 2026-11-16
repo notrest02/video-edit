@@ -4,6 +4,7 @@
  */
 import { blurPointsAt, maskPngDataUrl } from './blurMask';
 import { effectiveMasks } from './autoMask';
+import { srcOfPiece } from './clipTime';
 import { hasTextMotionKeyframes, resolveTextAt, shiftKeyframes } from './keyframes';
 import { renderSubtitleClipToPngDataUrl } from './subtitleCanvasRenderer';
 import { ensureFontsForValues } from './pcFonts';
@@ -34,8 +35,8 @@ export function clipToRange(c: TimelineClip, rangeStart: number, rangeEnd: numbe
     }),
     startTime: s - rangeStart,
     duration: e - s,
-    sourceStart:
-      c.type === 'text' ? c.sourceStart : c.sourceStart + (s - c.startTime) * (c.speed && c.speed > 0 ? c.speed : 1),
+    // 잘라낸 조각의 원본 구간 (거꾸로 재생이면 반대쪽 — clipTime.srcOfPiece)
+    sourceStart: c.type === 'text' ? c.sourceStart : srcOfPiece(c, s - c.startTime, e - c.startTime),
   };
 }
 
@@ -78,6 +79,7 @@ export async function exportRange(
               rotation: c.rotation,
               opacity: c.opacity,
               keyframes: c.keyframes,
+              reverse: c.reverse || undefined,
               // 블러 마스크 (자동 마스크는 컷 앞뒤 끝까지 늘린 계산 — 미리보기와 같음, R26)
               //  원본 마스크(R41)는 잘라낸 뒤의 원본 구간으로 다시 계산 (미리보기와 같은 clipMasksOf)
               masks: effectiveMasks(useEditorStore.getState().clipMasksOf(c), c.duration).map((m) => ({

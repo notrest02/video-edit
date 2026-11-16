@@ -65,7 +65,7 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
 
   // 화면 밖으로 나가지 않게 위치 보정
   const W = 250;
-  const H = isText ? 120 : 480;
+  const H = isText ? 120 : 510;
   const left = Math.min(x, window.innerWidth - W - 8);
   const top = Math.min(y, window.innerHeight - H - 8);
 
@@ -163,6 +163,14 @@ export const ClipContextMenu: React.FC<{ clipId: string; x: number; y: number; o
             title="AI가 나눈 장면을 단계별로 보고 이 컷의 장면을 바꿉니다 (타임라인 길이는 그대로, 비용 없음)"
           >
             클립 변경…
+          </button>
+          <button
+            onClick={() => run(() => st.toggleClipsReverse(frameTargets))}
+            className="w-full text-left px-3 py-1.5 hover:bg-[#2d8ceb] hover:text-white flex justify-between"
+            title="영상을 거꾸로 재생합니다 (원본 구간·길이는 그대로). 미리보기는 조금 끊겨 보일 수 있고 내보낸 영상은 매끄럽습니다"
+          >
+            <span>{clip.reverse ? '✓ ' : ''}거꾸로 재생</span>
+            {frameTargets.length > 1 && <span className="text-[#888888]">{frameTargets.length}개</span>}
           </button>
           <div className="h-px bg-[#3a3a3a] my-1" />
           <button

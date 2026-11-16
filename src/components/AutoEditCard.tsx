@@ -7,6 +7,7 @@ import { ClaudeKeyBox, useClaudeKey } from './ClaudeKeyBox';
 import { useEditorStore } from '../store/useEditorStore';
 import type { AdSegment, MediaAsset } from '../types/editor';
 import { videoNumbers } from '../utils/scriptGen';
+import { guessSources, videosForSequence } from '../utils/sourcePick';
 
 const box = 'bg-[#202020] border border-[#2e2e2e] rounded-lg p-3 space-y-2 text-xs';
 const input =
@@ -33,8 +34,21 @@ export const AutoEditCard: React.FC = () => {
   const [progress, setProgress] = useState('');
   const [folder, setFolder] = useState<{ name: string; files: Array<{ path: string; checked: boolean }> } | null>(null);
 
-  const videos = assets.filter((a: MediaAsset) => a.type === 'video');
+  const allVideos = assets.filter((a: MediaAsset) => a.type === 'video');
   const activeSequenceId = useEditorStore((s) => s.activeSequenceId);
+  // 이 시퀀스에 쓸 원본 (R42): 미디어에 두 제품 영상이 같이 있으면 섞이지 않게 시퀀스마다 고름
+  const sequences = useEditorStore((s) => s.sequences);
+  const clipsNow = useEditorStore((s) => s.clips);
+  const setSequenceSources = useEditorStore((s) => s.setSequenceSources);
+  const seqNow = sequences.find((q) => q.id === activeSequenceId);
+  const others = sequences.filter((q) => q.id !== activeSequenceId);
+  const pick = useMemo(() => videosForSequence(allVideos, seqNow, others, clipsNow), [allVideos, seqNow, others, clipsNow]);
+  const guess = useMemo(() => guessSources(allVideos, seqNow, others, clipsNow), [allVideos, seqNow, others, clipsNow]);
+  const videos = pick.list;
+  const [draft, setDraft] = useState<Set<string> | null>(null);
+  // 이름이 같은 영상이 여러 개면 폴더 이름을 붙여 보여 줌 (예: 물막이/1.mp4)
+  const dupName = (v: MediaAsset) => allVideos.filter((x) => x.name === v.name).length > 1;
+  const showName = (v: MediaAsset) => (dupName(v) ? `${v.path.split(/[\\/]/).slice(-2, -1)[0]}/${v.name}` : v.name);
   const seqHook = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.autoEditHook ?? null);
   const segs = useEditorStore((s) => s.sequences.find((q) => q.id === s.activeSequenceId)?.adSegments) || [];
   const setAdSegments = useEditorStore((s) => s.setAdSegments);
@@ -156,11 +170,92 @@ export const AutoEditCard: React.FC = () => {
       {/* 원본 영상 */}
       <div className="space-y-1 border-t border-[#2e2e2e] pt-2">
         <div className="flex items-center justify-between text-[11px]">
-          <span className="text-[#cccccc]">원본 영상 (미디어): {videos.length}개</span>
+          <span className="text-[#cccccc]">
+            이번에 쓸 원본: {pick.needsChoice ? '정해야 함' : `${videos.length}개`} / 미디어 {allVideos.length}개
+          </span>
           <button onClick={pickFolder} className={`${btn} bg-[#2b2b2b] text-[#dddddd] flex items-center gap-1`}>
             <FolderOpen className="w-3 h-3" /> 폴더에서 가져오기
           </button>
         </div>
+        {guess.ambiguous && (
+          <div className="flex items-center gap-1.5 text-[10px]">
+            <span className="text-[#999999] truncate flex-1">
+              {pick.decided && seqNow?.sourceVideos?.length
+                ? videos.map(showName).join(', ')
+                : pick.needsChoice
+                  ? '미디어에 원본 묶음이 여러 개입니다 — 이 시퀀스에 쓸 영상을 골라 주세요 (다른 제품 장면이 섞이지 않게)'
+                  : ''}
+            </span>
+            <button
+              onClick={() => setDraft(draft ? null : new Set(videos.map((v) => v.path)))}
+              className={`${btn} ${pick.needsChoice && !draft ? 'bg-[#e5a038] text-black' : 'bg-[#2b2b2b] text-[#dddddd]'}`}
+            >
+              {draft ? '닫기' : pick.needsChoice ? '원본 고르기' : '바꾸기'}
+            </button>
+          </div>
+        )}
+        {draft && (
+          <div className="bg-[#14161a] border border-[#e5a038]/50 rounded p-2 space-y-1.5">
+            <div className="text-[10px] text-[#aaaaaa]">이 시퀀스({seqNow?.name})에 쓸 원본 영상 — 맞을 것 같은 묶음을 미리 체크했어요</div>
+            <div className="max-h-48 overflow-y-auto space-y-1.5">
+              {guess.groups.map((g) => {
+                const all = g.paths.every((p) => draft.has(p));
+                return (
+                  <div key={g.key} className="space-y-0.5">
+                    <label className="flex items-center gap-1.5 text-[11px] text-white cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={all}
+                        onChange={(e) => {
+                          const n = new Set(draft);
+                          g.paths.forEach((p) => (e.target.checked ? n.add(p) : n.delete(p)));
+                          setDraft(n);
+                        }}
+                        className="accent-[#2d8ceb]"
+                      />
+                      <span className="font-semibold">{g.label}</span>
+                      {g.usedBy.length > 0 && <span className="text-[10px] text-[#f0b46a]">({g.usedBy.join('·')} 에서 씀)</span>}
+                      {g.usedHere && <span className="text-[10px] text-[#7fd6a0]">(이 시퀀스에서 씀)</span>}
+                    </label>
+                    <div className="pl-5 flex flex-wrap gap-x-2 gap-y-0.5">
+                      {g.paths.map((p) => (
+                        <label key={p} className="flex items-center gap-1 text-[10px] text-[#cccccc] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={draft.has(p)}
+                            onChange={(e) => {
+                              const n = new Set(draft);
+                              e.target.checked ? n.add(p) : n.delete(p);
+                              setDraft(n);
+                            }}
+                            className="accent-[#2d8ceb]"
+                          />
+                          {p.split(/[\\/]/).pop()}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex gap-1">
+              <button
+                onClick={() => {
+                  setSequenceSources([...draft]);
+                  setDraft(null);
+                  setStatusMessage(`이 시퀀스에 쓸 원본 영상 ${draft.size}개를 정했습니다.`);
+                }}
+                disabled={draft.size === 0}
+                className={`${btn} bg-[#2d8ceb] text-white flex-1`}
+              >
+                이 영상 {draft.size}개로 정하기
+              </button>
+              <button onClick={() => setDraft(null)} className={`${btn} bg-[#2b2b2b] text-[#dddddd]`}>
+                취소
+              </button>
+            </div>
+          </div>
+        )}
         {folder && (
           <div className="bg-[#14161a] border border-[#2e3440] rounded p-2 space-y-1">
             <div className="text-[10px] text-[#aaaaaa]">
@@ -239,7 +334,7 @@ export const AutoEditCard: React.FC = () => {
                       <option value="">후킹: AI가 고름</option>
                       {videos.map((v) => (
                         <option key={v.id} value={v.id}>
-                          {nums.get(v.id)}번 {v.name}
+                          {nums.get(v.id)}번 {showName(v)}
                         </option>
                       ))}
                     </select>
@@ -283,7 +378,7 @@ export const AutoEditCard: React.FC = () => {
               <option value="">영상 선택</option>
               {videos.map((v) => (
                 <option key={v.id} value={v.id}>
-                  {v.name}
+                  {showName(v)}
                 </option>
               ))}
             </select>
@@ -298,15 +393,15 @@ export const AutoEditCard: React.FC = () => {
 
       <button
         onClick={run}
-        disabled={busy || !hasKey || videos.length === 0}
+        disabled={busy || !hasKey || videos.length === 0 || pick.needsChoice}
         className="w-full py-2 bg-[#2d8ceb] hover:bg-[#1e78d6] disabled:opacity-45 text-white font-semibold rounded flex items-center justify-center gap-1.5 transition"
       >
         {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Clapperboard className="w-3.5 h-3.5" />}
-        AI 자동 배치 실행
+        {pick.needsChoice ? '이번에 쓸 원본을 먼저 골라 주세요' : 'AI 자동 배치 실행'}
       </button>
       <button
         onClick={analyzeOnly}
-        disabled={busy || !hasKey || videos.length === 0}
+        disabled={busy || !hasKey || videos.length === 0 || pick.needsChoice}
         className={`${btn} w-full bg-[#2b2b2b] text-[#dddddd] disabled:opacity-45`}
         title="자동 배치 없이 원본 영상의 장면 설명만 만들거나 새 항목으로 다시 만듭니다 (한 번 하면 저장)"
       >
